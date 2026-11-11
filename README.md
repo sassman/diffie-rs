@@ -25,13 +25,16 @@ Requires a recent stable Rust (edition 2024) and `git` on the PATH.
 
 ```sh
 cargo test -p diffie-core
-cargo run -p diffie -- --target main /path/to/repository
+cargo run -p diffie -- -C /path/to/repository main
 ```
 
 The first build compiles GPUI and takes several minutes.
 
-`review` reviews the changes in `--source` (default: the checked-out branch)
-going into `--target` (default: `main`).
+`diffie` reads like `git diff`: no revision reviews the uncommitted changes
+going into the checked-out branch, one revision reviews everything the
+working tree adds going into it, two revisions (or `A..B`) review the second
+going into the first. `-C <path>` picks the project (default: the current
+directory).
 
 ### Linux packages
 

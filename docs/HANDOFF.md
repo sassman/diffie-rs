@@ -48,12 +48,14 @@ Be exact about this when you report further work.
 cargo test -p diffie-core
 cargo check -p diffie      # first run compiles GPUI: about 8 minutes on 2 cores
                                # (a full debug build: about 13)
-cargo run -p diffie -- --target main /path/to/repository
+cargo run -p diffie -- -C /path/to/repository main
 ```
 
-Arguments: `--source REV` (default: the checked-out branch), `--target REV`
-(default `main`), `--every-difference`, then the repository path. With
-neither `--source` nor `--target`, the review is the working tree's
+Arguments read like `git diff`: `-C <path>` picks the project, positional
+revisions pick the comparison (none: uncommitted into the checked-out
+branch; one: the working tree into it; two or `A..B`: the second into the
+first), `--source`/`--target`/`--every-difference` stay as the explicit
+form. With no revision at all, the review is the working tree's
 uncommitted changes going into the checked-out branch
 (`Comparison::uncommitted`): the diff runs against a scratch index seeded
 with intent-to-add entries so untracked files show, ticks hash the file on

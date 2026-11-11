@@ -1467,10 +1467,14 @@ impl ReviewApp {
                     div()
                         .text_color(muted)
                         .truncate()
-                        .child(if self.comparison.uncommitted {
+                        .child(if !self.comparison.uncommitted {
+                            "only what the branch adds"
+                        } else if self.comparison.source == "uncommitted" {
                             "only what is not yet committed"
                         } else {
-                            "only what the branch adds"
+                            // Against another revision the diff also carries
+                            // commits, so "uncommitted" would understate it.
+                            "everything the working tree adds"
                         }),
                 )
                 .child(div().flex_1())

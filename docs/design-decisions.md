@@ -91,6 +91,13 @@ Decided:
   uncommitted changes (untracked files included) going into the checked-out
   branch, shown as "uncommitted going into `branch`" (owner, 2026-11-11).
   The swap button hides there; the working tree cannot be a target.
+- The command line reads like `git diff` (owner, 2026-11-11): positional
+  revisions, `-C <path>` for the project, no positional path. One revision
+  reviews the working tree going into it ("working tree going into `rev`"
+  unless the revision is the checked-out branch, which is the uncommitted
+  review); two revisions or `A..B` review the second going into the first.
+  Two and three dots resolve the same way; the merge-base rule already
+  governs the comparison.
 
 Assumed:
 

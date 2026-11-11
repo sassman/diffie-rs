@@ -112,7 +112,7 @@ When calling git:
 ```sh
 cargo test -p diffie-core          # fast, no UI
 cargo check -p diffie          # first run compiles GPUI: several minutes
-cargo run -p diffie -- --target main /path/to/repository
+cargo run -p diffie -- -C /path/to/repository main
 cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
