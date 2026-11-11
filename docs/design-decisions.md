@@ -59,7 +59,7 @@ dependency and pins it exactly.
 Decided:
 
 - Two crates. `review-core` has no UI dependency: repository access, diff
-  production, the review file. `review-app` is the GPUI Kit UI.
+  production, the review file. `diffie` is the GPUI Kit UI.
 - The UI talks to the repository only through the `ReviewBackend` trait.
 - The first backend is deliberately cheap: it shells out to `git`. The owner
   does not want effort spent there until the UI and flow have settled. A real
@@ -354,7 +354,7 @@ Ask the owner; do not decide these silently.
    panel only; the mockup also shows them as collapsed headers in the diff.
 10. **Theme picker.** The scaffold only toggles light and dark. GPUI Kit ships
     a theme registry.
-11. **The app's name.** `diff-review`, `review-core`, `review-app` and the
-    binary `review` are placeholders.
-12. **Scale.** The commit picker and file panel are not virtualized. Fine for
-    dozens, not for thousands.
+11. **The app's name.** The app crate and binary are `diffie` (owner,
+    2026-11-11). `diff-review` and `review-core` remain placeholders.
+12. **Scale.** The commit picker is not virtualized (the file panel is).
+    Fine for dozens, not for thousands.

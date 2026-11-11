@@ -32,7 +32,7 @@ Be exact about this when you report further work.
 | --- | --- |
 | `cargo test -p review-core`: 24 tests pass | Verified on Linux, git 2.43 |
 | `cargo clippy --workspace --all-targets` is clean | Verified |
-| `cargo check -p review-app` compiles with no warnings | Verified on Linux, Rust 1.97, gpui-kit 0.9.1 |
+| `cargo check -p diffie` compiles with no warnings | Verified on Linux, Rust 1.97, gpui-kit 0.9.1 |
 | The window opens and renders | Verified on Linux under Xvfb with a software Vulkan driver (lavapipe). Screenshots in `docs/screenshots/` |
 | Driven with simulated clicks and keys (xdotool), on a 6-commit demo repository: commit picker opens; unchecking a commit gives a combined diff with "1 skipped"; line selection; `c` opens the comment box; typing; Cmd/Ctrl+Enter saves; the comment is anchored by blame and reappears after a restart; reaction picker and chips; "Reviewed" by checkbox and by `r`, and after a restart the ticked file leaves the "New for me" diff; `s`; Whole branch; collapse all; light theme | Verified once each, by screenshot and by reading the review file |
 | Everything else interactive: swap, expand all, next and previous file or change, other-revisions toggle with real data, copy as prompt, delete, Escape, scope keys, sidebar toggle, colleagues' files | Not exercised |
@@ -46,9 +46,9 @@ Be exact about this when you report further work.
 
 ```sh
 cargo test -p review-core
-cargo check -p review-app      # first run compiles GPUI: about 8 minutes on 2 cores
+cargo check -p diffie      # first run compiles GPUI: about 8 minutes on 2 cores
                                # (a full debug build: about 13)
-cargo run -p review-app -- --target main /path/to/repository
+cargo run -p diffie -- --target main /path/to/repository
 ```
 
 Arguments: `--source REV` (default: the checked-out branch), `--target REV`

@@ -15,7 +15,7 @@ This is an early scaffold. Start with:
 
 ```text
 crates/core   review-core: repository access, diffs, the review file. No UI.
-crates/app    review-app: the GPUI Kit window. Binary name: review.
+crates/app    diffie: the GPUI Kit window and binary.
 docs/         design decisions, handoff, mockup
 ```
 
@@ -25,7 +25,7 @@ Requires a recent stable Rust (edition 2024) and `git` on the PATH.
 
 ```sh
 cargo test -p review-core
-cargo run -p review-app -- --target main /path/to/repository
+cargo run -p diffie -- --target main /path/to/repository
 ```
 
 The first build compiles GPUI and takes several minutes.
