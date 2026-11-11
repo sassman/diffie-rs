@@ -182,9 +182,12 @@ Decided:
 - File boundaries can be expanded and collapsed.
 - Collapse all and expand all exist, as icon-only buttons.
 - A file tree on the left, hidable, for quick jumps. Jumping scrolls to the
-  file and expands it if collapsed. The tree reads strictly in the diff's
-  own order: the file on top of the tree is the file on top of the diff
-  (owner, 2026-11-11; sorting it folders-first put the two out of step).
+  file and expands it if collapsed. Tree and diff follow one order, the
+  classic tree sort: folders on top, the project root's files at the bottom.
+  The diff is resorted into it at load, so the file on top of the tree is
+  the file on top of the diff (owner, 2026-11-11; first the tree followed
+  git's path-sorted patch order, but the tree sort reads better and the
+  main content can follow it just as well).
 - The file panel runs the full height of the diff view.
 - The file panel is condensed, not spacious.
 

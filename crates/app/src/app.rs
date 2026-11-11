@@ -245,6 +245,62 @@ struct ChangedRun {
     added: bool,
 }
 
+/// Classic tree order: inside every folder its subfolders come first, files
+/// after, each alphabetical. The diff and the file panel are both sorted
+/// with this, so reading one is reading the other.
+fn tree_order(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut a_parts = a.split('/').peekable();
+    let mut b_parts = b.split('/').peekable();
+    loop {
+        match (a_parts.next(), b_parts.next()) {
+            (Some(x), Some(y)) => {
+                let x_is_file = a_parts.peek().is_none();
+                let y_is_file = b_parts.peek().is_none();
+                match (x_is_file, y_is_file) {
+                    (false, true) => return Ordering::Less,
+                    (true, false) => return Ordering::Greater,
+                    _ => match x.cmp(y) {
+                        Ordering::Equal if x_is_file => return Ordering::Equal,
+                        Ordering::Equal => {}
+                        unequal => return unequal,
+                    },
+                }
+            }
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tree_order_tests {
+    #[test]
+    fn folders_sort_above_files_on_every_level() {
+        let mut paths = vec![
+            "justfile",
+            "crates/core/src/lib.rs",
+            "README.md",
+            "crates/app/src/app.rs",
+            "docs/HANDOFF.md",
+            "crates/zz.rs",
+        ];
+        paths.sort_by(|a, b| super::tree_order(a, b));
+        assert_eq!(
+            paths,
+            vec![
+                "crates/app/src/app.rs",
+                "crates/core/src/lib.rs",
+                "crates/zz.rs",
+                "docs/HANDOFF.md",
+                "README.md",
+                "justfile",
+            ]
+        );
+    }
+}
+
 /// Collects the added and removed line runs of a git-format patch, counting
 /// lines the way the Diff numbers them (per side, starting at the hunk
 /// headers).
@@ -2116,12 +2172,11 @@ impl ReviewApp {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        // Folder rows over indented files, but strictly in the patch's own
-        // order: reading the panel top to bottom is reading the diff (owner,
-        // 2026-11-11; a sorted tree put the two out of step). One linear
-        // pass opens a folder row whenever the folder chain changes, so a
-        // patch order that revisits a folder would repeat its header rather
-        // than reorder a single one.
+        // Folder rows over indented files, in the diff's order — which the
+        // load sorts into the classic tree (see `tree_order`), so panel and
+        // main content walk in step. One linear pass opens a folder row
+        // whenever the folder chain changes; an order that revisited a
+        // folder would repeat its header rather than reorder a single one.
         enum TreeRow {
             Folder { label: SharedString, depth: usize },
             File { index: usize, depth: usize },
@@ -3175,7 +3230,7 @@ fn load(
         }
     }
 
-    let patch = backend
+    let mut patch = backend
         .patch(&resolved, scope, &reviews.mine.reviewed)
         .map_err(text)?;
     let mut files = DiffFile::parse(&patch.text).map_err(|error| {
@@ -3195,6 +3250,11 @@ fn load(
             files.extend(extra);
         }
     }
+    // The owner reads both columns as a classic tree: folders on top, root
+    // files at the bottom. git emits patches path-sorted instead, so both
+    // lists are resorted the same way here; everything else keys by path.
+    files.sort_by(|a, b| tree_order(a.path().as_str(), b.path().as_str()));
+    patch.files.sort_by(|a, b| tree_order(&a.path, &b.path));
     let runs = changed_runs(&patch.text);
     let changed = backend.changed_paths(&resolved).map_err(text)?;
     // One tree listing instead of a `blob_id` subprocess per file: a large
