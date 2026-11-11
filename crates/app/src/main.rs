@@ -197,6 +197,15 @@ fn main() {
                 app_id: Some("diff-review".into()),
                 ..TitleBar::window_options()
             };
+            // A single-window tool ends with its window; macOS would
+            // otherwise keep the process alive with no way to get a
+            // window back.
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
             gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| {
                     app::ReviewApp::new(
