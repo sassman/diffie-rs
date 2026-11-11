@@ -3101,34 +3101,13 @@ impl Render for ReviewApp {
             .child(self.render_title(cx))
             .child(self.render_scope_bar(cx))
             .child({
-                let diff_column = v_flex()
-                    .flex_1()
-                    .h_full()
-                    .min_w_0()
-                    // Headers cannot be pinned inside the Diff's list,
-                    // so this bar names the current file instead. It
-                    // follows selection and navigation, not scrolling.
-                    .when_some(self.current_file.clone(), |column, path| {
-                        column.child(
-                            h_flex()
-                                .flex_none()
-                                .h(px(22.))
-                                .px_2()
-                                .bg(cx.theme().popover)
-                                .border_b_1()
-                                .border_color(cx.theme().border)
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .font_medium()
-                                .child(path),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .w_full()
-                            .child(self.render_diff(cx)),
-                    );
+                let diff_column = v_flex().flex_1().h_full().min_w_0().child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(self.render_diff(cx)),
+                );
                 div().flex_1().min_h_0().w_full().map(|wrap| {
                     if self.sidebar_visible {
                         wrap.child(
