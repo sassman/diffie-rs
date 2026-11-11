@@ -1504,10 +1504,13 @@ impl ReviewApp {
                                 .child(Toggle::new("split").label("Split").checked(split))
                                 .child(Toggle::new("unified").label("Unified").checked(!split))
                                 .on_click(cx.listener(|this, checks: &Vec<bool>, _, cx| {
-                                    let mode = if checks.first().copied().unwrap_or(true) {
-                                        DiffMode::Split
-                                    } else {
-                                        DiffMode::Unified
+                                    // Clicking the checked segment clears the
+                                    // whole group; an either-or control keeps
+                                    // the current choice instead.
+                                    let mode = match checks.iter().position(|on| *on) {
+                                        Some(0) => DiffMode::Split,
+                                        Some(_) => DiffMode::Unified,
+                                        None => return,
                                     };
                                     this.set_manual_mode(mode, cx);
                                 })),
