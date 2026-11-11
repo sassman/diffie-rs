@@ -688,9 +688,16 @@ impl ReviewApp {
                     .collect();
                 self.diff.update(cx, |state, cx| {
                     state.set_files(loaded.files, cx);
-                    for path in reviewed.iter().chain(&generated) {
-                        state.set_file_collapsed(path, true, cx);
-                    }
+                    // One rebuild; collapsing one by one froze a review
+                    // with thousands of ticked or generated files.
+                    state.set_files_collapsed(
+                        reviewed
+                            .iter()
+                            .chain(&generated)
+                            .map(|path| SharedString::from(path.clone())),
+                        true,
+                        cx,
+                    );
                 });
                 self.resolved = Some(loaded.resolved);
                 self.commits = Arc::new(loaded.commits);
@@ -947,16 +954,10 @@ impl ReviewApp {
     }
 
     fn set_all_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
-        self.diff.update(cx, |state, cx| {
-            let paths: Vec<SharedString> = state
-                .files()
-                .iter()
-                .map(|file| file.path().clone())
-                .collect();
-            for path in paths {
-                state.set_file_collapsed(&path, collapsed, cx);
-            }
-        });
+        // One rebuild for the whole change; a per-file loop rebuilt the
+        // rows once per file and froze large reviews for minutes.
+        self.diff
+            .update(cx, |state, cx| state.set_all_files_collapsed(collapsed, cx));
     }
 
     fn set_manual_mode(&mut self, mode: DiffMode, cx: &mut Context<Self>) {

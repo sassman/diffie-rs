@@ -301,6 +301,13 @@ In this order, each one small enough to show the owner:
 
 ## Traps
 
+- **The Kit currently comes from the owner's fork.** `[patch.crates-io]`
+  in the workspace manifest points every Kit crate at `sassman/gpui-kit`
+  branch `bulk-file-collapse`: v0.9.1 plus `DiffState::set_files_collapsed`,
+  which collapses any number of files in one rebuild (4.5ms for 5000 files
+  against over a second for 200 one-by-one calls). Collapse all, expand all
+  and the reviewed/generated collapse on load use it. Drop the patch when
+  upstream ships it.
 - **gpui-kit is pinned with `=`.** Bumping it can change GPUI's API. Do it
   deliberately, alone, and re-check the whole UI.
 - **Comment line numbers.** A stored comment holds the line number in the

@@ -19,6 +19,10 @@ Windows and Linux.
    exact version (`=x.y.z`). It re-exports GPUI and pins the matching GPUI
    snapshot. Never add `gpui` or a GPUI snapshot crate directly, and never
    loosen the pin: a Kit release can move to a GPUI snapshot with API changes.
+   One sanctioned exception: `[patch.crates-io]` points the Kit crates at the
+   owner's fork (`sassman/gpui-kit`, branch `bulk-file-collapse` - v0.9.1
+   plus `DiffState::set_files_collapsed`) until the upstream PR lands; the
+   patch dies with the next Kit release that carries it.
 3. **Use Kit components before writing your own.** In particular the diff view
    is `gpui_kit::component::diff::Diff`. Do not hand-roll diff rendering,
    virtualization, selection or annotations.
