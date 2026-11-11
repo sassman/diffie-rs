@@ -1460,7 +1460,13 @@ impl ReviewApp {
                             .h(px(22.))
                             .icon(Icon::new(Lucide::ArrowLeftRight))
                             .tooltip("Swap direction")
-                            .on_click(cx.listener(|this, _, _, cx| this.swap_direction(cx))),
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                // A second quick click must not reach the
+                                // title bar, whose double click minimizes
+                                // the window.
+                                cx.stop_propagation();
+                                this.swap_direction(cx);
+                            })),
                     )
                 })
                 .child(
@@ -1479,125 +1485,139 @@ impl ReviewApp {
                 )
                 .child(div().flex_1())
                 .child(
-                    ToggleGroup::new("layout")
-                        .outline()
-                        .segmented()
-                        .single()
-                        .small()
-                        .child(Toggle::new("split").label("Split").checked(split))
-                        .child(Toggle::new("unified").label("Unified").checked(!split))
-                        .on_click(cx.listener(|this, checks: &Vec<bool>, _, cx| {
-                            let mode = if checks.first().copied().unwrap_or(true) {
-                                DiffMode::Split
-                            } else {
-                                DiffMode::Unified
-                            };
-                            this.set_manual_mode(mode, cx);
-                        })),
-                )
-                .child(
-                    Button::new("wrap")
-                        .outline()
-                        .xsmall()
-                        .w(px(28.))
-                        .h(px(24.))
-                        .icon(Icon::new(Lucide::TextWrap))
-                        .selected(self.wrap || split)
-                        .disabled(split)
-                        .tooltip(if split {
-                            "Split wraps until per-panel scrolling exists"
-                        } else {
-                            "Wrap long lines"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.wrap = !this.wrap;
-                            cx.notify();
-                        })),
-                )
-                .child(
                     h_flex()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .rounded(px(5.))
-                        .overflow_hidden()
+                        .id("title-controls")
+                        .gap(px(6.))
+                        // The buttons' clicks end here: a pair of quick
+                        // clicks would otherwise reach the title bar as a
+                        // double click and minimize the window (the macOS
+                        // title bar default). The empty strip and the labels
+                        // stay out, so the native double click still works
+                        // there.
+                        .on_click(|_, _, cx| cx.stop_propagation())
                         .child(
-                            Button::new("collapse-all")
-                                .ghost()
-                                .xsmall()
-                                .w(px(28.))
-                                .h(px(24.))
-                                .rounded_none()
-                                .border_r_1()
-                                .border_color(cx.theme().border)
-                                .icon(Icon::new(Lucide::ChevronsDownUp))
-                                .tooltip("Collapse all files")
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.set_all_collapsed(true, cx)),
-                                ),
+                            ToggleGroup::new("layout")
+                                .outline()
+                                .segmented()
+                                .single()
+                                .small()
+                                .child(Toggle::new("split").label("Split").checked(split))
+                                .child(Toggle::new("unified").label("Unified").checked(!split))
+                                .on_click(cx.listener(|this, checks: &Vec<bool>, _, cx| {
+                                    let mode = if checks.first().copied().unwrap_or(true) {
+                                        DiffMode::Split
+                                    } else {
+                                        DiffMode::Unified
+                                    };
+                                    this.set_manual_mode(mode, cx);
+                                })),
                         )
                         .child(
-                            Button::new("expand-all")
-                                .ghost()
-                                .xsmall()
-                                .w(px(28.))
-                                .h(px(24.))
-                                .rounded_none()
-                                .icon(IconName::ChevronsUpDown)
-                                .tooltip("Expand all files")
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.set_all_collapsed(false, cx)),
-                                ),
-                        ),
-                )
-                .child(
-                    Button::new("other-revisions")
-                        .xsmall()
-                        .h(px(26.))
-                        .map(|button| {
-                            if revisions_on {
-                                button
-                                    .custom(
-                                        ButtonCustomVariant::new(cx)
-                                            .color(accent.opacity(0.14))
-                                            .foreground(accent)
-                                            .hover(accent.opacity(0.2))
-                                            .active(accent.opacity(0.25)),
-                                    )
-                                    .border_1()
-                                    .border_color(accent.opacity(0.45))
-                                    .label("Other revisions' comments: on")
-                            } else {
-                                button
-                                    .outline()
-                                    .text_color(muted)
-                                    .label("Other revisions' comments: off")
-                            }
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_other_revisions = !this.show_other_revisions;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    Button::new("copy-prompt")
-                        .outline()
-                        .xsmall()
-                        .h(px(26.))
-                        .label("Copy all as prompt")
-                        .on_click(cx.listener(|this, _, _, cx| this.copy_all_as_prompt(cx))),
-                )
-                .child(
-                    Popover::new("theme-menu")
-                        .trigger(
-                            Button::new("theme")
+                            Button::new("wrap")
                                 .outline()
                                 .xsmall()
                                 .w(px(28.))
-                                .h(px(26.))
-                                .icon(IconName::Palette)
-                                .tooltip("Switch theme"),
+                                .h(px(24.))
+                                .icon(Icon::new(Lucide::TextWrap))
+                                .selected(self.wrap || split)
+                                .disabled(split)
+                                .tooltip(if split {
+                                    "Split wraps until per-panel scrolling exists"
+                                } else {
+                                    "Wrap long lines"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.wrap = !this.wrap;
+                                    cx.notify();
+                                })),
                         )
-                        .child(theme_menu),
+                        .child(
+                            h_flex()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .rounded(px(5.))
+                                .overflow_hidden()
+                                .child(
+                                    Button::new("collapse-all")
+                                        .ghost()
+                                        .xsmall()
+                                        .w(px(28.))
+                                        .h(px(24.))
+                                        .rounded_none()
+                                        .border_r_1()
+                                        .border_color(cx.theme().border)
+                                        .icon(Icon::new(Lucide::ChevronsDownUp))
+                                        .tooltip("Collapse all files")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.set_all_collapsed(true, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("expand-all")
+                                        .ghost()
+                                        .xsmall()
+                                        .w(px(28.))
+                                        .h(px(24.))
+                                        .rounded_none()
+                                        .icon(IconName::ChevronsUpDown)
+                                        .tooltip("Expand all files")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.set_all_collapsed(false, cx)
+                                        })),
+                                ),
+                        )
+                        .child(
+                            Button::new("other-revisions")
+                                .xsmall()
+                                .h(px(26.))
+                                .map(|button| {
+                                    if revisions_on {
+                                        button
+                                            .custom(
+                                                ButtonCustomVariant::new(cx)
+                                                    .color(accent.opacity(0.14))
+                                                    .foreground(accent)
+                                                    .hover(accent.opacity(0.2))
+                                                    .active(accent.opacity(0.25)),
+                                            )
+                                            .border_1()
+                                            .border_color(accent.opacity(0.45))
+                                            .label("Other revisions' comments: on")
+                                    } else {
+                                        button
+                                            .outline()
+                                            .text_color(muted)
+                                            .label("Other revisions' comments: off")
+                                    }
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_other_revisions = !this.show_other_revisions;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("copy-prompt")
+                                .outline()
+                                .xsmall()
+                                .h(px(26.))
+                                .label("Copy all as prompt")
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.copy_all_as_prompt(cx)),
+                                ),
+                        )
+                        .child(
+                            Popover::new("theme-menu")
+                                .trigger(
+                                    Button::new("theme")
+                                        .outline()
+                                        .xsmall()
+                                        .w(px(28.))
+                                        .h(px(26.))
+                                        .icon(IconName::Palette)
+                                        .tooltip("Switch theme"),
+                                )
+                                .child(theme_menu),
+                        ),
                 ),
         )
     }
