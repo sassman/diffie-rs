@@ -181,8 +181,11 @@ Decided:
 - One continuous scroll through all files.
 - File boundaries can be expanded and collapsed.
 - Collapse all and expand all exist, as icon-only buttons.
-- A file tree on the left, hidable, for quick jumps. Jumping scrolls to the
-  file and expands it if collapsed.
+- A file list on the left, hidable, for quick jumps. Jumping scrolls to the
+  file and expands it if collapsed. It is a flat list in the diff's own
+  order, folder shown muted before the name: the file on top of the list is
+  the file on top of the diff (owner, 2026-11-11; previously a folder tree,
+  whose sorting disagreed with the diff).
 - The file panel runs the full height of the diff view.
 - The file panel is condensed, not spacious.
 

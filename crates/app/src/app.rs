@@ -2035,15 +2035,15 @@ impl ReviewApp {
             )
     }
 
-    fn render_file_row(&self, index: usize, depth: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn render_file_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let file = &self.files[index];
         let muted = cx.theme().muted_foreground;
         let mono = cx.theme().mono_font_family.clone();
         let path = SharedString::from(file.path.clone());
-        let name = file
+        let (folder, name) = file
             .path
             .rsplit_once('/')
-            .map_or(file.path.as_str(), |(_, name)| name);
+            .map_or(("", file.path.as_str()), |(folder, name)| (folder, name));
         let (status, status_color) = match file.status {
             FileStatus::Added => ("A", cx.theme().success),
             FileStatus::Deleted => ("D", cx.theme().danger),
@@ -2074,8 +2074,7 @@ impl ReviewApp {
             .id(path.clone())
             .w_full()
             .h(px(22.))
-            .pl(px(4. + depth as f32 * 10.))
-            .pr(px(4.))
+            .px(px(4.))
             .gap(px(6.))
             .rounded(px(4.))
             .cursor_pointer()
@@ -2092,7 +2091,22 @@ impl ReviewApp {
                     .text_color(status_color)
                     .child(status),
             )
-            .child(div().flex_1().min_w_0().truncate().child(name.to_string()))
+            // The folder shrinks away first; the name itself stays readable.
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .when(!folder.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(muted)
+                                .child(format!("{folder}/")),
+                        )
+                    })
+                    .child(div().flex_none().truncate().child(name.to_string())),
+            )
             .when(comments > 0, |row| row.child(comment_badge(comments, cx)))
             .when(state == ReviewState::Reviewed, |row| {
                 row.child(
@@ -2116,51 +2130,6 @@ impl ReviewApp {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        // Paths grouped into folder runs: a folder row per directory, files
-        // indented under it. The list is flat (dozens of files), not a Tree
-        // component; the mockup's folders are labels, not collapsible nodes.
-        #[derive(Default)]
-        struct Folder {
-            folders: std::collections::BTreeMap<String, Folder>,
-            files: Vec<usize>,
-        }
-        let mut root = Folder::default();
-        for (index, file) in self.files.iter().enumerate() {
-            let mut node = &mut root;
-            let mut parts = file.path.split('/').peekable();
-            while let Some(part) = parts.next() {
-                if parts.peek().is_none() {
-                    node.files.push(index);
-                } else {
-                    node = node.folders.entry(part.to_string()).or_default();
-                }
-            }
-        }
-        // Flat rows feeding a virtualized list: with thousands of changed
-        // files, building an element per row each frame froze the window.
-        enum TreeRow {
-            Folder { label: SharedString, depth: usize },
-            File { index: usize, depth: usize },
-        }
-        fn walk(node: &Folder, depth: usize, rows: &mut Vec<TreeRow>) {
-            for (name, folder) in &node.folders {
-                rows.push(TreeRow::Folder {
-                    label: format!("{name} /").into(),
-                    depth,
-                });
-                walk(folder, depth + 1, rows);
-            }
-            for index in &node.files {
-                rows.push(TreeRow::File {
-                    index: *index,
-                    depth,
-                });
-            }
-        }
-        let mut rows = Vec::new();
-        walk(&root, 0, &mut rows);
-        let rows = Rc::new(rows);
-
         let reviewed = self
             .files
             .iter()
@@ -2203,25 +2172,16 @@ impl ReviewApp {
                     ),
             )
             .child(
+                // A flat list in the patch's own order, so the file on top
+                // here is the file on top of the diff; a folder tree sorted
+                // the two sides differently (owner, 2026-11-11). Virtualized:
+                // with thousands of changed files, an element per row each
+                // frame froze the window.
                 gpui_kit::uniform_list(
                     "file-list",
-                    rows.len(),
+                    self.files.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                        rows[range]
-                            .iter()
-                            .map(|row| match row {
-                                TreeRow::Folder { label, depth } => div()
-                                    .h(px(22.))
-                                    .line_height(px(22.))
-                                    .pl(px(4. + *depth as f32 * 10.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(label.clone())
-                                    .into_any_element(),
-                                TreeRow::File { index, depth } => {
-                                    this.render_file_row(*index, *depth, cx)
-                                }
-                            })
-                            .collect::<Vec<_>>()
+                        range.map(|index| this.render_file_row(index, cx)).collect()
                     }),
                 )
                 .flex_1()
