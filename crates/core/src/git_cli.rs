@@ -58,6 +58,40 @@ impl GitCli {
             .filter(|name| !name.is_empty()))
     }
 
+    /// The project's name and, when [`Self::open`] pointed into a linked
+    /// worktree, that worktree's name. The project is named after the
+    /// directory holding the common git dir, so every worktree of a
+    /// repository reads the same.
+    pub fn display_names(&self) -> Result<(String, Option<String>)> {
+        let dirs = self.read(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ])?;
+        let mut lines = dirs.lines();
+        let git_dir = PathBuf::from(lines.next().unwrap_or_default().trim());
+        let common = PathBuf::from(lines.next().unwrap_or_default().trim());
+        let basename = |path: &Path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        };
+        let project = if basename(&common).as_deref() == Some(".git") {
+            common.parent().and_then(basename)
+        } else {
+            // Bare: name `thrall.git` minus the conventional suffix.
+            basename(&common).map(|name| name.trim_end_matches(".git").to_string())
+        }
+        .unwrap_or_else(|| "repository".to_string());
+        let worktree = if git_dir == common {
+            None
+        } else {
+            self.try_read(&["rev-parse", "--show-toplevel"])?
+                .and_then(|top| basename(Path::new(top.trim())))
+        };
+        Ok((project, worktree))
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new("git");
         command
@@ -159,21 +193,29 @@ impl GitCli {
         let base = resolved.base.as_str();
         let head = resolved.head.as_str();
         let whole = self.diff(base, head, &[])?;
+        let tree = self.blob_ids(&resolved.head)?;
         let mut text = String::new();
         let mut files = Vec::new();
 
         for (summary, section) in split_files(&whole) {
             let tick = reviewed.iter().find(|tick| tick.path == summary.path);
-            let current = self.blob_id(&resolved.head, &summary.path)?;
+            let current = tree.get(summary.path.as_str()).cloned();
             match (tick, current) {
-                (Some(tick), Some(current)) if tick.blob == current => {
+                // Same content as the tick; a tick without a blob matches a
+                // file that is still deleted.
+                (Some(tick), current) if tick.blob == current => {
                     files.push(FileSummary {
                         state: FileState::UnchangedSinceReview,
                         ..summary
                     });
                 }
-                (Some(tick), Some(current)) if self.object_exists(&tick.blob)? => {
-                    let since = self.diff(tick.blob.as_str(), current.as_str(), &[])?;
+                (
+                    Some(ReviewedFile {
+                        blob: Some(old), ..
+                    }),
+                    Some(current),
+                ) if self.object_exists(old)? => {
+                    let since = self.diff(old.as_str(), current.as_str(), &[])?;
                     let since = relabel_blob_diff(&since, &summary.path);
                     let counted = split_files(&since)
                         .into_iter()
@@ -379,7 +421,9 @@ impl ReviewBackend for GitCli {
         ])?;
         let fields: Vec<&str> = output.split('\0').collect();
         Ok(fields
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|record| Commit {
                 id: Oid::new(record[0].trim()),
                 author: record[1].to_string(),
@@ -387,6 +431,59 @@ impl ReviewBackend for GitCli {
                 subject: record[3].to_string(),
             })
             .collect())
+    }
+
+    fn changed_paths(&self, resolved: &Resolved) -> Result<Vec<String>> {
+        // `--find-renames` lists a renamed file once, under its name at
+        // `head`, the same name `split_files` summarizes it under.
+        let output = self.read(&[
+            "diff",
+            "--name-only",
+            "--find-renames",
+            "-z",
+            resolved.base.as_str(),
+            resolved.head.as_str(),
+            "--",
+        ])?;
+        Ok(output
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(String::from)
+            .collect())
+    }
+
+    fn commits_touching(&self, resolved: &Resolved) -> Result<HashMap<String, Vec<Oid>>> {
+        let range = format!("{}..{}", resolved.base, resolved.head);
+        // One record per commit: `\x01<hash>\0`, then the touched paths
+        // NUL-separated, the first with a leading newline. The `\x01` marks
+        // the hash, so a path is never mistaken for one.
+        let output = self.read(&[
+            "log",
+            "--no-show-signature",
+            "--name-only",
+            "--find-renames",
+            "-z",
+            "--format=%x01%H",
+            &range,
+            "--",
+        ])?;
+        let mut touched: HashMap<String, Vec<Oid>> = HashMap::new();
+        for record in output.split('\x01').filter(|record| !record.is_empty()) {
+            let mut fields = record.split('\0');
+            let Some(hash) = fields.next() else { continue };
+            let commit = Oid::new(hash.trim());
+            for path in fields {
+                let path = path.strip_prefix('\n').unwrap_or(path);
+                if path.is_empty() {
+                    continue;
+                }
+                touched
+                    .entry(path.to_string())
+                    .or_default()
+                    .push(commit.clone());
+            }
+        }
+        Ok(touched)
     }
 
     fn patch(
@@ -435,6 +532,31 @@ impl ReviewBackend for GitCli {
         Ok(self
             .try_read(&["rev-parse", "--verify", "--quiet", &spec])?
             .map(|output| Oid::new(output.trim())))
+    }
+
+    fn blob_ids(&self, rev: &Oid) -> Result<HashMap<String, Oid>> {
+        let output = self.read(&[
+            "ls-tree",
+            "-r",
+            "-z",
+            "--full-tree",
+            "--end-of-options",
+            rev.as_str(),
+        ])?;
+        let mut blobs = HashMap::new();
+        // `<mode> <type> <oid>\t<path>`; -z keeps paths raw.
+        for entry in output.split('\0') {
+            let Some((meta, path)) = entry.split_once('\t') else {
+                continue;
+            };
+            let mut fields = meta.split(' ');
+            if let (Some(_), Some("blob"), Some(oid)) =
+                (fields.next(), fields.next(), fields.next())
+            {
+                blobs.insert(path.to_string(), Oid::new(oid));
+            }
+        }
+        Ok(blobs)
     }
 
     fn author_name(&self) -> Result<String> {

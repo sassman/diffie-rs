@@ -31,6 +31,22 @@ pub trait ReviewBackend: Send + Sync {
     /// The comparison's commits (`base..head`), newest first.
     fn commits(&self, resolved: &Resolved) -> Result<Vec<Commit>>;
 
+    /// Every path the comparison changes (`base..head`), regardless of the
+    /// scope shown: a review is complete only when all of these are ticked,
+    /// so judging completion against the scope's files would be wrong.
+    /// A renamed file is listed once, under its path at `head`, like
+    /// [`FileSummary`](crate::model::FileSummary).
+    fn changed_paths(&self, resolved: &Resolved) -> Result<Vec<String>>;
+
+    /// The commits (`base..head`, newest first like [`Self::commits`]) that
+    /// touched each path. Paths are the names each commit used, so a file
+    /// renamed inside the range appears under its old name for the commits
+    /// before the rename, next to the name [`Self::changed_paths`] reports.
+    fn commits_touching(
+        &self,
+        resolved: &Resolved,
+    ) -> Result<std::collections::HashMap<String, Vec<Oid>>>;
+
     /// The diff for one scope. `reviewed` is only read for [`Scope::NewForMe`].
     fn patch(
         &self,
@@ -50,6 +66,11 @@ pub trait ReviewBackend: Send + Sync {
     /// The content id of `path` at `rev`, or `None` if it does not exist
     /// there. A "reviewed" tick stores this.
     fn blob_id(&self, rev: &Oid, path: &str) -> Result<Option<Oid>>;
+
+    /// The content id of every file at `rev`, in one pass. A large commit
+    /// changes thousands of files, and one [`Self::blob_id`] subprocess per
+    /// file turns a fast load into a near-minute stall.
+    fn blob_ids(&self, rev: &Oid) -> Result<std::collections::HashMap<String, Oid>>;
 
     /// The reviewer's name as git knows it (`user.name`).
     fn author_name(&self) -> Result<String>;

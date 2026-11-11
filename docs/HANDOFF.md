@@ -14,9 +14,15 @@ first code: a working core and a first UI scaffold wired to it.
   the open questions in section 16.
 - **Mockup**: `docs/mockup/main-screen.html`. Open it in a browser. It is a
   static picture with sample data and it is the visual target.
-- **Core** (`crates/core`): done for the scaffold's needs and tested.
-- **UI** (`crates/app`): a first scaffold. It runs and is wired to the core,
-  but it is well short of the mockup. See "What the UI does and does not do".
+- **Core** (`crates/core`): done for the scaffold's needs and tested. Besides
+  the scaffold APIs it now has `changed_paths` and `commits_touching` on the
+  trait, and `ReviewFile::verify_completed` for stale completion markers.
+- **UI** (`crates/app`): restyled to the mockup on 2026-11-11: bundled Inter
+  and JetBrains Mono, three themes (Gruvbox Dark is the default, Midnight is
+  the mockup's palette, Light), segmented controls, file tree with a
+  resizable panel, commit picker with search, skipped markers and badges,
+  comment cards, the comment box with its attach-commit label, and the hint
+  bar. See "What the UI does and does not do".
 
 ## Verification status
 
@@ -31,8 +37,10 @@ Be exact about this when you report further work.
 | Driven with simulated clicks and keys (xdotool), on a 6-commit demo repository: commit picker opens; unchecking a commit gives a combined diff with "1 skipped"; line selection; `c` opens the comment box; typing; Cmd/Ctrl+Enter saves; the comment is anchored by blame and reappears after a restart; reaction picker and chips; "Reviewed" by checkbox and by `r`, and after a restart the ticked file leaves the "New for me" diff; `s`; Whole branch; collapse all; light theme | Verified once each, by screenshot and by reading the review file |
 | Everything else interactive: swap, expand all, next and previous file or change, other-revisions toggle with real data, copy as prompt, delete, Escape, scope keys, sidebar toggle, colleagues' files | Not exercised |
 | A real GPU, a real window manager, high-DPI | Not run |
-| macOS and Windows | Not built, not run |
+| Windows | Not built, not run |
 | Performance on large branches | Not measured |
+| 2026-11-11, macOS, real repository (16-commit branch): themed window renders with bundled fonts; tree, scope bar, segmented controls, progress bar, hint bar; split view with decorated added and removed rows, signs, word emphasis; a comment card and the header controls (counts, touched-by, Reviewed) | Verified by screenshot |
+| Same session: commit picker internals (search, Space, shift-click, Show more), theme menu, comment box and Escape focus return, reactions, light and Midnight themes, narrow-window fallback, resizable panel drag | Compiled, not seen on screen |
 
 ## Build, run, test
 
@@ -80,7 +88,14 @@ docs/
   text for a scope, with a summary per file.
 - `line_origin`, `blame`: which commit wrote a line. Comments are anchored
   with this.
-- `blob_id`: a file's content id. "Reviewed" ticks store it.
+- `blob_id`: a file's content id. "Reviewed" ticks store it; a deleted file
+  ticks with no blob (the deletion is the reviewed content, and a re-added
+  file reads as changed since).
+- `blob_ids`: every file's content id at a revision in one `ls-tree -r`.
+  Loads use it instead of per-file `blob_id`: a commit changing thousands of
+  files costs one subprocess per file otherwise, which read as a stalled
+  "Reading the repository". The file panel is a virtualized `uniform_list`
+  for the same reason: an element per row each frame froze large reviews.
 - `author_name`, `review_dir`.
 
 How `GitCli` produces each scope:
@@ -96,7 +111,8 @@ How `GitCli` produces each scope:
   as `FileState::CouldNotCombine`.
 - **New for me**: per file. Ticked and unchanged: listed, no diff. Ticked and
   changed: `git diff <ticked blob> <current blob>`, relabelled with the path.
-  Otherwise the file's whole-branch diff.
+  Otherwise the file's whole-branch diff. A blobless tick on a still-deleted
+  file counts as unchanged.
 
 Patches carry 400 lines of context (`CONTEXT_LINES`), because the Diff view
 can only expand context that the patch supplies.
@@ -158,23 +174,53 @@ Things that cost time and are easy to hit again:
   { secondary: true, .. }` instead (see `start_comment`).
 - **Focusing a new input works from a click but not from a key handler**
   unless it is deferred by a frame (`cx.on_next_frame`).
-- **Without `soft_wrap(true)` one long line widens the whole diff list** and
-  pushes each file header's right-hand controls out of view.
+- **Without `soft_wrap(true)` one long line widens the whole diff list.** The
+  Diff scrolls the entire list as one canvas, so a long line pushes the split
+  view's Modified column, its annotations and every header control past the
+  right edge. The mockup's per-file horizontal scroll is not something the
+  component can do. The owner wants unified to scroll (wrap toggle beside
+  Split and Unified, `wrap` on `ReviewApp`) and split to be two half-window
+  panels scrolling separately. The Kit's split is one strip under a shared
+  offset - the owner saw it and rejected it - so split wraps until per-panel
+  scrolling exists upstream (https://github.com/longbridge/gpui-kit).
 - **The default `Assets` embeds only the Kit's own 101 icons.** Icons from
   the full catalogue silently render as nothing. The app registers
   `AllAssets` (about 1 MiB) for now; a small application asset source with
-  just the needed icons is the tidier fix, and the place to add the owner's
-  palette icon and a smile-plus icon.
+  just the needed icons is the tidier fix. The palette icon is
+  `assets::IconName::Palette` and smile-plus is `FaceSlightlySmilingPlus`
+  (Lucide renamed it); both are used.
+- **The Kit's add-annotation button covers the first characters of code**
+  (its position is hard-coded). The app instead tracks `on_line_hover` and
+  draws its own + in the gutter-marker lane; a sentinel marker with an
+  impossible path keeps the lane reserved so hovering never shifts layout.
+- **An unfocused window never finishes loading.** Launched behind another
+  window, the app sits at "Reading the repository" indefinitely: every git
+  call is milliseconds, every thread idles, and the loaded result is waiting
+  for a wake-up that only arrives with the first event (focus, click, key).
+  The first paint of the diff list needs one more event again. It looks like
+  macOS App Nap / a lost wake in the GPUI dispatcher while occluded, so a
+  focused app behaves perfectly. Diagnosed with `/usr/bin/sample`; not fixed
+  here — worth raising against the Kit or working around with a periodic
+  foreground timer while a load is in flight.
 
 Other Kit facts used here:
 
 - `gpui_kit::application()`, `gpui_kit::init(cx)`, `gpui_kit::open_window(..)`.
 - The component icon set (`component::IconName`) is a subset. The full Lucide
   catalogue is `gpui_kit::assets::IconName`, used through `Icon::new(..)`.
-  There is no smile-plus icon; the add-reaction button uses a plus for now.
 - `Diff`'s key context is `"Diff"`, and the input's is `"Input"`.
-- Themes: `Theme::change(ThemeMode::Dark, Some(window), cx)`. The Kit also
-  has a theme registry and ships theme files (`themes/` in its repository).
+- Themes: three files under `crates/app/themes/` are embedded and loaded in
+  `app::init` — `gruvbox-dark.json` (the default dark), `midnight.json` (the
+  mockup's palette) and `light.json` (Kit default colors plus the fonts).
+  The palette button opens a menu; `apply_theme` runs
+  `Theme::update(.. apply_config ..)`. The comment orange rides on the
+  `chart.4` token (`comment_accent`), and the added and removed row fills
+  are per-theme in `diff_backgrounds`, painted as decorations because the
+  Diff's own tint is a fixed 12% wash.
+- Inter and JetBrains Mono (OFL, `crates/app/assets/fonts/`) are embedded in
+  `main.rs` via `add_fonts` before `gpui_kit::init`; the theme files name
+  them. `mono_font.size` is 12.5 because the Diff's row height is a fixed
+  1.6 × font size: 12.5 gives the mockup's 20px rows.
 - Syntax highlighting uses the lighter `syntect` feature. Per-language
   `tree-sitter-*` features exist if higher fidelity is wanted.
 
@@ -183,58 +229,67 @@ Other Kit facts used here:
 Implemented in `app.rs` (compiled; see the verification table for what was
 actually exercised):
 
-- Title bar: repository, "changes in X going into Y", swap, split and unified,
-  collapse all, expand all, other revisions toggle, copy all as prompt, theme.
-- Scope bar: the three scopes, the commit picker as a popover with two-row
-  checkbox items, the two groups with group checkboxes, files-reviewed count.
-- File panel: flat list with status, comment count, reviewed tick, counts.
-  Clicking reveals and expands the file.
-- Diff: GPUI Kit `Diff` with comments as annotations, a draft comment box, a
-  "Reviewed" checkbox in each file header, notes for "changed since your
-  review" and for files that could not be combined.
-- Comments: created from the add-comment button or `c` on a selection,
-  anchored by blame, saved to the review file, reactions with the picker,
-  delete.
+- Title bar: repository, "changes in X going into Y" with chips, swap,
+  Split/Unified as a segmented control, collapse/expand all as a joined icon
+  pair, the other-revisions toggle with on/off state in text and colour,
+  copy all as prompt, a theme menu behind the palette button.
+- Scope bar: segmented scopes; the commit picker with search, group
+  checkboxes, skipped markers, comment badges, Show-more rows, shift-click
+  runs and Space on the hovered row; the files-reviewed count with a
+  progress bar.
+- File panel: a tree with folder rows, coloured status letters, split +/−
+  counts, comment badges, reviewed ticks, "generated"; truncation that keeps
+  badges inside the panel; resizable by dragging its edge; Hide in its
+  header, and a "Files" button in the status bar while hidden.
+- Diff: per-theme added and removed row fills (decorations), signs, a
+  take-over header (path with a copy button, coloured counts, touched-by
+  text, comment summary that jumps to the first comment,
+  state notes, Reviewed), the current-file bar above, generated and
+  unchanged-reviewed files as collapsed headers, `Simple` hunk bands,
+  auto-unified when the window is too narrow with the manual choice kept.
+- Comments: cards in the mockup's style with hash and line label, reaction
+  chips and the smile-plus picker, Edit, per-comment Copy as prompt, Delete;
+  other-revision comments dashed and quiet. The add-comment + sits in the
+  gutter-marker lane. The comment box names the commit it will attach to
+  before saving, and Comment/Suggest change (disabled)/Cancel carry their
+  shortcut hints.
+- Ticking Reviewed (or `r`) collapses the file and moves the current-file
+  marker to the next one without scrolling; the collapse pulls it up.
 - Shortcuts: `]` `[` `}` `{` `s` `o` `t` `1` `2` `3` `zM` `zR` `c` `r`, Escape,
-  Cmd/Ctrl+Enter, Cmd/Ctrl+R, Cmd/Ctrl+Q.
+  Cmd/Ctrl+Enter, Cmd/Ctrl+R, Cmd/Ctrl+Q, Space in the commit list.
 
-Not implemented, against the mockup and the design document:
+Not implemented or not possible, against the mockup and the design document:
 
 | Missing | Notes |
 | --- | --- |
-| File tree | The panel is a flat list. The design wants a tree |
-| Commit search, shift-click runs, skipped markers, comment counts in the picker | Picker is a plain list |
-| Per-file commit stepper | Section 14 of the design document |
+| Sticky file headers | The Diff cannot pin a list row; the current-file bar above the diff stands in, following selection and navigation, not scrolling |
+| Per-file cards, per-status gutter cell colours, selected-line left edge, custom fold-row and separator styling, the mockup's exact split hairline | Hard-coded in the Kit's Diff |
+| Per-file horizontal scrolling | The Diff scrolls the whole list as one canvas (see the trap above). Scrolling is the default since 2026-11-11, with a wrap toggle in the title bar |
+| Independently scrolling split columns | The split canvas is one strip with a shared offset and half-canvas columns; two half-window panels with their own scroll would need an upstream Kit change |
+| Per-file commit stepper | Removed as YAGNI on 2026-11-11 (it only ever rendered disabled); design document section 14 holds the idea, `commits_touching` still feeds the touched-by text |
+| Suggestions | "Suggest change" renders disabled; no flow behind it |
 | `j` `k` line cursor, `v`, `g`, `(` `)`, `e`, `n` `N`, `za`, command palette | Design question 8 for the cursor |
 | Selections inside a line | Design question 7 |
-| Suggestions | The file format has the field; no UI |
-| Edit comment, per-comment copy as prompt | Core supports edit |
-| Auto-unified when narrow, remembered layout | Starts in split |
-| Unchanged reviewed files as collapsed headers in the diff | Design question 9 |
 | "Branch has moved since this review" warning | Header data is stored |
-| Generated files collapsed by default | Not detected |
-| Theme picker | Only a light and dark toggle |
-| Exact mockup styling of comments | Other-revision comments are dimmed, not dashed |
 | Importing a colleague's file from the UI | Works by dropping the file in the folder |
-| Persisted window and UI settings | None |
+| Persisted window and UI settings | Layout choice and panel width live only in the session |
+| "File N of M · change x of y" following the viewport | The Diff exposes no viewport position; the file part follows the current file, the change part is absent |
 
 ## Suggested next steps
 
 In this order, each one small enough to show the owner:
 
-1. **Run it on a real machine and a real repository.** It has only run under
-   a virtual display with software rendering, driven by simulated input, on a
-   tiny demo repository. Operate every control by hand and fix what is wrong.
-2. **Match the mockup's density and layout.** Compare side by side with
-   `docs/mockup/main-screen.html`.
+1. **Exercise what the restyle has not shown on screen yet**: the commit
+   picker internals, theme menu, comment box and Escape focus return,
+   reactions, the Light and Midnight themes, the narrow-window fallback,
+   panel resizing.
+2. **Chase the slow load** on a real branch (see the trap list): likely the
+   row building and highlighting of 400-context-line patches.
 3. **Ask the owner the open questions** in section 16 of the design document,
    starting with 1, 2, 4 and 5. They change the data model.
-4. **Commit picker to spec**: search, shift-click, skipped markers, counts.
-5. **File tree** in place of the flat list.
-6. **Keyboard model**: line cursor and the remaining keys.
-7. **Per-file commit stepper.**
-8. Selections inside a line, suggestions, comment editing.
-9. Only when the UI has settled: the `gix` and `imara-diff` backend.
+4. **Keyboard model**: line cursor and the remaining keys.
+5. Selections inside a line, suggestions.
+6. Only when the UI has settled: the `gix` and `imara-diff` backend.
 
 ## Traps
 

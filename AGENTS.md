@@ -53,14 +53,15 @@ When calling git:
 
 ## Product rules that are easy to break
 
-- **Wording.** The comparison reads "changes in `source` going into `target`".
-  Never show the term "merge-base" in the UI.
+- **Wording.** The comparison reads "`source` going into `target`" (the
+  title bar: project, worktree if any, `/`, then the branches). Never show
+  the term "merge-base" in the UI.
 - **One scope rules the view.** New for me, Whole branch, or Custom. Per-file
   state never silently overrides the scope.
 - **The commit picker is settled.** A dropdown from the range in the scope
-  bar; two-row items (hash and date, then title); a leading checkbox per
-  commit; non-contiguous selections allowed. Do not redesign it or bring back
-  a rail, slider or sidebar commit list.
+  bar; two-row items (title, then author, age and hash); a leading checkbox
+  per commit; non-contiguous selections allowed. Do not redesign it or bring
+  back a rail, slider or sidebar commit list.
 - **Comments attach to the commit that wrote the line**, never to a range or a
   branch tip. Every comment stores the commented lines as a snippet.
 - **Reactions are a closed set** of four: Seen, Done, Won't fix, Follow-up.

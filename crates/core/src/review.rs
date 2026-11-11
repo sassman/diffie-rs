@@ -70,7 +70,10 @@ pub struct Completed {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewedFile {
     pub path: String,
-    pub blob: Oid,
+    /// Absent for a deleted file: the deletion itself is the reviewed
+    /// content, so a re-added file reads as changed since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<Oid>,
     /// Tip of `source` at the time of the tick. Informational.
     pub commit: Oid,
     pub at: String,
@@ -246,13 +249,14 @@ impl ReviewFile {
     pub fn review_state(&self, path: &str, current_blob: Option<&Oid>) -> ReviewState {
         match self.reviewed.iter().find(|tick| tick.path == path) {
             None => ReviewState::NotReviewed,
-            Some(tick) if Some(&tick.blob) == current_blob => ReviewState::Reviewed,
+            Some(tick) if tick.blob.as_ref() == current_blob => ReviewState::Reviewed,
             Some(_) => ReviewState::ChangedSince,
         }
     }
 
-    /// Tick a file as reviewed at its current content, replacing any older tick.
-    pub fn mark_reviewed(&mut self, path: &str, blob: Oid, head: Oid) {
+    /// Tick a file as reviewed at its current content, replacing any older
+    /// tick. `None` ticks a deleted file.
+    pub fn mark_reviewed(&mut self, path: &str, blob: Option<Oid>, head: Oid) {
         self.reviewed.retain(|tick| tick.path != path);
         self.reviewed.push(ReviewedFile {
             path: path.to_string(),
@@ -288,6 +292,29 @@ impl ReviewFile {
             });
         }
         any
+    }
+
+    /// Drop a `completed` marker the branch has outgrown: new commits can
+    /// change more files, or change a ticked file again. Takes the same
+    /// file list as [`Self::complete_if_all_reviewed`] and returns whether
+    /// the marker was cleared.
+    pub fn verify_completed<'a>(
+        &mut self,
+        files: impl IntoIterator<Item = (&'a str, Option<&'a Oid>)>,
+    ) -> bool {
+        if self.completed.is_none() {
+            return false;
+        }
+        let mut any = false;
+        let all_reviewed = files.into_iter().all(|(path, blob)| {
+            any = true;
+            self.review_state(path, blob) == ReviewState::Reviewed
+        });
+        if all_reviewed && any {
+            return false;
+        }
+        self.completed = None;
+        true
     }
 
     pub fn add_comment(&mut self, new: NewComment) -> String {
@@ -594,7 +621,11 @@ mod tests {
         let mut file = ReviewFile::new("Ada", &resolved());
         let id = file.add_comment(comment("a3f9c1e", 45));
         file.toggle_reaction(&id, ReactionKind::Seen);
-        file.mark_reviewed("src/index/stats.rs", Oid::new("blob1"), Oid::new("head1"));
+        file.mark_reviewed(
+            "src/index/stats.rs",
+            Some(Oid::new("blob1")),
+            Oid::new("head1"),
+        );
         let blob = Oid::new("blob1");
         assert!(
             file.complete_if_all_reviewed(
@@ -632,7 +663,7 @@ mod tests {
             file.review_state("a.rs", Some(&blob)),
             ReviewState::NotReviewed
         );
-        file.mark_reviewed("a.rs", blob.clone(), Oid::new("head1"));
+        file.mark_reviewed("a.rs", Some(blob.clone()), Oid::new("head1"));
         assert_eq!(
             file.review_state("a.rs", Some(&blob)),
             ReviewState::Reviewed
@@ -650,15 +681,66 @@ mod tests {
         let mut file = ReviewFile::new("Ada", &resolved());
         let (a, b) = (Oid::new("blob-a"), Oid::new("blob-b"));
         let head = Oid::new("head1");
-        file.mark_reviewed("a.rs", a.clone(), head.clone());
+        file.mark_reviewed("a.rs", Some(a.clone()), head.clone());
         assert!(!file.complete_if_all_reviewed([("a.rs", Some(&a)), ("b.rs", Some(&b))], &head));
         assert_eq!(file.completed, None);
-        file.mark_reviewed("b.rs", b.clone(), head.clone());
+        file.mark_reviewed("b.rs", Some(b.clone()), head.clone());
         assert!(file.complete_if_all_reviewed([("a.rs", Some(&a)), ("b.rs", Some(&b))], &head));
         assert_eq!(file.completed.as_ref().map(|done| &done.head), Some(&head));
         assert!(
             !file.complete_if_all_reviewed([], &head),
             "no files is not a review"
+        );
+    }
+
+    #[test]
+    fn ticking_a_narrow_scope_does_not_complete_the_branch() {
+        // The regression behind `changed_paths`: the branch changes a.rs and
+        // b.rs, the scope showed only a.rs. Completion must be judged
+        // against the branch's list, and then not trigger.
+        let mut file = ReviewFile::new("Ada", &resolved());
+        let (a, b) = (Oid::new("blob-a"), Oid::new("blob-b"));
+        let head = Oid::new("head1");
+        file.mark_reviewed("a.rs", Some(a.clone()), head.clone());
+        assert!(!file.complete_if_all_reviewed([("a.rs", Some(&a)), ("b.rs", Some(&b))], &head));
+        assert_eq!(file.completed, None);
+    }
+
+    #[test]
+    fn a_deleted_file_ticks_at_no_content() {
+        let mut file = ReviewFile::new("Ada", &resolved());
+        let head = Oid::new("head1");
+        file.mark_reviewed("gone.rs", None, head.clone());
+        assert_eq!(file.review_state("gone.rs", None), ReviewState::Reviewed);
+        let back = Oid::new("blob-back");
+        assert_eq!(
+            file.review_state("gone.rs", Some(&back)),
+            ReviewState::ChangedSince,
+            "a re-added file needs a fresh look"
+        );
+        assert!(file.complete_if_all_reviewed([("gone.rs", None)], &head));
+    }
+
+    #[test]
+    fn a_stale_completed_marker_is_cleared() {
+        let mut file = ReviewFile::new("Ada", &resolved());
+        let (a, b) = (Oid::new("blob-a"), Oid::new("blob-b"));
+        let head = Oid::new("head1");
+        file.mark_reviewed("a.rs", Some(a.clone()), head.clone());
+        assert!(file.complete_if_all_reviewed([("a.rs", Some(&a))], &head));
+
+        assert!(
+            !file.verify_completed([("a.rs", Some(&a))]),
+            "still complete, nothing to clear"
+        );
+        assert!(file.completed.is_some());
+
+        // The branch gained b.rs since the marker was set.
+        assert!(file.verify_completed([("a.rs", Some(&a)), ("b.rs", Some(&b))]));
+        assert_eq!(file.completed, None);
+        assert!(
+            !file.verify_completed([("a.rs", Some(&a)), ("b.rs", Some(&b))]),
+            "already cleared"
         );
     }
 

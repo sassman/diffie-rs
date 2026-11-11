@@ -1,0 +1,17 @@
+{
+  "name": "Light",
+  "author": "diff-review",
+  "themes": [
+    {
+      "name": "Light",
+      "mode": "light",
+      "font.family": "Inter",
+      "mono_font.family": "JetBrains Mono",
+      "mono_font.size": 12.5,
+      "colors": {
+        "chart.4": "#b45309",
+        "base.blue.light": "#2458c5"
+      }
+    }
+  ]
+}

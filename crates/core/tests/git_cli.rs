@@ -183,6 +183,34 @@ fn whole_branch_covers_every_file() {
 }
 
 #[test]
+fn changed_paths_cover_the_whole_branch_at_head_names() {
+    let fixture = Fixture::new();
+    // The rename happens inside the range, so only the head-side name
+    // may show up.
+    git(fixture.directory.path(), &["mv", "b.txt", "renamed.txt"]);
+    git(fixture.directory.path(), &["commit", "-qm", "c6 rename b"]);
+    let backend = fixture.backend();
+    let resolved = backend.resolve(&Fixture::comparison()).unwrap();
+    let mut paths = backend.changed_paths(&resolved).unwrap();
+    paths.sort();
+    assert_eq!(paths, ["a.txt", "renamed.txt"]);
+}
+
+#[test]
+fn commits_touching_maps_each_file_newest_first() {
+    let fixture = Fixture::new();
+    let backend = fixture.backend();
+    let resolved = backend.resolve(&Fixture::comparison()).unwrap();
+    let touched = backend.commits_touching(&resolved).unwrap();
+    assert_eq!(touched.len(), 2);
+    assert_eq!(touched["b.txt"], [fixture.commits[1].clone()]);
+    let a_edits: Vec<Oid> = [4, 3, 2, 0]
+        .map(|index| fixture.commits[index].clone())
+        .into();
+    assert_eq!(touched["a.txt"], a_edits);
+}
+
+#[test]
 fn a_contiguous_selection_is_a_plain_range() {
     let fixture = Fixture::new();
     let backend = fixture.backend();
@@ -283,7 +311,7 @@ fn new_for_me_compares_each_file_with_its_tick() {
     let resolved = backend.resolve(&Fixture::comparison()).unwrap();
     let tick = |path: &str, commit: &Oid| ReviewedFile {
         path: path.into(),
-        blob: backend.blob_id(commit, path).unwrap().unwrap(),
+        blob: backend.blob_id(commit, path).unwrap(),
         commit: commit.clone(),
         at: "2026-11-11T00:00:00Z".into(),
     };
@@ -326,6 +354,63 @@ fn new_for_me_compares_each_file_with_its_tick() {
 }
 
 #[test]
+fn new_for_me_keeps_a_reviewed_deletion_collapsed() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    std::fs::remove_file(root.join("a.txt")).unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "c6 delete a"]);
+    let backend = fixture.backend();
+    let resolved = backend.resolve(&Fixture::comparison()).unwrap();
+
+    // Unticked, the deletion shows in full.
+    let patch = backend.patch(&resolved, &Scope::NewForMe, &[]).unwrap();
+    let a = patch
+        .files
+        .iter()
+        .find(|file| file.path == "a.txt")
+        .unwrap();
+    assert_eq!(a.status, FileStatus::Deleted);
+    assert!(patch.text.contains("diff --git a/a.txt b/a.txt"));
+
+    // Ticked at "deleted", it collapses like any other reviewed file.
+    let reviewed = [ReviewedFile {
+        path: "a.txt".into(),
+        blob: None,
+        commit: resolved.head.clone(),
+        at: "2026-11-11T00:00:00Z".into(),
+    }];
+    let patch = backend
+        .patch(&resolved, &Scope::NewForMe, &reviewed)
+        .unwrap();
+    let a = patch
+        .files
+        .iter()
+        .find(|file| file.path == "a.txt")
+        .unwrap();
+    assert_eq!(a.state, FileState::UnchangedSinceReview);
+    assert!(!patch.text.contains("diff --git a/a.txt b/a.txt"));
+}
+
+#[test]
+fn names_the_project_and_its_worktrees() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    let project = root.file_name().unwrap().to_string_lossy().into_owned();
+    let backend = fixture.backend();
+    assert_eq!(backend.display_names().unwrap(), (project.clone(), None));
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    let side = elsewhere.path().join("side");
+    git(root, &["worktree", "add", side.to_str().unwrap(), "main"]);
+    let linked = GitCli::open(&side).unwrap();
+    assert_eq!(
+        linked.display_names().unwrap(),
+        (project, Some("side".into()))
+    );
+}
+
+#[test]
 fn review_files_live_inside_the_git_directory() {
     let fixture = Fixture::new();
     let backend = fixture.backend();
@@ -333,4 +418,19 @@ fn review_files_live_inside_the_git_directory() {
     assert!(directory.ends_with(".git/review"));
     assert_eq!(backend.author_name().unwrap(), "Ada");
     assert_eq!(backend.blob_id(&fixture.commits[0], "b.txt").unwrap(), None);
+}
+
+#[test]
+fn lists_every_blob_in_one_pass() {
+    let fixture = Fixture::new();
+    let backend = fixture.backend();
+    let head = fixture.commits[4].clone();
+    let blobs = backend.blob_ids(&head).unwrap();
+    for path in ["a.txt", "b.txt"] {
+        assert_eq!(
+            blobs.get(path),
+            backend.blob_id(&head, path).unwrap().as_ref()
+        );
+    }
+    assert_eq!(blobs.len(), 2);
 }

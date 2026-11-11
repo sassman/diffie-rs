@@ -112,7 +112,8 @@ Decided:
   - **Custom**: the commits checked in the commit picker.
 - The commit picker is a dropdown opened by clicking the range in the scope
   bar. The owner called this design "perfect"; do not redesign it.
-  - Every commit is an item with two rows: hash and date, then the title.
+  - Every commit is an item with two rows: the title, then author, age and
+    hash (owner, 2026-11-11; previously hash and date over the title).
   - Every item leads with a checkbox. The range is composed of individual
     commits.
   - Commits in the middle can be left unchecked, so a review can follow a
@@ -195,8 +196,9 @@ Decided:
   contains that commit.
 - Comments do not have to survive history rewrites, as long as going back to
   the revision still shows them.
-- Comments from commits outside the current scope are hidden by default, with
-  a toggle that shows them wherever their line is still unchanged.
+- Comments from commits outside the current scope are shown by default
+  (settled 2026-11-11; they started out hidden), with a toggle that hides
+  them. They appear wherever their line is still unchanged.
 - Comments can be marked done.
 
 Assumed:
@@ -302,6 +304,10 @@ Assumed: each file header says how many of the scope's commits touched the
 file and offers previous and next arrows to walk through only those commits,
 with "all together" as the resting state. This came from combining the commit
 drawer with per-file history.
+
+Deferred (owner, 2026-11-11): the stepper control was removed from the
+header as YAGNI. The touched-by count stays. Revisit when a per-file,
+per-commit patch exists in the backend.
 
 ## 15. Themes and density
 

@@ -52,6 +52,33 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
+/// `6 days ago`-style relative time for commit lists. A future instant
+/// (clock skew between machines) reads as "just now".
+pub fn ago(unix_seconds: i64, now: i64) -> String {
+    let delta = now - unix_seconds;
+    if delta < 60 {
+        return "just now".into();
+    }
+    let (value, unit) = if delta < 3_600 {
+        (delta / 60, "minute")
+    } else if delta < 86_400 {
+        (delta / 3_600, "hour")
+    } else if delta < 7 * 86_400 {
+        (delta / 86_400, "day")
+    } else if delta < 30 * 86_400 {
+        (delta / (7 * 86_400), "week")
+    } else if delta < 365 * 86_400 {
+        (delta / (30 * 86_400), "month")
+    } else {
+        (delta / (365 * 86_400), "year")
+    };
+    if value == 1 {
+        format!("1 {unit} ago")
+    } else {
+        format!("{value} {unit}s ago")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,5 +89,18 @@ mod tests {
         assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(rfc3339(1_794_384_145), "2026-11-11T08:02:25Z");
         assert_eq!(short_date(1_794_384_145), "11 Nov");
+    }
+
+    #[test]
+    fn humanizes_time_since() {
+        let now = 1_794_384_145;
+        assert_eq!(ago(now - 5, now), "just now");
+        assert_eq!(ago(now + 120, now), "just now");
+        assert_eq!(ago(now - 90, now), "1 minute ago");
+        assert_eq!(ago(now - 7_200, now), "2 hours ago");
+        assert_eq!(ago(now - 6 * 86_400, now), "6 days ago");
+        assert_eq!(ago(now - 20 * 86_400, now), "2 weeks ago");
+        assert_eq!(ago(now - 100 * 86_400, now), "3 months ago");
+        assert_eq!(ago(now - 800 * 86_400, now), "2 years ago");
     }
 }

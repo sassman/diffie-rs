@@ -62,13 +62,11 @@ fn main() {
     {
         source = branch;
     }
-    let name = std::fs::canonicalize(&path)
-        .ok()
-        .and_then(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| "repository".to_string());
+    // The project keeps its name in every worktree; the worktree shows
+    // beside it in the title bar.
+    let (name, worktree) = backend
+        .display_names()
+        .unwrap_or_else(|_| ("repository".to_string(), None));
     let comparison = Comparison {
         source,
         target,
@@ -80,6 +78,31 @@ fn main() {
         // the Kit's own 101 icons; swap/collapse-all are outside that set.
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
+            // Inter and JetBrains Mono (both OFL) ship in the binary so the
+            // themes can name them on every platform. Fonts must be registered
+            // before the first window measures text.
+            cx.text_system()
+                .add_fonts(vec![
+                    include_bytes!("../assets/fonts/Inter-Regular.ttf")
+                        .as_slice()
+                        .into(),
+                    include_bytes!("../assets/fonts/Inter-Medium.ttf")
+                        .as_slice()
+                        .into(),
+                    include_bytes!("../assets/fonts/Inter-SemiBold.ttf")
+                        .as_slice()
+                        .into(),
+                    include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf")
+                        .as_slice()
+                        .into(),
+                    include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf")
+                        .as_slice()
+                        .into(),
+                    include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf")
+                        .as_slice()
+                        .into(),
+                ])
+                .expect("the embedded fonts must load");
             gpui_kit::init(cx);
             app::init(cx);
             let options = WindowOptions {
@@ -89,7 +112,16 @@ fn main() {
                 ..TitleBar::window_options()
             };
             gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| app::ReviewApp::new(backend, name.into(), comparison, window, cx))
+                cx.new(|cx| {
+                    app::ReviewApp::new(
+                        backend,
+                        name.into(),
+                        worktree.map(Into::into),
+                        comparison,
+                        window,
+                        cx,
+                    )
+                })
             })
             .expect("failed to open the review window");
             cx.activate(true);
