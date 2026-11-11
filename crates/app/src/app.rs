@@ -2982,7 +2982,7 @@ impl Render for ReviewApp {
                         let payload = this.text_selection_range().and_then(|range| {
                             let text = gpui_kit::base::TextSelection::selected_text(window, cx);
                             let text = text.trim().to_string();
-                            (text.chars().count() > 1).then(|| (range, Some(text)))
+                            (text.chars().count() > 1).then_some((range, Some(text)))
                         });
                         if let Some(payload) = payload {
                             this.pending_comment = Some(payload);
