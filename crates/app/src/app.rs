@@ -2035,15 +2035,15 @@ impl ReviewApp {
             )
     }
 
-    fn render_file_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn render_file_row(&self, index: usize, depth: usize, cx: &mut Context<Self>) -> AnyElement {
         let file = &self.files[index];
         let muted = cx.theme().muted_foreground;
         let mono = cx.theme().mono_font_family.clone();
         let path = SharedString::from(file.path.clone());
-        let (folder, name) = file
+        let name = file
             .path
             .rsplit_once('/')
-            .map_or(("", file.path.as_str()), |(folder, name)| (folder, name));
+            .map_or(file.path.as_str(), |(_, name)| name);
         let (status, status_color) = match file.status {
             FileStatus::Added => ("A", cx.theme().success),
             FileStatus::Deleted => ("D", cx.theme().danger),
@@ -2074,7 +2074,8 @@ impl ReviewApp {
             .id(path.clone())
             .w_full()
             .h(px(22.))
-            .px(px(4.))
+            .pl(px(4. + depth as f32 * 10.))
+            .pr(px(4.))
             .gap(px(6.))
             .rounded(px(4.))
             .cursor_pointer()
@@ -2091,22 +2092,7 @@ impl ReviewApp {
                     .text_color(status_color)
                     .child(status),
             )
-            // The folder shrinks away first; the name itself stays readable.
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .when(!folder.is_empty(), |row| {
-                        row.child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(muted)
-                                .child(format!("{folder}/")),
-                        )
-                    })
-                    .child(div().flex_none().truncate().child(name.to_string())),
-            )
+            .child(div().flex_1().min_w_0().truncate().child(name.to_string()))
             .when(comments > 0, |row| row.child(comment_badge(comments, cx)))
             .when(state == ReviewState::Reviewed, |row| {
                 row.child(
@@ -2130,6 +2116,40 @@ impl ReviewApp {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
+        // Folder rows over indented files, but strictly in the patch's own
+        // order: reading the panel top to bottom is reading the diff (owner,
+        // 2026-11-11; a sorted tree put the two out of step). One linear
+        // pass opens a folder row whenever the folder chain changes, so a
+        // patch order that revisits a folder would repeat its header rather
+        // than reorder a single one.
+        enum TreeRow {
+            Folder { label: SharedString, depth: usize },
+            File { index: usize, depth: usize },
+        }
+        let mut rows = Vec::new();
+        let mut previous: Vec<String> = Vec::new();
+        for (index, file) in self.files.iter().enumerate() {
+            let mut folders: Vec<String> = file.path.split('/').map(String::from).collect();
+            folders.pop();
+            let common = previous
+                .iter()
+                .zip(&folders)
+                .take_while(|(kept, part)| kept == part)
+                .count();
+            for (depth, part) in folders.iter().enumerate().skip(common) {
+                rows.push(TreeRow::Folder {
+                    label: format!("{part} /").into(),
+                    depth,
+                });
+            }
+            rows.push(TreeRow::File {
+                index,
+                depth: folders.len(),
+            });
+            previous = folders;
+        }
+        let rows = Rc::new(rows);
+
         let reviewed = self
             .files
             .iter()
@@ -2172,16 +2192,27 @@ impl ReviewApp {
                     ),
             )
             .child(
-                // A flat list in the patch's own order, so the file on top
-                // here is the file on top of the diff; a folder tree sorted
-                // the two sides differently (owner, 2026-11-11). Virtualized:
-                // with thousands of changed files, an element per row each
-                // frame froze the window.
+                // Virtualized: with thousands of changed files, an element
+                // per row each frame froze the window.
                 gpui_kit::uniform_list(
                     "file-list",
-                    self.files.len(),
+                    rows.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                        range.map(|index| this.render_file_row(index, cx)).collect()
+                        rows[range]
+                            .iter()
+                            .map(|row| match row {
+                                TreeRow::Folder { label, depth } => div()
+                                    .h(px(22.))
+                                    .line_height(px(22.))
+                                    .pl(px(4. + *depth as f32 * 10.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(label.clone())
+                                    .into_any_element(),
+                                TreeRow::File { index, depth } => {
+                                    this.render_file_row(*index, *depth, cx)
+                                }
+                            })
+                            .collect::<Vec<_>>()
                     }),
                 )
                 .flex_1()
