@@ -39,6 +39,9 @@ pub struct Comparison {
     /// The branch the changes are going into.
     pub target: String,
     pub mode: CompareMode,
+    /// Review the working tree's uncommitted changes instead of resolving
+    /// `source`, which then only names the review in the UI and on disk.
+    pub uncommitted: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -124,8 +127,9 @@ pub struct FileSummary {
 pub enum NewSide {
     /// A real commit: lines can be blamed.
     Commit(Oid),
-    /// A tree built by combining non-contiguous commits. It exists nowhere in
-    /// history, so blame is not available (see docs/design-decisions.md, open
+    /// Lines that exist in no commit: a tree built by combining
+    /// non-contiguous commits, or the working tree's uncommitted state.
+    /// Blame is not available (see docs/design-decisions.md, open
     /// questions).
     Synthetic,
 }

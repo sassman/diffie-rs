@@ -87,6 +87,10 @@ Decided:
 - A swap button reverses the direction (for example when sitting on `main` and
   comparing with `next`).
 - The term "merge-base" confuses the owner. Do not show it in the UI.
+- Opened with neither `--source` nor `--target`, the app reviews the
+  uncommitted changes (untracked files included) going into the checked-out
+  branch, shown as "uncommitted going into `branch`" (owner, 2026-11-11).
+  The swap button hides there; the working tree cannot be a target.
 
 Assumed:
 

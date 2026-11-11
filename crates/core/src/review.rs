@@ -595,6 +595,7 @@ mod tests {
                 source: "feat/index-cache".into(),
                 target: "main".into(),
                 mode: CompareMode::BranchAdds,
+                uncommitted: false,
             },
             head: Oid::new("h".repeat(40)),
             target_head: Oid::new("t".repeat(40)),

@@ -10,12 +10,14 @@ const USAGE: &str = "\
 Usage: review [--source REV] [--target REV] [--every-difference] [repository]
 
 Reviews the changes in --source (default HEAD) going into --target (default main).
-The repository defaults to the current directory. Requires git on PATH.";
+With neither --source nor --target, reviews the uncommitted changes going into
+the checked-out branch. The repository defaults to the current directory.
+Requires git on PATH.";
 
 fn main() {
     let mut repository = None;
-    let mut source = String::from("HEAD");
-    let mut target = String::from("main");
+    let mut source: Option<String> = None;
+    let mut target: Option<String> = None;
     let mut mode = CompareMode::BranchAdds;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
@@ -33,9 +35,9 @@ fn main() {
                     std::process::exit(2);
                 };
                 if text == "--source" {
-                    source = value;
+                    source = Some(value);
                 } else {
-                    target = value;
+                    target = Some(value);
                 }
             }
             _ if !text.starts_with('-') && repository.is_none() => {
@@ -56,22 +58,41 @@ fn main() {
             std::process::exit(1);
         }
     };
-    // Name the review after the branch, not after the literal `HEAD`.
-    if source == "HEAD"
-        && let Ok(Some(branch)) = backend.current_branch()
+    let branch = backend.current_branch().ok().flatten();
+    // Opened plainly, the review is the uncommitted work going into the
+    // checked-out branch. A bare repository or a detached HEAD has no such
+    // review and falls back to branch against main.
+    let plain = source.is_none() && target.is_none();
+    let comparison = if let Some(into) = branch
+        .clone()
+        .filter(|_| plain && backend.has_working_tree().unwrap_or(false))
     {
-        source = branch;
-    }
+        Comparison {
+            source: "uncommitted".to_string(),
+            target: into,
+            mode,
+            uncommitted: true,
+        }
+    } else {
+        let mut source = source.unwrap_or_else(|| "HEAD".to_string());
+        // Name the review after the branch, not after the literal `HEAD`.
+        if source == "HEAD"
+            && let Some(branch) = branch
+        {
+            source = branch;
+        }
+        Comparison {
+            source,
+            target: target.unwrap_or_else(|| "main".to_string()),
+            mode,
+            uncommitted: false,
+        }
+    };
     // The project keeps its name in every worktree; the worktree shows
     // beside it in the title bar.
     let (name, worktree) = backend
         .display_names()
         .unwrap_or_else(|_| ("repository".to_string(), None));
-    let comparison = Comparison {
-        source,
-        target,
-        mode,
-    };
 
     gpui_kit::application()
         // The full Lucide catalogue (about 1 MiB). The default `Assets` embeds only

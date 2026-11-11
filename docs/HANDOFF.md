@@ -52,7 +52,13 @@ cargo run -p review-app -- --target main /path/to/repository
 ```
 
 Arguments: `--source REV` (default: the checked-out branch), `--target REV`
-(default `main`), `--every-difference`, then the repository path.
+(default `main`), `--every-difference`, then the repository path. With
+neither `--source` nor `--target`, the review is the working tree's
+uncommitted changes going into the checked-out branch
+(`Comparison::uncommitted`): the diff runs against a scratch index seeded
+with intent-to-add entries so untracked files show, ticks hash the file on
+disk (`worktree_blob_ids`), and the patch's new side is `Synthetic`, so
+comments cannot blame an exact commit there.
 
 Linux packages are listed in `README.md`.
 

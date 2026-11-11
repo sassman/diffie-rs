@@ -72,6 +72,13 @@ pub trait ReviewBackend: Send + Sync {
     /// file turns a fast load into a near-minute stall.
     fn blob_ids(&self, rev: &Oid) -> Result<std::collections::HashMap<String, Oid>>;
 
+    /// The content id each of `paths` would get if committed from the
+    /// working tree, in one pass. A path missing on disk is absent from the
+    /// map, so a deletion reads the same as in [`Self::blob_ids`]. This is
+    /// what an uncommitted review ticks against instead of a tree.
+    fn worktree_blob_ids(&self, paths: &[String])
+    -> Result<std::collections::HashMap<String, Oid>>;
+
     /// The reviewer's name as git knows it (`user.name`).
     fn author_name(&self) -> Result<String>;
 

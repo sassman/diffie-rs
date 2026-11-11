@@ -88,6 +88,7 @@ impl Fixture {
             source: "feat".into(),
             target: "main".into(),
             mode: CompareMode::BranchAdds,
+            uncommitted: false,
         }
     }
 
@@ -433,4 +434,106 @@ fn lists_every_blob_in_one_pass() {
         );
     }
     assert_eq!(blobs.len(), 2);
+}
+
+#[test]
+fn reviews_the_uncommitted_working_tree() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    // Uncommitted state on `feat`: a.txt edited, b.txt deleted, c.txt new
+    // and untracked, d.txt ignored.
+    std::fs::write(
+        root.join("a.txt"),
+        lines(&[(2, "TWO"), (5, "FIVE"), (9, "NINE")]),
+    )
+    .unwrap();
+    std::fs::remove_file(root.join("b.txt")).unwrap();
+    std::fs::write(root.join("c.txt"), "fresh\n").unwrap();
+    std::fs::write(root.join("d.txt"), "noise\n").unwrap();
+    std::fs::write(root.join(".gitignore"), ".gitignore\nd.txt\n").unwrap();
+
+    let backend = fixture.backend();
+    let comparison = Comparison {
+        source: "uncommitted".into(),
+        target: "feat".into(),
+        mode: CompareMode::BranchAdds,
+        uncommitted: true,
+    };
+    let resolved = backend.resolve(&comparison).unwrap();
+    assert_eq!(resolved.base, resolved.head);
+    assert!(backend.commits(&resolved).unwrap().is_empty());
+
+    let mut changed = backend.changed_paths(&resolved).unwrap();
+    changed.sort();
+    assert_eq!(changed, ["a.txt", "b.txt", "c.txt"]);
+
+    let patch = backend.patch(&resolved, &Scope::WholeBranch, &[]).unwrap();
+    assert_eq!(patch.new_side, NewSide::Synthetic);
+    let status = |path: &str| {
+        patch
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap()
+            .status
+    };
+    assert_eq!(status("a.txt"), FileStatus::Modified);
+    assert_eq!(status("b.txt"), FileStatus::Deleted);
+    assert_eq!(status("c.txt"), FileStatus::Added);
+    assert!(patch.text.contains("+fresh"));
+
+    // The repository itself is untouched: still clean apart from our edits.
+    let dirty = git(root, &["status", "--porcelain"]);
+    assert!(!dirty.contains("A "), "nothing staged: {dirty}");
+}
+
+#[test]
+fn an_uncommitted_tick_holds_the_content_on_disk() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    std::fs::write(root.join("c.txt"), "fresh\n").unwrap();
+    std::fs::remove_file(root.join("b.txt")).unwrap();
+
+    let backend = fixture.backend();
+    let comparison = Comparison {
+        source: "uncommitted".into(),
+        target: "feat".into(),
+        mode: CompareMode::BranchAdds,
+        uncommitted: true,
+    };
+    let resolved = backend.resolve(&comparison).unwrap();
+
+    let ids = backend
+        .worktree_blob_ids(&["b.txt".into(), "c.txt".into()])
+        .unwrap();
+    // The deleted file hashes to nothing; the new one to its disk content.
+    assert!(!ids.contains_key("b.txt"));
+    let tick = |path: &str| ReviewedFile {
+        path: path.into(),
+        blob: ids.get(path).cloned(),
+        commit: resolved.head.clone(),
+        at: "2026-11-11T00:00:00Z".into(),
+    };
+
+    let patch = backend
+        .patch(&resolved, &Scope::NewForMe, &[tick("b.txt"), tick("c.txt")])
+        .unwrap();
+    for path in ["b.txt", "c.txt"] {
+        let file = patch.files.iter().find(|file| file.path == path).unwrap();
+        assert_eq!(file.state, FileState::UnchangedSinceReview, "{path}");
+    }
+    assert!(!patch.text.contains("+fresh"));
+
+    // Edited after the tick: the full file comes back.
+    std::fs::write(root.join("c.txt"), "fresher\n").unwrap();
+    let patch = backend
+        .patch(&resolved, &Scope::NewForMe, &[tick("c.txt")])
+        .unwrap();
+    let c = patch
+        .files
+        .iter()
+        .find(|file| file.path == "c.txt")
+        .unwrap();
+    assert_eq!(c.state, FileState::Changed);
+    assert!(patch.text.contains("+fresher"));
 }

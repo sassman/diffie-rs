@@ -58,6 +58,12 @@ impl GitCli {
             .filter(|name| !name.is_empty()))
     }
 
+    /// Whether a working tree exists. A bare repository has no uncommitted
+    /// state to review.
+    pub fn has_working_tree(&self) -> Result<bool> {
+        Ok(self.try_read(&["rev-parse", "--show-toplevel"])?.is_some())
+    }
+
     /// The project's name and, when [`Self::open`] pointed into a linked
     /// worktree, that worktree's name. The project is named after the
     /// directory holding the common git dir, so every worktree of a
@@ -161,6 +167,41 @@ impl GitCli {
         .collect()
     }
 
+    /// `git diff` of the working tree against `base`, untracked files
+    /// included. A diff only lists untracked files once the index knows
+    /// them, so this runs against a scratch index holding `base`'s tree
+    /// plus intent-to-add entries; the repository's real index stays
+    /// untouched.
+    fn worktree_diff(&self, base: &str, name_only: bool) -> Result<String> {
+        let scratch = Scratch::new()?;
+        let objects = scratch.path.join("objects");
+        std::fs::create_dir_all(&objects)?;
+        let index = scratch.path.join("index");
+        let real_objects =
+            self.absolute(self.read(&["rev-parse", "--git-path", "objects"])?.trim());
+        let scratch_read = |args: &[&str]| -> Result<String> {
+            let mut command = self.command();
+            command
+                .env("GIT_INDEX_FILE", &index)
+                .env("GIT_OBJECT_DIRECTORY", &objects)
+                .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &real_objects);
+            run(command.args(args), args, None)
+        };
+        scratch_read(&["read-tree", "--end-of-options", base])?;
+        // `:/` keeps the sweep repository-wide even when the backend was
+        // opened from a subdirectory.
+        scratch_read(&["add", "--intent-to-add", "--", ":/"])?;
+        let mut args = Self::diff_args();
+        if name_only {
+            args.push("--name-only".to_string());
+            args.push("-z".to_string());
+        }
+        args.push(base.to_string());
+        args.push("--".to_string());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        scratch_read(&args)
+    }
+
     fn diff(&self, from: &str, to: &str, paths: &[&str]) -> Result<String> {
         let mut args = Self::diff_args();
         args.push(from.to_string());
@@ -192,8 +233,21 @@ impl GitCli {
     fn new_for_me(&self, resolved: &Resolved, reviewed: &[ReviewedFile]) -> Result<ScopedPatch> {
         let base = resolved.base.as_str();
         let head = resolved.head.as_str();
-        let whole = self.diff(base, head, &[])?;
-        let tree = self.blob_ids(&resolved.head)?;
+        let uncommitted = resolved.comparison.uncommitted;
+        let whole = if uncommitted {
+            self.worktree_diff(base, false)?
+        } else {
+            self.diff(base, head, &[])?
+        };
+        let tree = if uncommitted {
+            let paths: Vec<String> = split_files(&whole)
+                .into_iter()
+                .map(|(summary, _)| summary.path)
+                .collect();
+            self.worktree_blob_ids(&paths)?
+        } else {
+            self.blob_ids(&resolved.head)?
+        };
         let mut text = String::new();
         let mut files = Vec::new();
 
@@ -209,12 +263,14 @@ impl GitCli {
                         ..summary
                     });
                 }
+                // A worktree hash names no stored object, so an uncommitted
+                // review cannot diff since the tick and shows the full file.
                 (
                     Some(ReviewedFile {
                         blob: Some(old), ..
                     }),
                     Some(current),
-                ) if self.object_exists(old)? => {
+                ) if !uncommitted && self.object_exists(old)? => {
                     let since = self.diff(old.as_str(), current.as_str(), &[])?;
                     let since = relabel_blob_diff(&since, &summary.path);
                     let counted = split_files(&since)
@@ -240,7 +296,7 @@ impl GitCli {
         Ok(ScopedPatch {
             text,
             files,
-            new_side: NewSide::Commit(resolved.head.clone()),
+            new_side: new_side_of(resolved),
         })
     }
 
@@ -388,7 +444,13 @@ impl GitCli {
 
 impl ReviewBackend for GitCli {
     fn resolve(&self, comparison: &Comparison) -> Result<Resolved> {
-        let head = self.commit_id(&comparison.source)?;
+        // An uncommitted review diffs the working tree, so `head` is only
+        // the anchor for merge-base and review bookkeeping.
+        let head = if comparison.uncommitted {
+            self.commit_id("HEAD")?
+        } else {
+            self.commit_id(&comparison.source)?
+        };
         let target_head = self.commit_id(&comparison.target)?;
         let base = match comparison.mode {
             CompareMode::EveryDifference => target_head.clone(),
@@ -434,6 +496,14 @@ impl ReviewBackend for GitCli {
     }
 
     fn changed_paths(&self, resolved: &Resolved) -> Result<Vec<String>> {
+        if resolved.comparison.uncommitted {
+            let output = self.worktree_diff(resolved.base.as_str(), true)?;
+            return Ok(output
+                .split('\0')
+                .filter(|path| !path.is_empty())
+                .map(String::from)
+                .collect());
+        }
         // `--find-renames` lists a renamed file once, under its name at
         // `head`, the same name `split_files` summarizes it under.
         let output = self.read(&[
@@ -495,8 +565,12 @@ impl ReviewBackend for GitCli {
         match scope {
             Scope::NewForMe => self.new_for_me(resolved, reviewed),
             Scope::WholeBranch => {
-                let text = self.diff(resolved.base.as_str(), resolved.head.as_str(), &[])?;
-                Ok(patch_from(text, NewSide::Commit(resolved.head.clone())))
+                let text = if resolved.comparison.uncommitted {
+                    self.worktree_diff(resolved.base.as_str(), false)?
+                } else {
+                    self.diff(resolved.base.as_str(), resolved.head.as_str(), &[])?
+                };
+                Ok(patch_from(text, new_side_of(resolved)))
             }
             Scope::Commits(picked) => {
                 let (ordered, contiguous) = self.in_history_order(resolved, picked)?;
@@ -559,6 +633,35 @@ impl ReviewBackend for GitCli {
         Ok(blobs)
     }
 
+    fn worktree_blob_ids(&self, paths: &[String]) -> Result<HashMap<String, Oid>> {
+        let top = self
+            .try_read(&["rev-parse", "--show-toplevel"])?
+            .map(|output| PathBuf::from(output.trim()))
+            .ok_or_else(|| BackendError::NotARepository(self.repository.display().to_string()))?;
+        // One `hash-object` call for every path. Absolute paths keep the
+        // call independent of where the backend was opened. `--stdin-paths`
+        // is newline-separated, so a path containing one cannot be hashed
+        // and reads as absent, like a deletion.
+        let present: Vec<&String> = paths
+            .iter()
+            .filter(|path| !path.contains('\n') && top.join(path).is_file())
+            .collect();
+        if present.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let list: String = present
+            .iter()
+            .map(|path| format!("{}\n", top.join(path).display()))
+            .collect();
+        let args = ["hash-object", "--stdin-paths"];
+        let output = run(self.command().args(args), &args, Some(list.as_bytes()))?;
+        Ok(present
+            .into_iter()
+            .zip(output.lines())
+            .map(|(path, id)| (path.clone(), Oid::new(id.trim())))
+            .collect())
+    }
+
     fn author_name(&self) -> Result<String> {
         let name = self
             .try_read(&["config", "user.name"])?
@@ -603,6 +706,15 @@ fn run(command: &mut Command, args: &[&str], stdin: Option<&[u8]>) -> Result<Str
             command: args.first().copied().unwrap_or_default().to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         })
+    }
+}
+
+/// Uncommitted lines exist in no commit, so blame has nothing to find.
+fn new_side_of(resolved: &Resolved) -> NewSide {
+    if resolved.comparison.uncommitted {
+        NewSide::Synthetic
+    } else {
+        NewSide::Commit(resolved.head.clone())
     }
 }
 

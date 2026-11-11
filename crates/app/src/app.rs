@@ -1439,24 +1439,39 @@ impl ReviewApp {
                     bar.child(marked(Lucide::FolderGit2, worktree.to_string()))
                 })
                 .child(div().text_color(muted).child("/"))
-                .child(marked(Lucide::GitBranch, self.comparison.source.clone()))
+                .child(marked(
+                    if self.comparison.uncommitted {
+                        Lucide::Pencil
+                    } else {
+                        Lucide::GitBranch
+                    },
+                    self.comparison.source.clone(),
+                ))
                 .child(div().text_color(muted).child("going into"))
                 .child(marked(Lucide::GitBranch, self.comparison.target.clone()))
-                .child(
-                    Button::new("swap")
-                        .outline()
-                        .xsmall()
-                        .w(px(24.))
-                        .h(px(22.))
-                        .icon(Icon::new(Lucide::ArrowLeftRight))
-                        .tooltip("Swap direction")
-                        .on_click(cx.listener(|this, _, _, cx| this.swap_direction(cx))),
-                )
+                // Swapping would make the working tree the target, which is
+                // nothing git can resolve.
+                .when(!self.comparison.uncommitted, |bar| {
+                    bar.child(
+                        Button::new("swap")
+                            .outline()
+                            .xsmall()
+                            .w(px(24.))
+                            .h(px(22.))
+                            .icon(Icon::new(Lucide::ArrowLeftRight))
+                            .tooltip("Swap direction")
+                            .on_click(cx.listener(|this, _, _, cx| this.swap_direction(cx))),
+                    )
+                })
                 .child(
                     div()
                         .text_color(muted)
                         .truncate()
-                        .child("only what the branch adds"),
+                        .child(if self.comparison.uncommitted {
+                            "only what is not yet committed"
+                        } else {
+                            "only what the branch adds"
+                        }),
                 )
                 .child(div().flex_1())
                 .child(
@@ -3163,15 +3178,23 @@ fn load(
         }
     }
     let runs = changed_runs(&patch.text);
+    let changed = backend.changed_paths(&resolved).map_err(text)?;
     // One tree listing instead of a `blob_id` subprocess per file: a large
-    // commit changes thousands of files. An absent path is a deletion.
-    let tree = backend.blob_ids(&resolved.head).map_err(text)?;
+    // commit changes thousands of files. An absent path is a deletion. An
+    // uncommitted review ticks against what is on disk, not against `head`.
+    let tree = if comparison.uncommitted {
+        let mut paths = changed.clone();
+        paths.extend(patch.files.iter().map(|file| file.path.clone()));
+        backend.worktree_blob_ids(&paths).map_err(text)?
+    } else {
+        backend.blob_ids(&resolved.head).map_err(text)?
+    };
     let mut blobs = HashMap::new();
     for file in &patch.files {
         blobs.insert(file.path.clone(), tree.get(&file.path).cloned());
     }
     let mut branch = Vec::new();
-    for path in backend.changed_paths(&resolved).map_err(text)? {
+    for path in changed {
         let blob = tree.get(&path).cloned();
         branch.push((path, blob));
     }
