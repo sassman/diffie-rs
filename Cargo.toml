@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[workspace.dependencies]
+review-core = { path = "crates/core" }
+# GPUI Kit re-exports GPUI and pins the matching GPUI snapshot itself.
+# Pin exactly: every Kit release may move to a GPUI snapshot with API changes.
+gpui-kit = { version = "=0.9.1", features = ["syntect"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+thiserror = "2"
+
+[profile.dev]
+# GPUI is slow unoptimised; keep our own crates fast to rebuild.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
