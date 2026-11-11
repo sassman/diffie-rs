@@ -2337,11 +2337,14 @@ impl ReviewApp {
                     None => render_draft(snapshot, owner.clone(), cx),
                 }
             })
-            // The Kit's own add-annotation button sits over the first
-            // characters of the code, and its marker lane costs a permanent
-            // gap between numbers and code, so the app uses neither: a
-            // floating + pinned at the pointer when a selection ends (see
-            // the root's capture handlers).
+            // Two ways into a comment: the diff's own + beside the hovered
+            // line number for line comments, and the floating + pinned at
+            // the pointer for real text selections (the root's capture
+            // handlers). The marker lane stays off; it would cost a
+            // permanent gap between numbers and code.
+            .on_add_annotation(cx.listener(|this, range: &DiffLineRange, window, cx| {
+                this.start_comment(range.clone(), None, window, cx);
+            }))
             .on_line_hover(move |position, window, cx| {
                 let position = position.cloned();
                 let selecting = gpui_kit::base::TextSelection::has_selection(window, cx);
@@ -2971,21 +2974,16 @@ impl Render for ReviewApp {
                         }
                         // Everything the comment needs is captured here:
                         // pressing the button clears the selection before a
-                        // click could read it. Gutter line selections pin the
-                        // button too; they carry their own range.
-                        let payload = this
-                            .diff
-                            .read(cx)
-                            .selected_lines()
-                            .map(|range| (range, None))
-                            .or_else(|| {
-                                this.text_selection_range().map(|range| {
-                                    let text =
-                                        gpui_kit::base::TextSelection::selected_text(window, cx);
-                                    let text = text.trim();
-                                    (range, (!text.is_empty()).then(|| text.to_string()))
-                                })
-                            });
+                        // click could read it. Only a selection with real
+                        // text pins the button: a double click reports a
+                        // selection too, and following it put the button at
+                        // arbitrary spots. Line comments start from the
+                        // diff's own hover button instead.
+                        let payload = this.text_selection_range().and_then(|range| {
+                            let text = gpui_kit::base::TextSelection::selected_text(window, cx);
+                            let text = text.trim().to_string();
+                            (text.chars().count() > 1).then(|| (range, Some(text)))
+                        });
                         if let Some(payload) = payload {
                             this.pending_comment = Some(payload);
                             this.text_button_at = Some(event.position);

@@ -201,6 +201,10 @@ Decided:
 
 - Comments and suggestions can be made on any line or selection, including a
   selection inside a line.
+- Two entry points (owner, 2026-11-11): a + beside the hovered line number
+  for line comments, and a + pinned at the pointer when a text selection
+  with real content ends. A click or double click without selected text
+  shows no button.
 - A comment is written and read inline, directly under the line.
 - A comment belongs to the commit that wrote the line (found by blame), not to
   the range that happened to be on screen. It then shows in every scope that
