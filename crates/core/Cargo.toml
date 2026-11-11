@@ -1,6 +1,6 @@
 [package]
-name = "review-core"
-description = "UI-free core: repository access, diff production and the review file."
+name = "diffie-core"
+description = "diffie core with repository access, diff production and the review file."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

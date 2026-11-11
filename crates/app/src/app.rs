@@ -9,6 +9,14 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use diffie_core::review::{
+    NewComment, Placement, ReactionKind, ReviewFile, ReviewSet, ReviewState, Side, as_prompt, place,
+};
+use diffie_core::time::ago;
+use diffie_core::{
+    BlameLine, Commit, Comparison, FileState, FileStatus, FileSummary, NewSide, Oid, Resolved,
+    ReviewBackend, Scope, ScopedPatch,
+};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
@@ -37,14 +45,6 @@ use gpui_kit::{
     FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement, KeyBinding,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, WeakEntity, Window, div, prelude::FluentBuilder as _, px, rgb,
-};
-use review_core::review::{
-    NewComment, Placement, ReactionKind, ReviewFile, ReviewSet, ReviewState, Side, as_prompt, place,
-};
-use review_core::time::ago;
-use review_core::{
-    BlameLine, Commit, Comparison, FileState, FileStatus, FileSummary, NewSide, Oid, Resolved,
-    ReviewBackend, Scope, ScopedPatch,
 };
 
 mod commands {
@@ -3125,7 +3125,7 @@ fn load(
     scope: &Scope,
     mine: Option<ReviewFile>,
 ) -> Result<Loaded, String> {
-    let text = |error: review_core::BackendError| error.to_string();
+    let text = |error: diffie_core::BackendError| error.to_string();
     let resolved = backend.resolve(comparison).map_err(text)?;
     let commits = backend.commits(&resolved).map_err(text)?;
     let author = backend.author_name().map_err(text)?;
@@ -3233,7 +3233,7 @@ fn place_all(
     reviews: &ReviewSet,
     patch: &ScopedPatch,
     in_scope: &HashSet<Oid>,
-) -> Result<Vec<Placed>, review_core::BackendError> {
+) -> Result<Vec<Placed>, diffie_core::BackendError> {
     let shown: HashSet<&str> = patch
         .files
         .iter()

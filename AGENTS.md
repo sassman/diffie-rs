@@ -22,7 +22,7 @@ Windows and Linux.
 3. **Use Kit components before writing your own.** In particular the diff view
    is `gpui_kit::component::diff::Diff`. Do not hand-roll diff rendering,
    virtualization, selection or annotations.
-4. **`review-core` has no UI dependency.** It must never depend on `gpui-kit`
+4. **`diffie-core` has no UI dependency.** It must never depend on `gpui-kit`
    or on `diffie`. The UI reaches the repository only through the
    `ReviewBackend` trait.
 5. **Never write to the reviewed repository.** No changes to its objects,
@@ -110,7 +110,7 @@ When calling git:
 ## Commands
 
 ```sh
-cargo test -p review-core          # fast, no UI
+cargo test -p diffie-core          # fast, no UI
 cargo check -p diffie          # first run compiles GPUI: several minutes
 cargo run -p diffie -- --target main /path/to/repository
 cargo clippy --workspace --all-targets
@@ -122,7 +122,7 @@ Linux build dependencies are listed in `README.md`.
 ## Before you finish a change
 
 - `cargo fmt --all`, `cargo clippy --workspace --all-targets` and
-  `cargo test -p review-core` are clean.
+  `cargo test -p diffie-core` are clean.
 - `cargo check -p diffie` has no warnings.
 - `docs/HANDOFF.md` reflects the new state if you changed what exists or what
   is next.

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::{AppContext as _, WindowBounds, WindowOptions, component::TitleBar, px, size};
-use review_core::{CompareMode, Comparison, GitCli};
+use diffie_core::{CompareMode, Comparison, GitCli};
 
 const USAGE: &str = "\
 Usage: review [--source REV] [--target REV] [--every-difference] [repository]

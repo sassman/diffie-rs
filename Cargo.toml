@@ -9,7 +9,7 @@ rust-version = "1.88"
 publish = false
 
 [workspace.dependencies]
-review-core = { path = "crates/core" }
+diffie-core = { path = "crates/core" }
 # GPUI Kit re-exports GPUI and pins the matching GPUI snapshot itself.
 # Pin exactly: every Kit release may move to a GPUI snapshot with API changes.
 gpui-kit = { version = "=0.9.1", features = ["syntect"] }

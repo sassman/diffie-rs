@@ -3,8 +3,8 @@
 use std::path::Path;
 use std::process::Command;
 
-use review_core::review::ReviewedFile;
-use review_core::{
+use diffie_core::review::ReviewedFile;
+use diffie_core::{
     BackendError, CompareMode, Comparison, FileState, FileStatus, GitCli, NewSide, Oid,
     ReviewBackend, Scope,
 };
@@ -110,7 +110,7 @@ impl Fixture {
     }
 }
 
-fn paths(files: &[review_core::FileSummary]) -> Vec<&str> {
+fn paths(files: &[diffie_core::FileSummary]) -> Vec<&str> {
     let mut paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
     paths.sort();
     paths

@@ -14,7 +14,7 @@ This is an early scaffold. Start with:
 ## Layout
 
 ```text
-crates/core   review-core: repository access, diffs, the review file. No UI.
+crates/core   diffie-core: repository access, diffs, the review file. No UI.
 crates/app    diffie: the GPUI Kit window and binary.
 docs/         design decisions, handoff, mockup
 ```
@@ -24,7 +24,7 @@ docs/         design decisions, handoff, mockup
 Requires a recent stable Rust (edition 2024) and `git` on the PATH.
 
 ```sh
-cargo test -p review-core
+cargo test -p diffie-core
 cargo run -p diffie -- --target main /path/to/repository
 ```
 

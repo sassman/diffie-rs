@@ -30,7 +30,7 @@ Be exact about this when you report further work.
 
 | Claim | Status |
 | --- | --- |
-| `cargo test -p review-core`: 24 tests pass | Verified on Linux, git 2.43 |
+| `cargo test -p diffie-core`: 24 tests pass | Verified on Linux, git 2.43 |
 | `cargo clippy --workspace --all-targets` is clean | Verified |
 | `cargo check -p diffie` compiles with no warnings | Verified on Linux, Rust 1.97, gpui-kit 0.9.1 |
 | The window opens and renders | Verified on Linux under Xvfb with a software Vulkan driver (lavapipe). Screenshots in `docs/screenshots/` |
@@ -45,7 +45,7 @@ Be exact about this when you report further work.
 ## Build, run, test
 
 ```sh
-cargo test -p review-core
+cargo test -p diffie-core
 cargo check -p diffie      # first run compiles GPUI: about 8 minutes on 2 cores
                                # (a full debug build: about 13)
 cargo run -p diffie -- --target main /path/to/repository
