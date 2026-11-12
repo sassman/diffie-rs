@@ -152,20 +152,6 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
-/// Temporary tracing for the text-selection comment flow; remove once it is
-/// settled. Appends to /tmp/diffie-selection-debug.log so a session other
-/// than the one that launched the app can read it.
-fn selection_debug(message: impl AsRef<str>) {
-    use std::io::Write as _;
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/diffie-selection-debug.log")
-    {
-        let _ = writeln!(file, "{}", message.as_ref());
-    }
-}
-
 /// The orange that marks everything comment-related. It rides on the
 /// `chart.4` token because the Kit has no dedicated comment token; every
 /// embedded theme sets `chart.4` to its comment orange.
@@ -661,10 +647,13 @@ impl ReviewApp {
         let scope = self.core_scope();
         let mine = self.reviews.as_ref().map(|set| set.mine.clone());
         let ignore_whitespace = self.ignore_whitespace;
+        tracing::debug!(revision, "reload requested");
         self._load = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    load(&*backend, &comparison, &scope, mine, ignore_whitespace)
+                    let result = load(&*backend, &comparison, &scope, mine, ignore_whitespace);
+                    tracing::debug!(ok = result.is_ok(), "load finished");
+                    result
                 })
                 .await;
             let _ = this.update(cx, |this, cx| this.install(revision, result, cx));
@@ -972,10 +961,7 @@ impl ReviewApp {
         self.diff.update(cx, |state, cx| {
             let was = state.is_file_collapsed(&path);
             state.set_file_collapsed(&path, false, cx);
-            selection_debug(format!(
-                "reveal {path} was_collapsed={was} now_collapsed={}",
-                state.is_file_collapsed(&path)
-            ));
+            tracing::trace!(%path, was_collapsed = was, "reveal file");
             state.scroll_to_file(&path, cx);
         });
         self.current_file = Some(path);
@@ -2501,12 +2487,12 @@ impl ReviewApp {
                     if position.is_some() && this.hovered_line != position {
                         this.hovered_line = position.clone();
                         changed = true;
-                        selection_debug(format!(
-                            "hover-any mouse_down={} selecting={} pos={:?}",
-                            this.mouse_down,
+                        tracing::trace!(
+                            mouse_down = this.mouse_down,
                             selecting,
-                            position.as_ref().map(|p| (p.path().to_string(), p.line()))
-                        ));
+                            position = ?position.as_ref().map(|p| (p.path().to_string(), p.line())),
+                            "selection hover"
+                        );
                     }
                     // A text drag in progress keeps its end on the pointer.
                     if this.mouse_down
@@ -3101,31 +3087,25 @@ impl Render for ReviewApp {
             .capture_any_mouse_down(cx.listener(|this, _, _, _| {
                 this.mouse_down = true;
                 this.text_anchor = this.hovered_line.clone();
-                selection_debug(format!(
-                    "down anchor={:?}",
-                    this.text_anchor
-                        .as_ref()
-                        .map(|p| (p.path().to_string(), p.line()))
-                ));
+                tracing::trace!(
+                    anchor = ?this.text_anchor.as_ref().map(|p| (p.path().to_string(), p.line())),
+                    "selection anchored"
+                );
             }))
             .capture_any_mouse_up(cx.listener(
                 |this, event: &gpui_kit::MouseUpEvent, window, cx| {
                     this.mouse_down = false;
-                    selection_debug(format!(
-                        "up has_sel={} anchor={:?} hovered={:?} gutter_sel={} text={:?}",
-                        gpui_kit::base::TextSelection::has_selection(window, cx),
-                        this.text_anchor
-                            .as_ref()
-                            .map(|p| (p.path().to_string(), p.line())),
-                        this.hovered_line
-                            .as_ref()
-                            .map(|p| (p.path().to_string(), p.line())),
-                        this.diff.read(cx).selected_lines().is_some(),
-                        gpui_kit::base::TextSelection::selected_text(window, cx)
+                    tracing::trace!(
+                        has_selection = gpui_kit::base::TextSelection::has_selection(window, cx),
+                        anchor = ?this.text_anchor.as_ref().map(|p| (p.path().to_string(), p.line())),
+                        hovered = ?this.hovered_line.as_ref().map(|p| (p.path().to_string(), p.line())),
+                        gutter_selection = this.diff.read(cx).selected_lines().is_some(),
+                        text = ?gpui_kit::base::TextSelection::selected_text(window, cx)
                             .chars()
                             .take(30)
                             .collect::<String>(),
-                    ));
+                        "selection released"
+                    );
                     if gpui_kit::base::TextSelection::has_selection(window, cx) {
                         if let (Some(start), Some(end)) =
                             (this.text_anchor.clone(), this.hovered_line.clone())
@@ -3147,7 +3127,7 @@ impl Render for ReviewApp {
                         if let Some(payload) = payload {
                             this.pending_comment = Some(payload);
                             this.text_button_at = Some(event.position);
-                            selection_debug(format!("button pinned at {:?}", event.position));
+                            tracing::trace!(position = ?event.position, "comment button pinned");
                         }
                     }
                     cx.notify();

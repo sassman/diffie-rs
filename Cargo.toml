@@ -16,6 +16,8 @@ gpui-kit = { version = "=0.9.1", features = ["syntect"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # The owner's Kit fork until longbridge/gpui-kit takes the PRs. The
 # branch stacks the fork's diff features (bulk collapse, per-panel split

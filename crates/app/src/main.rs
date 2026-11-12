@@ -22,6 +22,15 @@ fn exit_usage(message: &str) -> ! {
 }
 
 fn main() {
+    // RUST_LOG picks the filter (e.g. diffie=trace for the selection flow);
+    // without it only warnings reach stderr.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("diffie=warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
     let mut repository = None;
     let mut source: Option<String> = None;
     let mut target: Option<String> = None;
