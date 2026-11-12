@@ -2771,6 +2771,9 @@ impl ReviewApp {
                             .collect::<Vec<_>>()
                     }),
                 )
+                // A step above the app's 12 px body text: the tree is the
+                // main navigation and earns the extra legibility.
+                .text_size(px(12.5))
                 .flex_1()
                 .min_h_0(),
             )
