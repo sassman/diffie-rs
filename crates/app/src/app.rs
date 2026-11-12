@@ -201,6 +201,22 @@ fn comment_badge(count: usize, cx: &App) -> gpui_kit::Div {
         .child(count.to_string())
 }
 
+/// One faint vertical line per ancestor level, under that ancestor's icon
+/// center. Absolute, so rows keep their flex layout; every row paints its
+/// own segment and the stack reads as one continuous guide.
+fn indent_guides(depth: usize, cx: &App) -> impl Iterator<Item = gpui_kit::Div> {
+    let color = cx.theme().border;
+    (0..depth).map(move |level| {
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(10. + level as f32 * 10.))
+            .w(px(1.))
+            .bg(color)
+    })
+}
+
 /// Lockfiles and similar machine-written files start collapsed and are
 /// listed quietly.
 fn is_generated(path: &str) -> bool {
@@ -2165,6 +2181,7 @@ impl ReviewApp {
         };
         h_flex()
             .id(path.clone())
+            .relative()
             .w_full()
             .h(px(22.))
             .pl(px(4. + depth as f32 * 10.))
@@ -2172,6 +2189,7 @@ impl ReviewApp {
             .gap(px(6.))
             .rounded(px(4.))
             .cursor_pointer()
+            .children(indent_guides(depth, cx))
             .when(selected, |row| row.bg(cx.theme().accent))
             .when(quiet, |row| row.text_color(muted))
             .hover(|row| row.bg(cx.theme().list_hover))
@@ -2338,10 +2356,12 @@ impl ReviewApp {
                                     let toggled = path.clone();
                                     h_flex()
                                         .id(SharedString::from(format!("folder-{path}")))
+                                        .relative()
                                         .h(px(22.))
                                         .gap(px(4.))
                                         .pl(px(4. + *depth as f32 * 10.))
                                         .text_color(cx.theme().muted_foreground)
+                                        .children(indent_guides(*depth, cx))
                                         .child(
                                             Icon::new(if *collapsed {
                                                 Lucide::Folder
