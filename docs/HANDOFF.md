@@ -301,12 +301,19 @@ In this order, each one small enough to show the owner:
 ## Traps
 
 - **The Kit currently comes from the owner's fork.** `[patch.crates-io]`
-  in the workspace manifest points every Kit crate at `sassman/gpui-kit`
-  branch `bulk-file-collapse`: v0.9.1 plus `DiffState::set_files_collapsed`,
-  which collapses any number of files in one rebuild (4.5ms for 5000 files
-  against over a second for 200 one-by-one calls). Collapse all, expand all
-  and the reviewed/generated collapse on load use it. Drop the patch when
-  upstream ships it.
+  in the workspace manifest points every Kit crate at `sassman/gpui-kit`;
+  `Cargo.toml` names the current branch, each branch stacking on the last:
+  `bulk-file-collapse` (`set_files_collapsed`, one rebuild for any number
+  of files), `split-panel-scroll` (per-panel horizontal scrolling),
+  `pinned-file-headers`, and `folded-ranges` (`DiffFold` +
+  `DiffState::set_folds`, the labeled click-to-reveal rows the moved-code
+  feature renders). Drop the patch when upstream ships them.
+- **Moved-code folds.** `diffie_core::moved::moved_blocks(&patch.text)`
+  pairs verbatim-moved line runs (exact match, at least 20 alphanumeric
+  characters); `install()` turns each block into two `DiffFold`s labeled
+  "moved to/from path:span". A window fully covered by an always-on-top
+  window stops painting (GPUI skips occluded windows), which mimics a
+  load hang during screenshot verification - expose a sliver first.
 - **gpui-kit is pinned with `=`.** Bumping it can change GPUI's API. Do it
   deliberately, alone, and re-check the whole UI.
 - **Comment line numbers.** A stored comment holds the line number in the

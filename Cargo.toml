@@ -17,15 +17,16 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 thiserror = "2"
 
-# The owner's Kit fork, carrying `DiffState::set_all_files_collapsed`
-# until longbridge/gpui-kit takes the PR. The branch sits on the v0.9.1
-# tag, so every crate keeps the pinned version; the whole family must
-# come from one source or two copies of gpui-base collide.
+# The owner's Kit fork until longbridge/gpui-kit takes the PRs. The
+# branch stacks the fork's diff features (bulk collapse, per-panel split
+# scrolling, pinned file headers, labeled fold rows) on the v0.9.1 tag,
+# so every crate keeps the pinned version; the whole family must come
+# from one source or two copies of gpui-base collide.
 [patch.crates-io]
-gpui-kit = { git = "https://github.com/sassman/gpui-kit", branch = "split-panel-scroll" }
-gpui-component = { git = "https://github.com/sassman/gpui-kit", branch = "split-panel-scroll" }
-gpui-base = { git = "https://github.com/sassman/gpui-kit", branch = "split-panel-scroll" }
-gpui-kit-assets = { git = "https://github.com/sassman/gpui-kit", branch = "split-panel-scroll" }
+gpui-kit = { git = "https://github.com/sassman/gpui-kit", branch = "folded-ranges" }
+gpui-component = { git = "https://github.com/sassman/gpui-kit", branch = "folded-ranges" }
+gpui-base = { git = "https://github.com/sassman/gpui-kit", branch = "folded-ranges" }
+gpui-kit-assets = { git = "https://github.com/sassman/gpui-kit", branch = "folded-ranges" }
 
 [profile.dev]
 # GPUI is slow unoptimised; keep our own crates fast to rebuild.

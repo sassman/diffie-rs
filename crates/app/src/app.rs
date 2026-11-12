@@ -26,7 +26,7 @@ use gpui_kit::component::{
     },
     checkbox::Checkbox,
     diff::{
-        Diff, DiffAnnotation, DiffDecoration, DiffEvent, DiffFile, DiffHunkSeparator,
+        Diff, DiffAnnotation, DiffDecoration, DiffEvent, DiffFile, DiffFold, DiffHunkSeparator,
         DiffLinePosition, DiffLineRange, DiffMode, DiffSide, DiffState,
     },
     h_flex,
@@ -433,6 +433,8 @@ struct Loaded {
     /// A stale `completed` marker was cleared and the file needs saving.
     completed_cleared: bool,
     placed: Vec<Placed>,
+    /// Blocks the patch moves verbatim; the diff folds them behind labels.
+    moved: Vec<diffie_core::moved::MovedBlock>,
 }
 
 /// What annotation and header callbacks may read. They receive an `App`, not
@@ -707,6 +709,44 @@ impl ReviewApp {
                             .chain(&generated)
                             .map(|path| SharedString::from(path.clone())),
                         true,
+                        cx,
+                    );
+                    // Verbatim-moved blocks fold behind a label on both ends;
+                    // a click reveals them when the address change matters.
+                    state.set_folds(
+                        loaded.moved.iter().flat_map(|block| {
+                            let span = |start: usize, end: usize| {
+                                if start == end {
+                                    format!("{start}")
+                                } else {
+                                    format!("{start}-{end}")
+                                }
+                            };
+                            [
+                                DiffFold::new(
+                                    block.from_path.clone(),
+                                    DiffSide::Original,
+                                    block.from_start,
+                                    block.lines,
+                                    format!(
+                                        "moved to {}:{}",
+                                        block.to_path,
+                                        span(block.to_start, block.to_end())
+                                    ),
+                                ),
+                                DiffFold::new(
+                                    block.to_path.clone(),
+                                    DiffSide::Modified,
+                                    block.to_start,
+                                    block.lines,
+                                    format!(
+                                        "moved from {}:{}",
+                                        block.from_path,
+                                        span(block.from_start, block.from_end())
+                                    ),
+                                ),
+                            ]
+                        }),
                         cx,
                     );
                 });
@@ -3324,6 +3364,7 @@ fn load(
         resolved.comparison.uncommitted,
     )
     .map_err(text)?;
+    let moved = diffie_core::moved::moved_blocks(&patch.text);
 
     Ok(Loaded {
         resolved,
@@ -3338,6 +3379,7 @@ fn load(
         touched,
         completed_cleared,
         placed,
+        moved,
     })
 }
 

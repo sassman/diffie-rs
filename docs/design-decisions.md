@@ -201,6 +201,15 @@ whitespace leaves the view and the reviewed count while the toggle is on
 (owner, 2026-11-12; a GitHub-style placeholder row for such files was not
 built, git's own `-w` behaviour was kept).
 
+Decided: a block the patch moves verbatim folds behind one labeled row at
+both ends ("moved to b.rs:3-8" where it left, "moved from a.rs:3-8" where
+it landed); a click reveals the lines, another folds them back (owner,
+2026-11-12). Detection is exact-match only - an indentation change is an
+edit worth seeing - and needs at least 20 alphanumeric characters, the
+`git --color-moved` bar that keeps lone braces from pairing up. Moves
+with edits in flight stay ordinary removals and additions for now; the
+SemanticDiff-style "show only the in-flight edits" view is future work.
+
 ## 8. Layout
 
 Decided: each split panel is half the window and scrolls its long lines on
