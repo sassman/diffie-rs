@@ -1226,7 +1226,10 @@ impl ReviewApp {
                 };
                 let (commit, anchored_line) =
                     origin.map_or((fallback, line), |origin| (origin.commit, origin.line));
-                let other_revision = !in_scope.contains(&commit);
+                // An uncommitted review has no in-scope commits at all, yet
+                // the working tree is exactly the revision under review: a
+                // fresh comment there is current, not from another revision.
+                let other_revision = !this.comparison.uncommitted && !in_scope.contains(&commit);
                 let Some(set) = this.reviews.as_mut() else {
                     return;
                 };
@@ -3313,7 +3316,14 @@ fn load(
         Scope::Commits(picked) => picked.iter().cloned().collect(),
         _ => commits.iter().map(|commit| commit.id.clone()).collect(),
     };
-    let placed = place_all(backend, &reviews, &patch, &in_scope).map_err(text)?;
+    let placed = place_all(
+        backend,
+        &reviews,
+        &patch,
+        &in_scope,
+        resolved.comparison.uncommitted,
+    )
+    .map_err(text)?;
 
     Ok(Loaded {
         resolved,
@@ -3336,6 +3346,7 @@ fn place_all(
     reviews: &ReviewSet,
     patch: &ScopedPatch,
     in_scope: &HashSet<Oid>,
+    uncommitted: bool,
 ) -> Result<Vec<Placed>, diffie_core::BackendError> {
     let shown: HashSet<&str> = patch
         .files
@@ -3362,10 +3373,13 @@ fn place_all(
                 }
             }
             // No blame for removed lines or for a combined tree: show the
-            // comment at its stored line while its commit is in scope.
-            _ => in_scope
-                .contains(&comment.commit)
-                .then_some((comment.line, false)),
+            // comment at its stored line while its commit is in scope. An
+            // uncommitted review has no in-scope commits, but its working
+            // tree is the revision under review, so its comments stay
+            // current instead of dropping out or dimming to other-revision.
+            _ => {
+                (uncommitted || in_scope.contains(&comment.commit)).then_some((comment.line, false))
+            }
         };
         if let Some((line, other_revision)) = hit {
             placed.push(Placed {
