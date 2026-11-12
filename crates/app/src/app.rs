@@ -1955,8 +1955,18 @@ impl ReviewApp {
                                 .segmented()
                                 .single()
                                 .small()
-                                .child(Toggle::new("split").label("Split").checked(split))
-                                .child(Toggle::new("unified").label("Unified").checked(!split))
+                                .child(
+                                    Toggle::new("split")
+                                        .icon(Icon::new(Lucide::Columns2))
+                                        .tooltip("Split view")
+                                        .checked(split),
+                                )
+                                .child(
+                                    Toggle::new("unified")
+                                        .icon(Icon::new(Lucide::Rows2))
+                                        .tooltip("Unified view")
+                                        .checked(!split),
+                                )
                                 .on_click(cx.listener(|this, checks: &Vec<bool>, _, cx| {
                                     // Clicking the checked segment clears the
                                     // whole group; an either-or control keeps

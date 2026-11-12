@@ -244,7 +244,8 @@ Implemented in `app.rs` (compiled; see the verification table for what was
 actually exercised):
 
 - Title bar: repository, "changes in X going into Y" with chips, swap,
-  Split/Unified as a segmented control, wrap and hide-whitespace as icon
+  split/unified as a segmented icon pair (columns and rows, named on
+  hover), wrap and hide-whitespace as icon
   toggles (the pilcrow reloads with `--ignore-all-space`, so whitespace-only
   files leave the view), collapse/expand all as a joined icon pair,
   earlier comments (other revisions') as an icon toggle (dashed comment

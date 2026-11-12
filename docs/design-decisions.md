@@ -229,7 +229,10 @@ its own (owner, 2026-11-12; the Kit strip that scrolled both as one canvas
 was rejected, carried in the owner's fork until upstream takes it).
 
 Decided: split view by default, switching to unified automatically when the
-window is too narrow; one key toggles it and the choice is remembered.
+window is too narrow; one key toggles it and the choice is remembered. The
+control is a segmented icon pair - columns for split, rows for unified,
+named on hover (owner, 2026-11-12; the labelled segments moved to icons
+with the other title-bar toggles).
 
 Decided: `/` opens a search bar under the scope bar, seeded from the text
 selection when there is one (owner, 2026-11-12). It searches the scoped
