@@ -85,6 +85,8 @@ docs/
   design-decisions.md         product behaviour, with Decided/Assumed/Open
   mockup/main-screen.html     visual reference
   screenshots/                the scaffold as it actually rendered
+skills/diffie-review/         agent skill: launch a review, read it back
+                              (canonical copy; installs to ~/.claude/skills)
 ```
 
 ## The core in one page

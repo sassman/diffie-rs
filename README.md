@@ -54,3 +54,16 @@ driver works (`mesa-vulkan-drivers`).
 `<repository>/.git/review/<branch>/<your name>.toml`. Nothing else in the
 repository is written. To see a colleague's review, put their file in the same
 folder.
+
+## Agent skill
+
+`skills/diffie-review/` teaches a coding agent (Claude Code and compatible)
+to open the right comparison for a review request and to read the finished
+review back - the bundled `review-prompt.py` renders open comments exactly
+like the app's "Copy all as prompt" button. Install from this repository:
+
+```sh
+npx skills add sassman/diffie-rs
+# or by hand:
+cp -r skills/diffie-review ~/.claude/skills/
+```
