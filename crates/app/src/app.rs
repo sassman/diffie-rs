@@ -2287,7 +2287,10 @@ impl ReviewApp {
             .relative()
             .w_full()
             .h(px(22.))
-            .pl(px(4. + depth as f32 * 10.))
+            // Twice the guide-to-text gap of a folder row: the line reads as
+            // a margin, not a strikethrough. Root files have no guide and
+            // keep the folder alignment.
+            .pl(px(if depth == 0 { 4. } else { 7. } + depth as f32 * 10.))
             .pr(px(4.))
             .gap(px(6.))
             .rounded(px(4.))
