@@ -521,12 +521,14 @@ pub fn as_prompt(threads: &[Thread<'_>]) -> String {
         let comment = thread.comment;
         let first = comment.line + 1 - comment.lines.min(comment.line);
         let lines = if comment.lines > 1 {
-            format!("lines {first}-{}", comment.line)
+            format!("{first}-{}", comment.line)
         } else {
-            format!("line {}", comment.line)
+            comment.line.to_string()
         };
+        // `path:line at hash` over prose: the owner wants the header to read
+        // like a compiler location, and agents parse that form natively.
         out.push_str(&format!(
-            "\n{}. {} ({lines}, as of commit {})\n",
+            "\n{}. {}:{lines} at {}\n",
             index + 1,
             comment.path,
             comment.commit.short()
@@ -830,7 +832,7 @@ mod tests {
         file.add_comment(comment("a3f9c1e0000", 45));
         let set = ReviewSet::new(file);
         let prompt = as_prompt(&set.threads());
-        assert!(prompt.contains("src/index/cache.rs (line 45, as of commit a3f9c1e)"));
+        assert!(prompt.contains("src/index/cache.rs:45 at a3f9c1e"));
         assert!(prompt.contains("if entry.mtime != meta.modified().ok()? {"));
         assert!(prompt.contains("About `meta.modified().ok()?`: This swallows permission errors."));
     }
