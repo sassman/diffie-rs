@@ -604,12 +604,10 @@ pub struct ReviewApp {
     /// not expose the text selection's location, so the app keeps it from
     /// hover positions at mouse down and up.
     text_lines: Option<(DiffLinePosition, DiffLinePosition)>,
-    /// Where the pointer released a selection; the floating comment button
-    /// is pinned there.
-    text_button_at: Option<gpui_kit::Point<gpui_kit::Pixels>>,
-    /// What the floating button will comment on, captured when it is pinned.
-    /// Pressing the button must not consult the live selection: the press
-    /// itself clears it before a click could complete.
+    /// What the context menu's Comment will act on, captured when the drag
+    /// releases. The menu must not consult the live selection: the
+    /// right-click that opens it and the click that picks an item both
+    /// clear the selection first.
     pending_comment: Option<(DiffLineRange, Option<String>)>,
     show_all_new: bool,
     show_all_reviewed: bool,
@@ -711,7 +709,6 @@ impl ReviewApp {
             mouse_down: false,
             text_anchor: None,
             text_lines: None,
-            text_button_at: None,
             pending_comment: None,
             show_all_new: false,
             show_all_reviewed: false,
@@ -3692,14 +3689,13 @@ fn render_draft(snapshot: &Snapshot, owner: WeakEntity<ReviewApp>, cx: &mut App)
 impl Render for ReviewApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.fit_mode_to_width(window, cx);
-        // A click or Escape elsewhere ends the text selection; its button and
-        // remembered lines go with it.
-        if (self.text_lines.is_some() || self.text_button_at.is_some())
+        // A click or Escape elsewhere ends the text selection; the
+        // remembered lines and the menu payload go with it.
+        if (self.text_lines.is_some() || self.pending_comment.is_some())
             && !gpui_kit::base::TextSelection::has_selection(window, cx)
             && !self.mouse_down
         {
             self.text_lines = None;
-            self.text_button_at = None;
             self.pending_comment = None;
         }
         v_flex()
@@ -3756,13 +3752,12 @@ impl Render for ReviewApp {
                         {
                             this.text_lines = Some((start, end));
                         }
-                        // Everything the comment needs is captured here:
-                        // pressing the button clears the selection before a
-                        // click could read it. Only a selection with real
-                        // text pins the button: a double click reports a
-                        // selection too, and following it put the button at
-                        // arbitrary spots. Line comments start from the
-                        // diff's own hover button instead.
+                        // Everything the comment needs is captured here: the
+                        // right-click that opens the context menu clears the
+                        // live selection before its items could read it. Only
+                        // a selection with real text counts: a double click
+                        // reports a selection too. Line comments start from
+                        // the diff's own hover button instead.
                         let payload = this.text_selection_range().and_then(|range| {
                             let text = gpui_kit::base::TextSelection::selected_text(window, cx);
                             let text = text.trim().to_string();
@@ -3770,8 +3765,7 @@ impl Render for ReviewApp {
                         });
                         if let Some(payload) = payload {
                             this.pending_comment = Some(payload);
-                            this.text_button_at = Some(event.position);
-                            tracing::trace!(position = ?event.position, "comment button pinned");
+                            tracing::trace!("comment payload captured");
                         }
                     }
                     cx.notify();
@@ -3863,9 +3857,7 @@ impl Render for ReviewApp {
                         // Right-click on a text selection. The payload is
                         // snapshotted when the menu opens, not read on click:
                         // choosing an item left-clicks the overlay, which
-                        // clears the live selection before the handler runs -
-                        // the same race the floating button dodges by acting
-                        // on mouse down.
+                        // clears the live selection before the handler runs.
                         .context_menu(move |menu, _, cx| {
                             let payload = owner
                                 .upgrade()
@@ -3894,7 +3886,6 @@ impl Render for ReviewApp {
                                         };
                                         let _ = comment_owner.update(cx, |this, cx| {
                                             this.pending_comment = None;
-                                            this.text_button_at = None;
                                             this.text_lines = None;
                                             this.start_comment(range, selection, window, cx);
                                         });
@@ -3921,44 +3912,6 @@ impl Render for ReviewApp {
                 })
             })
             .child(self.render_status_bar(cx))
-            .when_some(self.text_button_at, |root, at| {
-                // The floating comment button, just right of the pointer
-                // where the drag released. It acts on mouse down with the
-                // payload captured at pin time: the press itself clears the
-                // selection, so neither a full click nor the live selection
-                // can be relied on.
-                root.child(
-                    div()
-                        .id("comment-selection")
-                        .absolute()
-                        .left(at.x + px(10.))
-                        .top(at.y - px(11.))
-                        .w(px(22.))
-                        .h(px(22.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        // Square-ish like the Kit's own add-annotation button
-                        // (owner); a circle looked foreign next to it.
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().primary)
-                        .text_color(cx.theme().primary_foreground)
-                        .cursor_pointer()
-                        .child(Icon::new(IconName::Plus).xsmall())
-                        .on_mouse_down(
-                            gpui_kit::MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                cx.stop_propagation();
-                                let Some((range, selection)) = this.pending_comment.take() else {
-                                    return;
-                                };
-                                this.text_button_at = None;
-                                this.text_lines = None;
-                                this.start_comment(range, selection, window, cx);
-                            }),
-                        ),
-                )
-            })
     }
 }
 

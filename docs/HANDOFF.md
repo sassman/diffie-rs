@@ -289,9 +289,10 @@ actually exercised):
   gutter-marker lane. The comment box names the commit it will attach to
   before saving, and Comment/Suggest change (disabled)/Cancel carry their
   shortcut hints. Right-clicking in the diff opens a context menu with Copy
-  and Comment acting on the text selection (both disabled without one);
-  the items use the payload snapshotted at menu-open, like the floating
-  button, because picking an item clears the live selection first.
+  and Comment acting on the text selection (both disabled without one); the
+  items use the payload snapshotted at menu-open, because picking an item
+  clears the live selection first. The menu and `c` are the only
+  selection-comment entry points; there is no floating button.
 - Ticking Reviewed (or `r`) collapses the file and moves the current-file
   marker to the next one without scrolling; the collapse pulls it up.
 - Shortcuts: `]` `[` `}` `{` `s` `o` `t` `1` `2` `3` `zM` `zR` `c` `r`, Escape,

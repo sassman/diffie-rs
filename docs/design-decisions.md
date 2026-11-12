@@ -252,10 +252,11 @@ Decided:
   revealing a collapsed file on landing (owner, 2026-11-12). The counter
   counts every open comment; the walk skips ones the other-revisions
   toggle currently hides, because a jump must land on something visible.
-- Two entry points (owner, 2026-11-11): a + beside the hovered line number
-  for line comments, and a + pinned at the pointer when a text selection
-  with real content ends. A click or double click without selected text
-  shows no button.
+- Two entry points (owner, 2026-11-12; a + pinned at the pointer after a
+  text drag was dropped - it stuck around through clicks and keypresses):
+  a + beside the hovered line number for line comments, and the context
+  menu's Comment entry (or `c`) for a text selection with real content.
+  A click or double click without selected text leaves Comment disabled.
 - A comment is written and read inline, directly under the line.
 - A comment belongs to the commit that wrote the line (found by blame), not to
   the range that happened to be on screen. It then shows in every scope that
