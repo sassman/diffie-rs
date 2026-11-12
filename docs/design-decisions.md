@@ -314,7 +314,7 @@ Assumed key map (the mockup's hint bar):
 | `c` | comment |
 | `e` | react |
 | `n` `N` | next, previous comment |
-| `o` | toggle other revisions' comments |
+| `o` | toggle outdated comments (other revisions') |
 | `s` | split or unified |
 | `za` `zM` `zR` | fold file, collapse all, expand all |
 | `t` | file tree |

@@ -237,7 +237,7 @@ actually exercised):
 
 - Title bar: repository, "changes in X going into Y" with chips, swap,
   Split/Unified as a segmented control, collapse/expand all as a joined icon
-  pair, the other-revisions toggle with on/off state in text and colour,
+  pair, "Outdated comments" as a real switch (Kit `Switch`, state in the knob),
   copy all as prompt, a theme menu behind the palette button.
 - Scope bar: segmented scopes; the commit picker with search, group
   checkboxes, skipped markers, comment badges, Show-more rows, shift-click

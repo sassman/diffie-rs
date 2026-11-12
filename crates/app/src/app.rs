@@ -37,6 +37,7 @@ use gpui_kit::component::{
     resizable::{ResizableState, h_resizable, resizable_panel},
     scroll::ScrollableElement as _,
     spinner::Spinner,
+    switch::Switch,
     text::TextView,
     v_flex,
 };
@@ -1458,7 +1459,6 @@ impl ReviewApp {
     fn render_title(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mono = cx.theme().mono_font_family.clone();
         let muted = cx.theme().muted_foreground;
-        let accent = comment_accent(cx);
         // Worktree and branches read as icon plus name, not chips: the owner
         // wants the cluster quiet and free of repeated words.
         let marked = |icon: Lucide, text: String| {
@@ -1625,31 +1625,17 @@ impl ReviewApp {
                                 ),
                         )
                         .child(
-                            Button::new("other-revisions")
+                            // A switch, not a labelled button: showing comments
+                            // from other revisions is an overlay on the view,
+                            // not a mode, and the knob carries the state so the
+                            // label no longer has to spell out "on" or "off".
+                            Switch::new("other-revisions")
                                 .xsmall()
-                                .h(px(26.))
-                                .map(|button| {
-                                    if revisions_on {
-                                        button
-                                            .custom(
-                                                ButtonCustomVariant::new(cx)
-                                                    .color(accent.opacity(0.14))
-                                                    .foreground(accent)
-                                                    .hover(accent.opacity(0.2))
-                                                    .active(accent.opacity(0.25)),
-                                            )
-                                            .border_1()
-                                            .border_color(accent.opacity(0.45))
-                                            .label("Other revisions' comments: on")
-                                    } else {
-                                        button
-                                            .outline()
-                                            .text_color(muted)
-                                            .label("Other revisions' comments: off")
-                                    }
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_other_revisions = !this.show_other_revisions;
+                                .checked(revisions_on)
+                                .label("Outdated comments")
+                                .tooltip("Show comments from other revisions")
+                                .on_change(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.show_other_revisions = *checked;
                                     cx.notify();
                                 })),
                         )
@@ -2664,7 +2650,7 @@ impl ReviewApp {
             ("r", "mark reviewed"),
             ("c", "comment"),
             ("s", "split / unified"),
-            ("o", "other revisions"),
+            ("o", "outdated comments"),
             ("zM zR", "fold"),
             ("t", "files"),
         ];
