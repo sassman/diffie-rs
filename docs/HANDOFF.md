@@ -261,7 +261,10 @@ actually exercised):
 - Search: `/` opens a bar under the scope bar, seeded from the text
   selection; smartcase matches over the scoped patch text
   (`diffie_core::search::search_patch`), enter/shift-enter walk them,
-  matched lines carry an amber fill. Hits land on removed lines too, and
+  matched lines carry an amber fill and the matched characters a louder
+  saturated-amber emphasis with dark text (the Kit fork's
+  `Diff::span_highlights`; hits carry their byte spans). Hits land on
+  removed lines too, and
   a jump reveals the moved-code fold hiding its target, so removed-and-
   readded code is findable. "All commits" fetches the
   whole-branch patch in the background and counts both ("0 in view · 1

@@ -4,6 +4,8 @@
 //! touches it. The search walks the patch text, so it sees exactly what the
 //! view shows: changed lines and the context around them, nothing more.
 
+use std::ops::Range;
+
 use crate::review::Side;
 
 /// One line of the patch containing the needle.
@@ -17,6 +19,9 @@ pub struct SearchHit {
     pub side: Side,
     /// 1-based line number on `side`.
     pub line: usize,
+    /// Byte ranges of every needle occurrence within the line's content,
+    /// so the view can mark the matched characters, not just the line.
+    pub spans: Vec<Range<usize>>,
 }
 
 /// Every patch line containing `needle`, in patch order.
@@ -34,13 +39,7 @@ pub fn search_patch(patch: &str, needle: &str) -> Vec<SearchHit> {
     } else {
         needle.to_string()
     };
-    let matches = |text: &str| {
-        if fold {
-            text.to_lowercase().contains(&folded_needle)
-        } else {
-            text.contains(&folded_needle)
-        }
-    };
+    let matches = |text: &str| match_ranges(text, &folded_needle, fold);
 
     let mut hits = Vec::new();
     let mut old_path = String::new();
@@ -71,31 +70,37 @@ pub fn search_patch(patch: &str, needle: &str) -> Vec<SearchHit> {
         } else if in_hunk {
             match line.as_bytes().first() {
                 Some(b'-') => {
-                    if matches(&line[1..]) {
+                    let spans = matches(&line[1..]);
+                    if !spans.is_empty() {
                         hits.push(SearchHit {
                             path: old_path.clone(),
                             side: Side::Old,
                             line: old_line,
+                            spans,
                         });
                     }
                     old_line += 1;
                 }
                 Some(b'+') => {
-                    if matches(&line[1..]) {
+                    let spans = matches(&line[1..]);
+                    if !spans.is_empty() {
                         hits.push(SearchHit {
                             path: new_path.clone(),
                             side: Side::New,
                             line: new_line,
+                            spans,
                         });
                     }
                     new_line += 1;
                 }
                 Some(b' ') => {
-                    if matches(&line[1..]) {
+                    let spans = matches(&line[1..]);
+                    if !spans.is_empty() {
                         hits.push(SearchHit {
                             path: new_path.clone(),
                             side: Side::New,
                             line: new_line,
+                            spans,
                         });
                     }
                     old_line += 1;
@@ -113,7 +118,50 @@ pub fn search_patch(patch: &str, needle: &str) -> Vec<SearchHit> {
     hits
 }
 
+/// Byte ranges of every `needle` occurrence in `text`, non-overlapping.
+///
+/// With `fold`, matching runs over the lowercased text, but folding can
+/// change a character's byte length, so each folded byte remembers the
+/// original character it came from and matches map back through that table.
+fn match_ranges(text: &str, needle: &str, fold: bool) -> Vec<Range<usize>> {
+    if !fold {
+        return text
+            .match_indices(needle)
+            .map(|(at, found)| at..at + found.len())
+            .collect();
+    }
+    let mut folded = String::with_capacity(text.len());
+    let mut origins = Vec::with_capacity(text.len() + 1);
+    for (at, c) in text.char_indices() {
+        for low in c.to_lowercase() {
+            folded.push(low);
+            origins.resize(folded.len(), at);
+        }
+    }
+    origins.push(text.len());
+    folded
+        .match_indices(needle)
+        .map(|(at, found)| {
+            let start = origins[at];
+            let mut end = origins[at + found.len()];
+            if end <= start {
+                // The match ends inside a character that folded to several;
+                // keep the whole original character.
+                end = origins[at + found.len()..]
+                    .iter()
+                    .copied()
+                    .find(|&origin| origin > start)
+                    .unwrap_or(text.len());
+            }
+            start..end
+        })
+        .collect()
+}
+
 #[cfg(test)]
+// An expected hit with one match really holds one range; clippy suspects
+// every single-range vec of meaning `vec![value; count]`.
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
 
@@ -144,21 +192,25 @@ diff --git a/b.rs b/b.rs
                     path: "a.rs".into(),
                     side: Side::New,
                     line: 10,
+                    spans: vec![3..13],
                 },
                 SearchHit {
                     path: "a.rs".into(),
                     side: Side::Old,
                     line: 11,
+                    spans: vec![14..24],
                 },
                 SearchHit {
                     path: "a.rs".into(),
                     side: Side::New,
                     line: 11,
+                    spans: vec![14..24],
                 },
                 SearchHit {
                     path: "b.rs".into(),
                     side: Side::New,
                     line: 4,
+                    spans: vec![9..19],
                 },
             ]
         );
@@ -193,7 +245,26 @@ diff --git a/gone.rs b/gone.rs
                 path: "gone.rs".into(),
                 side: Side::Old,
                 line: 1,
+                spans: vec![0..9],
             }]
         );
+    }
+
+    #[test]
+    fn folded_matches_report_spans_in_original_bytes() {
+        // The Kelvin sign is three bytes and lowercases to a one-byte k, so
+        // folded offsets drift from the original line's bytes.
+        let patch = "\
+diff --git a/u.rs b/u.rs
+--- a/u.rs
++++ b/u.rs
+@@ -1,1 +1,2 @@
+ set \u{212A}max = 1;
++set kmax = 2;
+";
+        let hits = search_patch(patch, "kmax");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].spans, [4..10]);
+        assert_eq!(hits[1].spans, [4..8]);
     }
 }

@@ -28,7 +28,7 @@ use gpui_kit::component::{
     checkbox::Checkbox,
     diff::{
         Diff, DiffAnnotation, DiffDecoration, DiffEvent, DiffFile, DiffFold, DiffHunkSeparator,
-        DiffLinePosition, DiffLineRange, DiffMode, DiffSide, DiffState,
+        DiffLinePosition, DiffLineRange, DiffMode, DiffSide, DiffSpanHighlight, DiffState,
     },
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
@@ -205,6 +205,20 @@ fn search_background(cx: &App) -> Hsla {
         "Gruvbox Dark" => rgb(0x6b5618).into(),
         "Light" | "Default Light" => rgb(0xffd866).into(),
         _ => theme.warning.opacity(0.35),
+    }
+}
+
+/// The fill and text color of the matched characters inside a search-hit
+/// line: a saturated amber step above [`search_background`], so the eye
+/// lands on the match itself, with dark text because light-on-amber reads
+/// poorly in every theme.
+fn search_match_colors(cx: &App) -> (Hsla, Hsla) {
+    let theme = cx.theme();
+    match theme.theme_name().as_ref() {
+        "Midnight" => (rgb(0xffc247).into(), rgb(0x241a02).into()),
+        "Gruvbox Dark" => (rgb(0xfabd2f).into(), rgb(0x282828).into()),
+        "Light" | "Default Light" => (rgb(0xf0940a).into(), rgb(0x231302).into()),
+        _ => (theme.warning, theme.background),
     }
 }
 
@@ -3022,6 +3036,28 @@ impl ReviewApp {
                 ))
                 .with_background(search_tint)
             });
+        // The matched characters themselves get a louder fill over the line
+        // wash, so a long hit line still shows where the needle sits.
+        let (match_background, match_foreground) = search_match_colors(cx);
+        let span_highlights: Vec<DiffSpanHighlight> = self
+            .search_open
+            .then(|| self.search_hits.iter())
+            .into_iter()
+            .flatten()
+            .flat_map(|hit| {
+                let side = match hit.side {
+                    Side::Old => DiffSide::Original,
+                    Side::New => DiffSide::Modified,
+                };
+                let position =
+                    DiffLinePosition::new(SharedString::from(hit.path.clone()), side, hit.line);
+                hit.spans.iter().map(move |span| {
+                    DiffSpanHighlight::new(position.clone(), span.clone())
+                        .with_background(match_background)
+                        .with_foreground(match_foreground)
+                })
+            })
+            .collect();
         let decorations: Vec<DiffDecoration> = self
             .runs
             .iter()
@@ -3046,6 +3082,7 @@ impl ReviewApp {
             // the component's own washed-out tint.
             .change_background(false)
             .decorations(decorations)
+            .span_highlights(span_highlights)
             .hunk_separator(DiffHunkSeparator::Simple)
             .annotations(annotations)
             .render_annotation(move |annotation, _, cx| {
