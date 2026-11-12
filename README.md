@@ -1,10 +1,10 @@
-# diff-review (working name)
+# diffie 
 
 A native desktop app for reviewing git changes across several commits or a
 whole branch, with comments on lines and selections. Rust and GPUI Kit, for
 macOS, Windows and Linux.
 
-This is an early scaffold. Start with:
+This is an early alpha. Start with:
 
 - `docs/HANDOFF.md`: what exists, what was verified, what is next.
 - `docs/design-decisions.md`: how the app is meant to behave.

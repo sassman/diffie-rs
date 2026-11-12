@@ -1,0 +1,2 @@
+[aliases]
+i = "cargo install --path crates/app"
