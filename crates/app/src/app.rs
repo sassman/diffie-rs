@@ -33,6 +33,7 @@ use gpui_kit::component::{
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     list::ListItem,
+    menu::{ContextMenuExt as _, PopupMenuItem},
     popover::Popover,
     progress::Progress,
     resizable::{ResizableState, h_resizable, resizable_panel},
@@ -3663,7 +3664,13 @@ impl Render for ReviewApp {
             // under the pointer while the button is held stand in for it.
             // Both hooks run in the capture phase: the selection layer stops
             // the bubbled events, so bubble handlers never see a drag.
-            .capture_any_mouse_down(cx.listener(|this, _, _, _| {
+            .capture_any_mouse_down(cx.listener(|this, event: &gpui_kit::MouseDownEvent, _, _| {
+                // Only the primary button drags a selection. A right-click
+                // must fall through untouched, or opening the context menu
+                // would re-anchor the drag and corrupt the pinned payload.
+                if event.button != gpui_kit::MouseButton::Left {
+                    return;
+                }
                 this.mouse_down = true;
                 this.text_anchor = this.hovered_line.clone();
                 tracing::trace!(
@@ -3673,6 +3680,9 @@ impl Render for ReviewApp {
             }))
             .capture_any_mouse_up(cx.listener(
                 |this, event: &gpui_kit::MouseUpEvent, window, cx| {
+                    if event.button != gpui_kit::MouseButton::Left {
+                        return;
+                    }
                     this.mouse_down = false;
                     tracing::trace!(
                         has_selection = gpui_kit::base::TextSelection::has_selection(window, cx),
@@ -3787,12 +3797,55 @@ impl Render for ReviewApp {
                 root.child(self.render_search_bar(cx))
             })
             .child({
+                let owner = cx.entity().downgrade();
                 let diff_column = v_flex().flex_1().h_full().min_w_0().child(
                     div()
+                        .id("diff-pane")
                         .flex_1()
                         .min_h_0()
                         .w_full()
-                        .child(self.render_diff(cx)),
+                        .child(self.render_diff(cx))
+                        // Right-click on a text selection. The payload is
+                        // snapshotted when the menu opens, not read on click:
+                        // choosing an item left-clicks the overlay, which
+                        // clears the live selection before the handler runs -
+                        // the same race the floating button dodges by acting
+                        // on mouse down.
+                        .context_menu(move |menu, _, cx| {
+                            let payload = owner
+                                .upgrade()
+                                .and_then(|app| app.read(cx).pending_comment.clone());
+                            let text = payload.as_ref().and_then(|(_, text)| text.clone());
+                            let comment_owner = owner.clone();
+                            menu.item(
+                                PopupMenuItem::new("Copy")
+                                    .icon(Icon::new(Lucide::Copy))
+                                    .disabled(text.is_none())
+                                    .on_click(move |_, _, cx| {
+                                        if let Some(text) = text.clone() {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                text,
+                                            ));
+                                        }
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new("Comment")
+                                    .icon(Icon::new(Lucide::MessageSquarePlus))
+                                    .disabled(payload.is_none())
+                                    .on_click(move |_, window, cx| {
+                                        let Some((range, selection)) = payload.clone() else {
+                                            return;
+                                        };
+                                        let _ = comment_owner.update(cx, |this, cx| {
+                                            this.pending_comment = None;
+                                            this.text_button_at = None;
+                                            this.text_lines = None;
+                                            this.start_comment(range, selection, window, cx);
+                                        });
+                                    }),
+                            )
+                        }),
                 );
                 div().flex_1().min_h_0().w_full().map(|wrap| {
                     if self.sidebar_visible {
