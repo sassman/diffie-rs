@@ -1579,13 +1579,8 @@ impl ReviewApp {
                                 .w(px(28.))
                                 .h(px(24.))
                                 .icon(Icon::new(Lucide::TextWrap))
-                                .selected(self.wrap || split)
-                                .disabled(split)
-                                .tooltip(if split {
-                                    "Split wraps until per-panel scrolling exists"
-                                } else {
-                                    "Wrap long lines"
-                                })
+                                .selected(self.wrap)
+                                .tooltip("Wrap long lines")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.wrap = !this.wrap;
                                     cx.notify();
@@ -2358,15 +2353,9 @@ impl ReviewApp {
             .chain(draft_span)
             .collect();
 
-        let mode = self.diff.read(cx).mode();
         Diff::new(&self.diff)
             .size_full()
-            // Off scrolls the whole list as one canvas: headers and comment
-            // cards move with it. The owner wants two half-window split
-            // panels that scroll separately; the Kit's split is one strip
-            // under a shared offset, so until that lands upstream, split
-            // wraps and only unified scrolls.
-            .soft_wrap(self.wrap || mode == DiffMode::Split)
+            .soft_wrap(self.wrap)
             // The decorations below paint richer added and removed fills than
             // the component's own washed-out tint.
             .change_background(false)

@@ -197,6 +197,10 @@ files.
 
 ## 8. Layout
 
+Decided: each split panel is half the window and scrolls its long lines on
+its own (owner, 2026-11-12; the Kit strip that scrolled both as one canvas
+was rejected, carried in the owner's fork until upstream takes it).
+
 Decided: split view by default, switching to unified automatically when the
 window is too narrow; one key toggles it and the choice is remembered.
 

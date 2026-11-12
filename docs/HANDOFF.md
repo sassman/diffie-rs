@@ -182,15 +182,13 @@ Things that cost time and are easy to hit again:
   { secondary: true, .. }` instead (see `start_comment`).
 - **Focusing a new input works from a click but not from a key handler**
   unless it is deferred by a frame (`cx.on_next_frame`).
-- **Without `soft_wrap(true)` one long line widens the whole diff list.** The
-  Diff scrolls the entire list as one canvas, so a long line pushes the split
-  view's Modified column, its annotations and every header control past the
-  right edge. The mockup's per-file horizontal scroll is not something the
-  component can do. The owner wants unified to scroll (wrap toggle beside
-  Split and Unified, `wrap` on `ReviewApp`) and split to be two half-window
-  panels scrolling separately. The Kit's split is one strip under a shared
-  offset - the owner saw it and rejected it - so split wraps until per-panel
-  scrolling exists upstream (https://github.com/longbridge/gpui-kit).
+- **Without `soft_wrap(true)` one long line widens the unified diff list.**
+  Unified scrolls the entire list as one canvas (wrap toggle beside Split
+  and Unified, `wrap` on `ReviewApp`). Split is two half-viewport panels
+  that scroll their code separately - the fork's
+  `diff: Scroll each split panel on its own` carries that behavior (branch
+  `split-panel-scroll`); gutters stay put, only the code shifts. With wrap
+  on, both modes wrap instead of scrolling.
 - **The default `Assets` embeds only the Kit's own 101 icons.** Icons from
   the full catalogue silently render as nothing. The app registers
   `AllAssets` (about 1 MiB) for now; a small application asset source with
@@ -270,10 +268,9 @@ Not implemented or not possible, against the mockup and the design document:
 
 | Missing | Notes |
 | --- | --- |
-| Sticky file headers | The Diff cannot pin a list row; the current-file bar above the diff stands in, following selection and navigation, not scrolling |
+| Sticky file headers | The Diff cannot pin a list row (the owner dropped the stand-in current-file bar as noise) |
 | Per-file cards, per-status gutter cell colours, selected-line left edge, custom fold-row and separator styling, the mockup's exact split hairline | Hard-coded in the Kit's Diff |
-| Per-file horizontal scrolling | The Diff scrolls the whole list as one canvas (see the trap above). Scrolling is the default since 2026-11-11, with a wrap toggle in the title bar |
-| Independently scrolling split columns | The split canvas is one strip with a shared offset and half-canvas columns; two half-window panels with their own scroll would need an upstream Kit change |
+| Per-file horizontal scrolling | Unified scrolls the whole list as one canvas (see the trap above). Scrolling is the default since 2026-11-11, with a wrap toggle in the title bar |
 | Per-file commit stepper | Removed as YAGNI on 2026-11-11 (it only ever rendered disabled); design document section 14 holds the idea, `commits_touching` still feeds the touched-by text |
 | Suggestions | "Suggest change" renders disabled; no flow behind it |
 | `j` `k` line cursor, `v`, `g`, `(` `)`, `e`, `n` `N`, `za`, command palette | Design question 8 for the cursor |

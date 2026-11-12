@@ -166,9 +166,9 @@ dependencies = [
 
 [[package]]
 name = "annotate-snippets"
-version = "0.12.17"
+version = "0.12.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2a5b0a5ab8561c603f16c3b78c24a386b1f70e7fc1b1b1e8c15738828e4a176"
+checksum = "0258346f92c78dbc5b336b9a5b27c64447aa10643bc64e651db2edb145361564"
 dependencies = [
  "anstyle",
  "memchr",
@@ -1230,7 +1230,7 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror 2.0.21",
- "toml 0.9.12+spec-1.1.0",
+ "toml 1.2.1+spec-1.1.0",
 ]
 
 [[package]]
@@ -2040,7 +2040,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=bulk-file-collapse#c1fb904262de56cf549e61b874d154ec81aea0df"
+source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#44728865f66d2f84b2a36b0ea4db7eae2897720e"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2080,7 +2080,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=bulk-file-collapse#c1fb904262de56cf549e61b874d154ec81aea0df"
+source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#44728865f66d2f84b2a36b0ea4db7eae2897720e"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2128,7 +2128,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=bulk-file-collapse#c1fb904262de56cf549e61b874d154ec81aea0df"
+source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#44728865f66d2f84b2a36b0ea4db7eae2897720e"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2139,7 +2139,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=bulk-file-collapse#c1fb904262de56cf549e61b874d154ec81aea0df"
+source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#44728865f66d2f84b2a36b0ea4db7eae2897720e"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -2153,7 +2153,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=bulk-file-collapse#c1fb904262de56cf549e61b874d154ec81aea0df"
+source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#44728865f66d2f84b2a36b0ea4db7eae2897720e"
 dependencies = [
  "anyhow",
  "gpui-pre",
@@ -6476,21 +6476,6 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "0.9.12+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
-dependencies = [
- "indexmap",
- "serde_core",
- "serde_spanned 1.1.3",
- "toml_datetime 0.7.5+spec-1.1.0",
- "toml_parser",
- "toml_writer",
- "winnow 0.7.15",
-]
-
-[[package]]
-name = "toml"
 version = "1.2.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5755c51863cdac711f1956baf8eb9588e060755f7d3c4c979e70ea1e1f32cd7"
@@ -6511,15 +6496,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "toml_datetime"
-version = "0.7.5+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347"
-dependencies = [
- "serde_core",
 ]
 
 [[package]]
