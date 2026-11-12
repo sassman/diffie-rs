@@ -175,4 +175,25 @@ diff --git a/b.rs b/b.rs
     fn an_empty_needle_matches_nothing() {
         assert_eq!(search_patch(PATCH, ""), []);
     }
+
+    #[test]
+    fn a_deleted_file_reports_hits_on_its_old_path() {
+        // The new side is /dev/null; hits must name the file the view shows.
+        let patch = "\
+diff --git a/gone.rs b/gone.rs
+--- a/gone.rs
++++ /dev/null
+@@ -1,2 +0,0 @@
+-fn foobar() {}
+-fn keep() {}
+";
+        assert_eq!(
+            search_patch(patch, "fn foobar"),
+            [SearchHit {
+                path: "gone.rs".into(),
+                side: Side::Old,
+                line: 1,
+            }]
+        );
+    }
 }

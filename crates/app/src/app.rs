@@ -1489,6 +1489,24 @@ impl ReviewApp {
         let path = SharedString::from(path.to_string());
         self.diff.update(cx, |state, cx| {
             state.set_file_collapsed(&path, false, cx);
+            // A line inside a moved-code fold has no row until the fold is
+            // revealed, so the scroll would silently go nowhere. Removed-
+            // and-readded code is folded on both ends, and finding exactly
+            // that is what a search is for.
+            let covering: Vec<usize> = state
+                .folds()
+                .iter()
+                .enumerate()
+                .filter(|(_, fold)| {
+                    fold.side() == side
+                        && *fold.path() == path
+                        && (fold.start()..fold.start() + fold.lines()).contains(&line)
+                })
+                .map(|(ix, _)| ix)
+                .collect();
+            for ix in covering {
+                state.set_fold_revealed(ix, true, cx);
+            }
             state.scroll_to_line(DiffLinePosition::new(path.clone(), side, line), cx);
         });
         self.current_file = Some(path);
