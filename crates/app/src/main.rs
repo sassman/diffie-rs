@@ -8,8 +8,7 @@ use gpui_kit::{AppContext as _, WindowBounds, WindowOptions, component::TitleBar
 
 const USAGE: &str = "\
 Usage: diffie [-C <path>] [<revision> [<revision>]] [--every-difference]
-       diffie [-C <path>] [--source REV] [--target REV] [--every-difference]
-       diffie [-C <path>] --prompt [--source NAME] [--all]
+       diffie [-C <path>] --prompt [<review>] [--all]
 
 Reads in the merge direction. With no revision, reviews the uncommitted
 changes going into the checked-out branch. With one revision, reviews
@@ -20,9 +19,9 @@ when exactly one remote knows it. -C runs as if started in <path> (default:
 the current directory). Requires git on PATH.
 
 --prompt opens no window: it prints the open review comments the way the
-app's \"Copy all as prompt\" button does, and exits. Without --source the
-most recently written review is picked and named on stderr; --all includes
-resolved comments, marked as such.";
+app's \"Copy all as prompt\" button does, and exits. Without a review name
+the most recently written review is picked and named on stderr; --all
+includes resolved comments, marked as such.";
 
 fn exit_usage(message: &str) -> ! {
     eprintln!("{message}\n\n{USAGE}");
@@ -40,8 +39,6 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
     let mut repository = None;
-    let mut source: Option<String> = None;
-    let mut target: Option<String> = None;
     let mut revisions: Vec<String> = Vec::new();
     let mut mode = CompareMode::BranchAdds;
     let mut prompt_mode = false;
@@ -62,17 +59,6 @@ fn main() {
                     exit_usage("-C needs a path.");
                 };
                 repository = Some(PathBuf::from(value));
-            }
-            "--source" | "--target" => {
-                let Some(value) = arguments.next().and_then(|value| value.into_string().ok())
-                else {
-                    exit_usage(&format!("{text} needs a value."));
-                };
-                if text == "--source" {
-                    source = Some(value);
-                } else {
-                    target = Some(value);
-                }
             }
             _ if !text.starts_with('-') => {
                 // A bare word is always a revision; only a token spelled like
@@ -105,14 +91,11 @@ fn main() {
             _ => exit_usage(&format!("unknown argument `{text}`.")),
         }
     }
-    if !revisions.is_empty() && (source.is_some() || target.is_some()) {
-        exit_usage("give either revisions or --source/--target, not both.");
-    }
     if revisions.len() > 2 {
         exit_usage("at most two revisions.");
     }
-    if prompt_mode && (!revisions.is_empty() || target.is_some()) {
-        exit_usage("--prompt takes no revisions; --source picks the review.");
+    if prompt_mode && revisions.len() > 1 {
+        exit_usage("--prompt takes at most one name: the review to print.");
     }
     if include_resolved && !prompt_mode {
         exit_usage("--all only applies to --prompt.");
@@ -128,17 +111,18 @@ fn main() {
     };
     if prompt_mode {
         // Headless: agents and scripts read the review back without a window.
+        let review = revisions.first().map(String::as_str);
         let result = backend
             .review_dir()
             .map_err(|error| error.to_string())
             .and_then(|dir| {
-                diffie_core::review::prompt(&dir, source.as_deref(), include_resolved)
+                diffie_core::review::prompt(&dir, review, include_resolved)
                     .map_err(|error| error.to_string())
             });
         match result {
             Ok((picked, text)) => {
-                if source.is_none() {
-                    eprintln!("Source: {picked}  (pick another with --source)");
+                if review.is_none() {
+                    eprintln!("Review: {picked}  (pick another by name)");
                 }
                 print!("{text}");
                 return;
@@ -180,8 +164,7 @@ fn main() {
             // Opened plainly, the review is the uncommitted work going into
             // the checked-out branch. A bare repository or a detached HEAD
             // has no such review and falls back to branch against main.
-            let plain = source.is_none() && target.is_none();
-            if let Some(into) = branch.clone().filter(|_| plain && working_tree) {
+            if let Some(into) = branch.clone().filter(|_| working_tree) {
                 Comparison {
                     source: "uncommitted".to_string(),
                     target: into,
@@ -189,16 +172,10 @@ fn main() {
                     uncommitted: true,
                 }
             } else {
-                let mut source = source.unwrap_or_else(|| "HEAD".to_string());
-                // Name the review after the branch, not after the literal `HEAD`.
-                if source == "HEAD"
-                    && let Some(branch) = branch
-                {
-                    source = branch;
-                }
                 Comparison {
-                    source,
-                    target: target.unwrap_or_else(|| "main".to_string()),
+                    // Name the review after the branch, not the literal HEAD.
+                    source: branch.unwrap_or_else(|| "HEAD".to_string()),
+                    target: "main".to_string(),
                     mode,
                     uncommitted: false,
                 }

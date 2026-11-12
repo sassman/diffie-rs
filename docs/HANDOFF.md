@@ -54,13 +54,13 @@ cargo run -p diffie -- -C /path/to/repository main
 Arguments read in the merge direction, source first: `-C <path>` picks the
 project, positional revisions pick the comparison (none: uncommitted into
 the checked-out branch; one: the working tree into it; two or `A..B`: the
-first into the second), `--source`/`--target`/`--every-difference` stay as
-the explicit form. A revision that does not resolve fails before the window
+first into the second; `--every-difference` widens the comparison). A
+revision that does not resolve fails before the window
 opens; a branch that exactly one remote has is taken from there (`o/x`
 stands in for `x`), several candidates are listed and refused.
-`diffie --prompt` opens no window: it prints the open review comments the
-way "Copy all as prompt" does (`--source` picks the review, default the
-most recently written; `--all` includes resolved ones, marked).
+`diffie --prompt [<review>]` opens no window: it prints the open review
+comments the way "Copy all as prompt" does (default the most recently
+written review; `--all` includes resolved ones, marked).
 With no revision at all, the review is the working tree's
 uncommitted changes going into the checked-out branch
 (`Comparison::uncommitted`): the diff runs against a scratch index seeded

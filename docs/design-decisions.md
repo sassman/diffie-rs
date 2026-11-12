@@ -87,14 +87,16 @@ Decided:
 - A swap button reverses the direction (for example when sitting on `main` and
   comparing with `next`).
 - The term "merge-base" confuses the owner. Do not show it in the UI.
-- Opened with neither `--source` nor `--target`, the app reviews the
+- Opened with no revision, the app reviews the
   uncommitted changes (untracked files included) going into the checked-out
   branch, shown as "uncommitted going into `branch`" (owner, 2026-11-11).
   The swap button hides there; the working tree cannot be a target.
 - The command line reads in the merge direction, source first (owner,
   2026-11-12; it previously read like `git diff`, which kept surprising the
   owner - `x..main` must mean x going into main): positional revisions,
-  `-C <path>` for the project, no positional path. One revision reviews the
+  `-C <path>` for the project, no positional path. Positional revisions are
+  the only spelling: the explicit `--source`/`--target` flags were dropped
+  as a superseded second form (owner, 2026-11-12). One revision reviews the
   working tree going into it ("working tree going into `rev`" unless the
   revision is the checked-out branch, which is the uncommitted review); two
   revisions or `A..B` review the first going into the second. Two and three
@@ -108,9 +110,10 @@ Decided:
 - `diffie --prompt` prints the open review comments headless, exactly as
   the "Copy all as prompt" button renders them (owner, 2026-11-12). The
   agent skill calls the binary instead of shipping its own reader, so the
-  rendering cannot drift from the app. `--source` picks the review (default
-  the most recently written, named on stderr); `--all` includes resolved
-  comments, marked; with several reviewers the header names each author.
+  rendering cannot drift from the app. A positional name picks the review
+  (default the most recently written, named on stderr); `--all` includes
+  resolved comments, marked; with several reviewers the header names each
+  author.
 
 Assumed:
 
