@@ -569,6 +569,11 @@ pub enum PromptError {
         asked: String,
         available: Vec<String>,
     },
+    /// No source asked for while several exist. Never guessed: the wrong
+    /// pick would hand out another review's comments.
+    SeveralReviews {
+        available: Vec<String>,
+    },
     File(PathBuf, ReviewFileError),
 }
 
@@ -579,7 +584,14 @@ impl std::fmt::Display for PromptError {
             Self::UnknownSource { asked, available } => {
                 write!(
                     f,
-                    "No review for '{asked}'. Sources: {}",
+                    "No review for '{asked}'. Reviews: {}",
+                    available.join(", ")
+                )
+            }
+            Self::SeveralReviews { available } => {
+                write!(
+                    f,
+                    "Several reviews here: {}. Name the one to print.",
                     available.join(", ")
                 )
             }
@@ -592,10 +604,10 @@ impl std::error::Error for PromptError {}
 
 /// Render one review source like "Copy all as prompt", without the UI.
 ///
-/// `source` picks the review folder, slugged exactly like the app names it;
-/// without it the most recently written review wins, on the grounds that the
-/// review the caller means is almost always the one touched last. Returns
-/// the chosen source's folder name with the rendered text.
+/// `source` picks the review folder, slugged exactly like the app names it.
+/// Without it a sole review is printed; several are refused by name, never
+/// guessed at. Returns the chosen source's folder name with the rendered
+/// text.
 pub fn prompt(
     review_dir: &Path,
     source: Option<&str>,
@@ -611,30 +623,29 @@ pub fn prompt(
     if folders.is_empty() {
         return Err(PromptError::NoReviews(review_dir.to_path_buf()));
     }
-    let folder = match source {
-        Some(asked) => {
+    let names = || {
+        let mut names: Vec<String> = folders
+            .iter()
+            .filter_map(|folder| folder.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let folder = match (source, folders.as_slice()) {
+        (Some(asked), _) => {
             let want = slug(asked);
             folders
                 .iter()
                 .find(|folder| folder.file_name().is_some_and(|name| name == want.as_str()))
                 .ok_or_else(|| PromptError::UnknownSource {
                     asked: asked.to_string(),
-                    available: {
-                        let mut names: Vec<String> = folders
-                            .iter()
-                            .filter_map(|folder| folder.file_name())
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .collect();
-                        names.sort();
-                        names
-                    },
+                    available: names(),
                 })?
                 .clone()
         }
-        None => folders
-            .into_iter()
-            .max_by_key(|folder| newest_file(folder))
-            .expect("the folder list was checked for emptiness"),
+        (None, [only]) => only.clone(),
+        (None, _) => return Err(PromptError::SeveralReviews { available: names() }),
     };
     let mut files: Vec<PathBuf> = std::fs::read_dir(&folder)
         .into_iter()
@@ -674,18 +685,6 @@ pub fn prompt(
         as_prompt(&threads)
     };
     Ok((name, text))
-}
-
-/// When the folder's newest review file was written; the epoch for an
-/// unreadable or empty folder, which then loses every comparison.
-fn newest_file(folder: &Path) -> std::time::SystemTime {
-    std::fs::read_dir(folder)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| entry.metadata().ok()?.modified().ok())
-        .max()
-        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
 }
 
 fn slug(name: &str) -> String {
@@ -975,47 +974,39 @@ mod tests {
         assert!(prompt.contains("About `meta.modified().ok()?`: This swallows permission errors."));
     }
 
-    fn set_written(path: &Path, seconds_after_epoch: u64) {
-        // Explicit, not sleeps: the latest-review pick compares mtimes.
-        std::fs::File::options()
-            .write(true)
-            .open(path)
-            .unwrap()
-            .set_modified(
-                std::time::SystemTime::UNIX_EPOCH
-                    + std::time::Duration::from_secs(seconds_after_epoch),
-            )
-            .unwrap();
-    }
-
     #[test]
-    fn prompt_picks_the_latest_review_and_merges_reviewers() {
+    fn prompt_merges_reviewers_and_never_guesses_a_review() {
         let dir = tempfile::tempdir().unwrap();
         let review_dir = dir.path();
         let mut old = ReviewFile::new("Ada", &resolved());
         old.add_comment(comment("c0ffee00000", 3));
-        let old_path = ReviewFile::path_in(review_dir, "old-branch", "Ada");
-        old.save(&old_path).unwrap();
+        old.save(&ReviewFile::path_in(review_dir, "old-branch", "Ada"))
+            .unwrap();
         let mut mine = ReviewFile::new("Ada", &resolved());
         let done_id = mine.add_comment(comment("a3f9c1e0000", 45));
         mine.add_comment(comment("b4e8d2f0000", 9));
-        let mine_path = ReviewFile::path_in(review_dir, "feature", "Ada");
-        mine.save(&mine_path).unwrap();
+        mine.save(&ReviewFile::path_in(review_dir, "feature", "Ada"))
+            .unwrap();
         let mut theirs = ReviewFile::new("Grace", &resolved());
         theirs.toggle_reaction(&done_id, ReactionKind::Done);
-        let theirs_path = ReviewFile::path_in(review_dir, "feature", "Grace");
-        theirs.save(&theirs_path).unwrap();
-        set_written(&old_path, 1_000);
-        set_written(&mine_path, 2_000);
-        set_written(&theirs_path, 2_000);
+        theirs
+            .save(&ReviewFile::path_in(review_dir, "feature", "Grace"))
+            .unwrap();
 
-        let (source, text) = prompt(review_dir, None, false).unwrap();
+        // Two reviews and no name: refused by name, not resolved by a guess.
+        let error = prompt(review_dir, None, false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Several reviews here: feature, old-branch. Name the one to print."
+        );
+
+        let (source, text) = prompt(review_dir, Some("feature"), false).unwrap();
         assert_eq!(source, "feature");
         assert!(text.contains("at b4e8d2f"));
         // Grace's Done closes Ada's first comment across files.
         assert!(!text.contains("at a3f9c1e"));
 
-        let (_, text) = prompt(review_dir, None, true).unwrap();
+        let (_, text) = prompt(review_dir, Some("feature"), true).unwrap();
         assert!(text.contains("at a3f9c1e [resolved]"));
 
         let (source, _) = prompt(review_dir, Some("old-branch"), false).unwrap();
@@ -1024,7 +1015,7 @@ mod tests {
         let error = prompt(review_dir, Some("gone"), false).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "No review for 'gone'. Sources: feature, old-branch"
+            "No review for 'gone'. Reviews: feature, old-branch"
         );
     }
 

@@ -52,10 +52,9 @@ button, without opening a window:
 diffie --prompt -C /path/to/repo
 ```
 
-- No name needed normally: it picks the most recently touched review and
-  names it on stderr. Name one (`diffie --prompt feature`,
-  `diffie --prompt uncommitted`) only if the user reviewed several
-  comparisons.
+- No name needed when the repository holds a single review. With several,
+  diffie lists them and exits without guessing: name one
+  (`diffie --prompt feature`, `diffie --prompt uncommitted`).
 - Only open comments are printed. A Done or Won't fix reaction from any
   reviewer closes a comment; `--all` includes closed ones marked `[resolved]`.
 - Output format, same as a pasted prompt:

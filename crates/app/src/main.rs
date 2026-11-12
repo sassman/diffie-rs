@@ -20,8 +20,8 @@ the current directory). Requires git on PATH.
 
 --prompt opens no window: it prints the open review comments the way the
 app's \"Copy all as prompt\" button does, and exits. Without a review name
-the most recently written review is picked and named on stderr; --all
-includes resolved comments, marked as such.";
+the repository's only review is printed; with several, they are listed and
+one must be named. --all includes resolved comments, marked as such.";
 
 fn exit_usage(message: &str) -> ! {
     eprintln!("{message}\n\n{USAGE}");
@@ -122,7 +122,7 @@ fn main() {
         match result {
             Ok((picked, text)) => {
                 if review.is_none() {
-                    eprintln!("Review: {picked}  (pick another by name)");
+                    eprintln!("Review: {picked}");
                 }
                 print!("{text}");
                 return;

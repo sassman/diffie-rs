@@ -59,8 +59,9 @@ revision that does not resolve fails before the window
 opens; a branch that exactly one remote has is taken from there (`o/x`
 stands in for `x`), several candidates are listed and refused.
 `diffie --prompt [<review>]` opens no window: it prints the open review
-comments the way "Copy all as prompt" does (default the most recently
-written review; `--all` includes resolved ones, marked).
+comments the way "Copy all as prompt" does (no name works only for a sole
+review, several are listed and refused; `--all` includes resolved ones,
+marked).
 With no revision at all, the review is the working tree's
 uncommitted changes going into the checked-out branch
 (`Comparison::uncommitted`): the diff runs against a scratch index seeded

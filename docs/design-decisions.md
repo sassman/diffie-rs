@@ -110,10 +110,11 @@ Decided:
 - `diffie --prompt` prints the open review comments headless, exactly as
   the "Copy all as prompt" button renders them (owner, 2026-11-12). The
   agent skill calls the binary instead of shipping its own reader, so the
-  rendering cannot drift from the app. A positional name picks the review
-  (default the most recently written, named on stderr); `--all` includes
-  resolved comments, marked; with several reviewers the header names each
-  author.
+  rendering cannot drift from the app. A positional name picks the review;
+  without one only a sole review prints - several are listed and refused,
+  never guessed, because the wrong pick hands out another review's comments
+  (owner, 2026-11-12). `--all` includes resolved comments, marked; with
+  several reviewers the header names each author.
 
 Assumed:
 
