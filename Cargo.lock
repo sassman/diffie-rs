@@ -2040,7 +2040,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#44728865f66d2f84b2a36b0ea4db7eae2897720e"
+source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#7618880697a13a7229537c33af107a255a0f6f7a"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2080,7 +2080,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#44728865f66d2f84b2a36b0ea4db7eae2897720e"
+source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#7618880697a13a7229537c33af107a255a0f6f7a"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2128,7 +2128,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#44728865f66d2f84b2a36b0ea4db7eae2897720e"
+source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#7618880697a13a7229537c33af107a255a0f6f7a"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2139,7 +2139,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#44728865f66d2f84b2a36b0ea4db7eae2897720e"
+source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#7618880697a13a7229537c33af107a255a0f6f7a"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -2153,7 +2153,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#44728865f66d2f84b2a36b0ea4db7eae2897720e"
+source = "git+https://github.com/sassman/gpui-kit?branch=split-panel-scroll#7618880697a13a7229537c33af107a255a0f6f7a"
 dependencies = [
  "anyhow",
  "gpui-pre",
