@@ -2208,6 +2208,15 @@ impl ReviewApp {
                         .text_color(cx.theme().blue_light),
                 )
             })
+            .when(state == ReviewState::ChangedSince, |row| {
+                // The lost tick alone is invisible; the reviewer needs to
+                // see which files moved under them since the last pass.
+                row.child(
+                    Icon::new(Lucide::TriangleAlert)
+                        .xsmall()
+                        .text_color(cx.theme().warning),
+                )
+            })
             .when(is_generated(&file.path), |row| {
                 row.child(div().flex_none().text_size(px(10.5)).child("generated"))
             })
@@ -2521,6 +2530,10 @@ impl ReviewApp {
                 let view = snapshot.files.get(&path);
                 let reviewed = view.is_some_and(|view| view.state == ReviewState::Reviewed);
                 let note = view.and_then(|view| view.note.clone());
+                // A file that changed under an existing tick is the one note
+                // worth interrupting for; the rest stay quiet metadata.
+                let alert = view.is_some_and(|view| view.state == ReviewState::ChangedSince);
+                let warning = cx.theme().warning;
                 let muted = cx.theme().muted_foreground;
                 let mono = cx.theme().mono_font_family.clone();
                 let quiet = view.is_some_and(|view| view.generated) || reviewed;
@@ -2630,7 +2643,18 @@ impl ReviewApp {
                         )
                     })
                     .when_some(note, |row, note| {
-                        row.child(div().flex_none().text_color(muted).child(note))
+                        row.child(
+                            div()
+                                .flex_none()
+                                .map(|element| {
+                                    if alert {
+                                        element.text_color(warning).font_medium()
+                                    } else {
+                                        element.text_color(muted)
+                                    }
+                                })
+                                .child(note),
+                        )
                     })
                     .child({
                         // A ticked file should read as done at a glance: box
