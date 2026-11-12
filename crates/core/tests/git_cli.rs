@@ -160,6 +160,27 @@ fn reports_unknown_revisions_and_non_repositories() {
 }
 
 #[test]
+fn finds_revisions_locally_and_on_remotes() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    let backend = fixture.backend();
+    assert!(backend.revision_exists("feat").unwrap());
+    assert!(backend.revision_exists("HEAD~1").unwrap());
+    assert!(!backend.revision_exists("nope").unwrap());
+
+    // Where a remote points is irrelevant; only its fetched refs matter.
+    git(root, &["remote", "add", "o", "."]);
+    git(root, &["remote", "add", "fork", "."]);
+    git(root, &["update-ref", "refs/remotes/o/topic", "HEAD"]);
+    git(root, &["update-ref", "refs/remotes/o/solo", "HEAD"]);
+    git(root, &["update-ref", "refs/remotes/fork/topic", "HEAD"]);
+    assert_eq!(backend.remotes_with_branch("solo").unwrap(), ["o"]);
+    // `git remote` lists alphabetically; the order carries into the answer.
+    assert_eq!(backend.remotes_with_branch("topic").unwrap(), ["fork", "o"]);
+    assert!(backend.remotes_with_branch("nope").unwrap().is_empty());
+}
+
+#[test]
 fn whole_branch_covers_every_file() {
     let fixture = Fixture::new();
     let backend = fixture.backend();

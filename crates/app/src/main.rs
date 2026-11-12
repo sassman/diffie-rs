@@ -10,11 +10,13 @@ const USAGE: &str = "\
 Usage: diffie [-C <path>] [<revision> [<revision>]] [--every-difference]
        diffie [-C <path>] [--source REV] [--target REV] [--every-difference]
 
-Reads like git diff. With no revision, reviews the uncommitted changes going
-into the checked-out branch. With one revision, reviews everything the working
-tree adds going into it. With two revisions (or A..B), reviews the second
-going into the first. -C runs as if started in <path> (default: the current
-directory). Requires git on PATH.";
+Reads in the merge direction. With no revision, reviews the uncommitted
+changes going into the checked-out branch. With one revision, reviews
+everything the working tree adds going into it. With two revisions (or A..B),
+reviews the first going into the second: `diffie topic main` is topic's
+changes going into main. A revision only a remote has is taken from there
+when exactly one remote knows it. -C runs as if started in <path> (default:
+the current directory). Requires git on PATH.";
 
 fn exit_usage(message: &str) -> ! {
     eprintln!("{message}\n\n{USAGE}");
@@ -73,9 +75,10 @@ fn main() {
                         "`{text}` is a directory; pick the project with -C {text}"
                     ));
                 }
-                // git's range spellings name both ends in one token. The
-                // merge-base rule makes two and three dots the same review.
-                if let Some((into, from)) = text.split_once("...").or_else(|| text.split_once(".."))
+                // git's range spellings name both ends in one token; both
+                // ends keep the typed order, source first. The merge-base
+                // rule makes two and three dots the same review.
+                if let Some((from, into)) = text.split_once("...").or_else(|| text.split_once(".."))
                 {
                     let or_head = |rev: &str| {
                         if rev.is_empty() {
@@ -84,7 +87,7 @@ fn main() {
                             rev.to_string()
                         }
                     };
-                    revisions.extend([or_head(into), or_head(from)]);
+                    revisions.extend([or_head(from), or_head(into)]);
                 } else {
                     revisions.push(text);
                 }
@@ -110,8 +113,10 @@ fn main() {
     let branch = backend.current_branch().ok().flatten();
     let working_tree = backend.has_working_tree().unwrap_or(false);
     let comparison = match revisions.as_slice() {
-        // `diffie A B` reads like `git diff A B`: B's changes going into A.
-        [into, from] => Comparison {
+        // `diffie A B` and `diffie A..B` read in the merge direction: A's
+        // changes going into B. (`git diff` spells it the other way round;
+        // that reading kept surprising the owner.)
+        [from, into] => Comparison {
             source: from.clone(),
             target: into.clone(),
             mode,
@@ -161,6 +166,50 @@ fn main() {
             }
         }
         _ => unreachable!("the length was checked above"),
+    };
+    // A mistyped revision fails here, not inside an empty window. A branch
+    // only the remotes know is accepted when exactly one remote has it, and
+    // the review then names that remote's ref; several candidates are a
+    // question the user must answer, not a guess.
+    let resolve = |revision: &str| -> String {
+        let exists = backend.revision_exists(revision).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(1);
+        });
+        if exists {
+            return revision.to_string();
+        }
+        let remotes = backend
+            .remotes_with_branch(revision)
+            .unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(1);
+            });
+        match remotes.as_slice() {
+            [remote] => format!("{remote}/{revision}"),
+            [] => {
+                eprintln!("`{revision}` is not a revision here, and no remote has it.");
+                std::process::exit(1);
+            }
+            _ => {
+                eprintln!(
+                    "`{revision}` is on more than one remote ({}); say which, e.g. `{}/{revision}`.",
+                    remotes.join(", "),
+                    remotes[0]
+                );
+                std::process::exit(1);
+            }
+        }
+    };
+    let comparison = Comparison {
+        // The uncommitted pseudo-source names the working tree, not a ref.
+        source: if comparison.uncommitted {
+            comparison.source
+        } else {
+            resolve(&comparison.source)
+        },
+        target: resolve(&comparison.target),
+        ..comparison
     };
     // The project keeps its name in every worktree; the worktree shows
     // beside it in the title bar.

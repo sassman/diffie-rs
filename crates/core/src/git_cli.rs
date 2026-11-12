@@ -98,6 +98,45 @@ impl GitCli {
         Ok((project, worktree))
     }
 
+    /// Whether `revision` names a commit here. Lets the command line reject
+    /// a typo before a window opens on an empty review.
+    pub fn revision_exists(&self, revision: &str) -> Result<bool> {
+        let spec = format!("{revision}^{{commit}}");
+        Ok(self
+            .try_read(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                &spec,
+            ])?
+            .is_some())
+    }
+
+    /// The configured remotes whose fetched refs carry `branch`. Lets the
+    /// command line stand `o/x` in for `x` when exactly one remote knows the
+    /// branch, and name the candidates when several do.
+    pub fn remotes_with_branch(&self, branch: &str) -> Result<Vec<String>> {
+        let remotes = self.read(&["remote"])?;
+        let mut found = Vec::new();
+        for remote in remotes
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            // The constant `refs/remotes/` prefix keeps the ref from being
+            // read as an option; `--verify` demands this exact ref.
+            let reference = format!("refs/remotes/{remote}/{branch}");
+            if self
+                .try_read(&["show-ref", "--verify", "--quiet", &reference])?
+                .is_some()
+            {
+                found.push(remote.to_string());
+            }
+        }
+        Ok(found)
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new("git");
         command

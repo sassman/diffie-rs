@@ -91,13 +91,20 @@ Decided:
   uncommitted changes (untracked files included) going into the checked-out
   branch, shown as "uncommitted going into `branch`" (owner, 2026-11-11).
   The swap button hides there; the working tree cannot be a target.
-- The command line reads like `git diff` (owner, 2026-11-11): positional
-  revisions, `-C <path>` for the project, no positional path. One revision
-  reviews the working tree going into it ("working tree going into `rev`"
-  unless the revision is the checked-out branch, which is the uncommitted
-  review); two revisions or `A..B` review the second going into the first.
-  Two and three dots resolve the same way; the merge-base rule already
-  governs the comparison.
+- The command line reads in the merge direction, source first (owner,
+  2026-11-12; it previously read like `git diff`, which kept surprising the
+  owner - `x..main` must mean x going into main): positional revisions,
+  `-C <path>` for the project, no positional path. One revision reviews the
+  working tree going into it ("working tree going into `rev`" unless the
+  revision is the checked-out branch, which is the uncommitted review); two
+  revisions or `A..B` review the first going into the second. Two and three
+  dots resolve the same way; the merge-base rule already governs the
+  comparison.
+- A revision the repository does not have fails on the command line before
+  any window opens (owner, 2026-11-12). A branch that only the remotes know
+  is accepted when exactly one remote has it, and the review names that
+  remote's ref (`o/x` for `x`); with several candidates the app lists them
+  and asks the user to say which.
 
 Assumed:
 
