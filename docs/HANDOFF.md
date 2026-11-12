@@ -248,7 +248,10 @@ actually exercised):
 - File panel: a tree with folder rows, coloured status letters, split +/−
   counts, comment badges, reviewed ticks, "generated"; truncation that keeps
   badges inside the panel; resizable by dragging its edge; Hide in its
-  header, and a "Files" button in the status bar while hidden.
+  header, and a "Files" button in the status bar while hidden. Folder rows
+  fold their subtree, and the diff follows: a shut folder collapses its
+  files in the main view, reopening frees only files not under another
+  shut folder.
 - Diff: per-theme added and removed row fills (decorations), signs, a
   take-over header (path with a copy button, coloured counts, touched-by
   text, comment summary that jumps to the first comment,

@@ -2216,6 +2216,12 @@ impl ReviewApp {
             .into_any_element()
     }
 
+    /// Whether any ancestor folder of `path` is shut in the file panel.
+    fn folder_shut(&self, path: &str) -> bool {
+        path.match_indices('/')
+            .any(|(at, _)| self.collapsed_folders.contains(&path[..at]))
+    }
+
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         // Folder rows over indented files, in the diff's order — which the
@@ -2347,9 +2353,28 @@ impl ReviewApp {
                                         .child(label.clone())
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             let path = toggled.to_string();
-                                            if !this.collapsed_folders.remove(&path) {
-                                                this.collapsed_folders.insert(path);
+                                            let collapsed = !this.collapsed_folders.remove(&path);
+                                            if collapsed {
+                                                this.collapsed_folders.insert(path.clone());
                                             }
+                                            // The diff follows the panel: a shut
+                                            // folder collapses its files in the main
+                                            // view too, and reopening frees only the
+                                            // files not under another shut folder.
+                                            let prefix = format!("{path}/");
+                                            let affected: Vec<SharedString> = this
+                                                .files
+                                                .iter()
+                                                .filter(|file| {
+                                                    file.path.starts_with(&prefix)
+                                                        && (collapsed
+                                                            || !this.folder_shut(&file.path))
+                                                })
+                                                .map(|file| SharedString::from(file.path.clone()))
+                                                .collect();
+                                            this.diff.update(cx, |state, cx| {
+                                                state.set_files_collapsed(affected, collapsed, cx);
+                                            });
                                             cx.notify();
                                         }))
                                         .into_any_element()
