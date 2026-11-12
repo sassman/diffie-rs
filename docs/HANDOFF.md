@@ -243,8 +243,10 @@ actually exercised):
   copy all as prompt, a theme menu behind the palette button.
 - Scope bar: segmented scopes; the commit picker with search, group
   checkboxes, skipped markers, comment badges, Show-more rows, shift-click
-  runs and Space on the hovered row; the files-reviewed count with a
-  progress bar.
+  runs and Space on the hovered row; the open-comments count in the
+  comment accent ("comments handled" once every thread is resolved);
+  the files-reviewed count with a progress bar. `n`/`N` walk the open
+  comments in reading order and reveal a collapsed file on landing.
 - File panel: a tree with folder rows, coloured status letters, split +/−
   counts, comment badges, reviewed ticks, "generated"; truncation that keeps
   badges inside the panel; resizable by dragging its edge; Hide in its

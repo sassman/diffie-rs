@@ -56,6 +56,8 @@ mod commands {
             PreviousChange,
             NextFile,
             PreviousFile,
+            NextComment,
+            PreviousComment,
             ToggleMode,
             ToggleOtherRevisions,
             ToggleSidebar,
@@ -144,6 +146,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("z shift-r", ExpandAll, DIFF),
         KeyBinding::new("c", StartComment, DIFF),
         KeyBinding::new("r", MarkReviewed, DIFF),
+        KeyBinding::new("n", NextComment, DIFF),
+        KeyBinding::new("shift-n", PreviousComment, DIFF),
         KeyBinding::new("space", PickerToggle, Some("CommitList")),
         KeyBinding::new("escape", CancelDraft, REVIEW),
         KeyBinding::new(submit, SubmitDraft, REVIEW),
@@ -517,6 +521,9 @@ pub struct ReviewApp {
     /// Hide changes in amount of whitespace. The diff is rebuilt with
     /// `--ignore-all-space`, so whitespace-only files drop out of the view.
     ignore_whitespace: bool,
+    /// The open comment `n`/`N` last jumped to, so the walk continues from
+    /// there instead of restarting at the top.
+    comment_cursor: Option<String>,
     /// Folders the reviewer closed in the file panel, by full path.
     collapsed_folders: HashSet<String>,
     runs: Vec<ChangedRun>,
@@ -611,6 +618,7 @@ impl ReviewApp {
             manual_mode: DiffMode::Split,
             wrap: false,
             ignore_whitespace: false,
+            comment_cursor: None,
             collapsed_folders: HashSet::new(),
             runs: Vec::new(),
             picker_query,
@@ -970,6 +978,79 @@ impl ReviewApp {
         self.diff
             .update(cx, |state, cx| state.scroll_to_line(position, cx));
         self.current_file = Some(path.clone());
+        cx.notify();
+    }
+
+    /// Open comments in reading order: files as the diff sorts them, then
+    /// line, the old side before the new. Comments hidden with the other
+    /// revisions' toggle are skipped; a jump must land on something visible.
+    fn open_comment_stops(&self) -> Vec<(String, String, Side, usize)> {
+        let Some(set) = &self.reviews else {
+            return Vec::new();
+        };
+        let open: HashSet<&str> = set
+            .threads()
+            .iter()
+            .filter(|thread| !thread.resolved())
+            .map(|thread| thread.comment.id.as_str())
+            .collect();
+        let order: HashMap<&str, usize> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.path.as_str(), index))
+            .collect();
+        let mut stops: Vec<(String, String, Side, usize)> = self
+            .placed
+            .iter()
+            .filter(|placed| open.contains(placed.id.as_str()))
+            .filter(|placed| self.show_other_revisions || !placed.other_revision)
+            .map(|placed| {
+                (
+                    placed.id.clone(),
+                    placed.path.clone(),
+                    placed.side,
+                    placed.line,
+                )
+            })
+            .collect();
+        stops.sort_by_key(|(_, path, side, line)| {
+            (
+                order.get(path.as_str()).copied().unwrap_or(usize::MAX),
+                *line,
+                *side == Side::New,
+            )
+        });
+        stops
+    }
+
+    fn jump_comment(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let stops = self.open_comment_stops();
+        if stops.is_empty() {
+            return;
+        }
+        let at = self
+            .comment_cursor
+            .as_ref()
+            .and_then(|id| stops.iter().position(|(sid, ..)| sid == id));
+        let next = match (at, forward) {
+            (Some(index), true) => (index + 1) % stops.len(),
+            (Some(index), false) => (index + stops.len() - 1) % stops.len(),
+            (None, true) => 0,
+            (None, false) => stops.len() - 1,
+        };
+        let (id, path, side, line) = stops[next].clone();
+        let side = match side {
+            Side::Old => DiffSide::Original,
+            Side::New => DiffSide::Modified,
+        };
+        self.comment_cursor = Some(id);
+        let path = SharedString::from(path);
+        self.diff.update(cx, |state, cx| {
+            state.set_file_collapsed(&path, false, cx);
+            state.scroll_to_line(DiffLinePosition::new(path.clone(), side, line), cx);
+        });
+        self.current_file = Some(path);
         cx.notify();
     }
 
@@ -2135,6 +2216,28 @@ impl ReviewApp {
             )
             .child(div().text_color(muted).child(explanation))
             .child(div().flex_1())
+            .map(|bar| {
+                // "Am I done?" needs the open count in view; every comment
+                // counts here, even ones the other-revisions toggle hides.
+                let open = self.reviews.as_ref().map_or(0, |set| {
+                    set.threads()
+                        .iter()
+                        .filter(|thread| !thread.resolved())
+                        .count()
+                });
+                let any = self
+                    .reviews
+                    .as_ref()
+                    .is_some_and(|set| !set.threads().is_empty());
+                match (any, open) {
+                    (false, _) => bar,
+                    (true, 0) => bar.child(div().text_color(muted).child("comments handled")),
+                    (true, open) => bar.child(div().text_color(accent).child(format!(
+                        "{open} open comment{}",
+                        if open == 1 { "" } else { "s" }
+                    ))),
+                }
+            })
             .child(format!("{reviewed} of {} files reviewed", self.files.len()))
             .child(
                 Progress::new("files-reviewed")
@@ -2770,6 +2873,7 @@ impl ReviewApp {
             ("1 2 3", "scope"),
             ("r", "mark reviewed"),
             ("c", "comment"),
+            ("n N", "open comments"),
             ("s", "split / unified"),
             ("o", "outdated comments"),
             ("zM zR", "fold"),
@@ -3181,6 +3285,10 @@ impl Render for ReviewApp {
             .on_action(cx.listener(|this, _: &NextChange, _, cx| {
                 this.diff.update(cx, |state, cx| state.next_change(cx))
             }))
+            .on_action(cx.listener(|this, _: &NextComment, _, cx| this.jump_comment(true, cx)))
+            .on_action(
+                cx.listener(|this, _: &PreviousComment, _, cx| this.jump_comment(false, cx)),
+            )
             .on_action(cx.listener(|this, _: &PreviousChange, _, cx| {
                 this.diff.update(cx, |state, cx| state.previous_change(cx))
             }))

@@ -225,6 +225,12 @@ Decided:
 
 - Comments and suggestions can be made on any line or selection, including a
   selection inside a line.
+- The scope bar counts open comments ("3 open comments" in the comment
+  accent, "comments handled" once every thread carries a resolving
+  reaction), and `n`/`N` walk the open comments in reading order,
+  revealing a collapsed file on landing (owner, 2026-11-12). The counter
+  counts every open comment; the walk skips ones the other-revisions
+  toggle currently hides, because a jump must land on something visible.
 - Two entry points (owner, 2026-11-11): a + beside the hovered line number
   for line comments, and a + pinned at the pointer when a text selection
   with real content ends. A click or double click without selected text
