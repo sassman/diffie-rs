@@ -509,6 +509,8 @@ pub struct ReviewApp {
     manual_mode: DiffMode,
     /// Soft-wrap long lines instead of scrolling the diff horizontally.
     wrap: bool,
+    /// Folders the reviewer closed in the file panel, by full path.
+    collapsed_folders: HashSet<String>,
     runs: Vec<ChangedRun>,
     picker_query: Entity<InputState>,
     picker_focus: FocusHandle,
@@ -600,6 +602,7 @@ impl ReviewApp {
             diff,
             manual_mode: DiffMode::Split,
             wrap: false,
+            collapsed_folders: HashSet::new(),
             runs: Vec::new(),
             picker_query,
             picker_focus: cx.focus_handle(),
@@ -2174,8 +2177,16 @@ impl ReviewApp {
         // whenever the folder chain changes; an order that revisited a
         // folder would repeat its header rather than reorder a single one.
         enum TreeRow {
-            Folder { label: SharedString, depth: usize },
-            File { index: usize, depth: usize },
+            Folder {
+                label: SharedString,
+                path: SharedString,
+                depth: usize,
+                collapsed: bool,
+            },
+            File {
+                index: usize,
+                depth: usize,
+            },
         }
         let mut rows = Vec::new();
         let mut previous: Vec<String> = Vec::new();
@@ -2187,16 +2198,29 @@ impl ReviewApp {
                 .zip(&folders)
                 .take_while(|(kept, part)| kept == part)
                 .count();
+            // The first collapsed ancestor hides everything beneath it; its
+            // own row stays, showing the closed folder.
+            let shut = (0..folders.len()).find(|depth| {
+                self.collapsed_folders
+                    .contains(folders[..=*depth].join("/").as_str())
+            });
             for (depth, part) in folders.iter().enumerate().skip(common) {
+                if shut.is_some_and(|shut| depth > shut) {
+                    break;
+                }
                 rows.push(TreeRow::Folder {
                     label: format!("{part} /").into(),
+                    path: folders[..=depth].join("/").into(),
                     depth,
+                    collapsed: shut == Some(depth),
                 });
             }
-            rows.push(TreeRow::File {
-                index,
-                depth: folders.len(),
-            });
+            if shut.is_none() {
+                rows.push(TreeRow::File {
+                    index,
+                    depth: folders.len(),
+                });
+            }
             previous = folders;
         }
         let rows = Rc::new(rows);
@@ -2252,13 +2276,37 @@ impl ReviewApp {
                         rows[range]
                             .iter()
                             .map(|row| match row {
-                                TreeRow::Folder { label, depth } => div()
-                                    .h(px(22.))
-                                    .line_height(px(22.))
-                                    .pl(px(4. + *depth as f32 * 10.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(label.clone())
-                                    .into_any_element(),
+                                TreeRow::Folder {
+                                    label,
+                                    path,
+                                    depth,
+                                    collapsed,
+                                } => {
+                                    let toggled = path.clone();
+                                    h_flex()
+                                        .id(SharedString::from(format!("folder-{path}")))
+                                        .h(px(22.))
+                                        .gap(px(4.))
+                                        .pl(px(4. + *depth as f32 * 10.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(
+                                            Icon::new(if *collapsed {
+                                                Lucide::Folder
+                                            } else {
+                                                Lucide::FolderOpen
+                                            })
+                                            .xsmall(),
+                                        )
+                                        .child(label.clone())
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            let path = toggled.to_string();
+                                            if !this.collapsed_folders.remove(&path) {
+                                                this.collapsed_folders.insert(path);
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .into_any_element()
+                                }
                                 TreeRow::File { index, depth } => {
                                     this.render_file_row(*index, *depth, cx)
                                 }
