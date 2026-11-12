@@ -190,6 +190,23 @@ fn diff_backgrounds(cx: &App) -> (Hsla, Hsla) {
     }
 }
 
+/// The fill behind a line a search hit sits on.
+///
+/// Amber, the conventional search colour, so a hit stands apart from the
+/// green and red diff fills and the blue accent. A faint tint was rejected:
+/// it drowned in the added and removed fills. The values are picked per
+/// theme to sit clearly off the background while keeping the theme's
+/// foreground readable; unknown themes get a warning-coloured wash.
+fn search_background(cx: &App) -> Hsla {
+    let theme = cx.theme();
+    match theme.theme_name().as_ref() {
+        "Midnight" => rgb(0x4a3a10).into(),
+        "Gruvbox Dark" => rgb(0x6b5618).into(),
+        "Light" | "Default Light" => rgb(0xffd866).into(),
+        _ => theme.warning.opacity(0.35),
+    }
+}
+
 /// A fine count pill in the comment orange, for tree rows and picker items.
 fn comment_badge(count: usize, cx: &App) -> gpui_kit::Div {
     h_flex()
@@ -2845,9 +2862,9 @@ impl ReviewApp {
             .as_ref()
             .filter(|draft| draft.selection.is_some())
             .map(|draft| DiffDecoration::new(draft.range.clone()).with_background(span_tint));
-        // Search hits tint their whole line: the Kit decorates lines, not
-        // character spans, and the last tint supplied wins on overlap.
-        let search_tint = cx.theme().blue_light.opacity(0.20);
+        // Search hits fill their whole line: the Kit decorates lines, not
+        // character spans, and the last fill supplied wins on overlap.
+        let search_tint = search_background(cx);
         let search_spans = self
             .search_open
             .then(|| self.search_hits.iter())
