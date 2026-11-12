@@ -333,8 +333,10 @@ In this order, each one small enough to show the owner:
   `DiffState::set_folds`, the labeled click-to-reveal rows the moved-code
   feature renders). Drop the patch when upstream ships them.
 - **Moved-code folds.** `diffie_core::moved::moved_blocks(&patch.text)`
-  pairs verbatim-moved line runs (exact match, at least 20 alphanumeric
-  characters); `install()` turns each block into two `DiffFold`s labeled
+  pairs whole verbatim-moved runs - a complete removal run whose full
+  content reappears as a complete addition run (exact match, at least 20
+  alphanumeric characters); partial overlaps are edits, not moves.
+  `install()` turns each block into two `DiffFold`s labeled
   "moved to/from path:span". A window fully covered by an always-on-top
   window stops painting (GPUI skips occluded windows), which mimics a
   load hang during screenshot verification - expose a sliver first.

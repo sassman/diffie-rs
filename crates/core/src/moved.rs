@@ -1,10 +1,12 @@
 //! Finds code blocks that a patch moves verbatim from one place to another.
 //!
-//! A moved block is a run of removed lines that reappears, character for
-//! character, as a run of added lines elsewhere in the same patch - another
-//! file or another spot in the same file. Reviewers can skip such blocks:
-//! nothing in them changed, only their address. Blocks with edits in flight
-//! are not detected here; they stay ordinary removals and additions.
+//! A moved block is a whole run of removed lines that reappears, character
+//! for character, as a whole run of added lines elsewhere in the same
+//! patch - another file or another spot in the same file. Reviewers can
+//! skip such blocks: nothing in them changed, only their address. Runs
+//! that merely share lines stay ordinary removals and additions: a partial
+//! match means the block was edited in flight, and the leftover lines on
+//! either side are part of that edit, not a separate move.
 
 use std::collections::HashMap;
 
@@ -44,66 +46,46 @@ struct Run {
 
 /// Scans a unified diff for blocks moved verbatim.
 ///
-/// Matches are exact: whitespace differences break them, because an
-/// indentation change is an edit the reviewer may care about. A match
-/// shorter than 20 alphanumeric characters is ignored, the same bar
-/// `git diff --color-moved` uses to keep lone braces and blank lines
-/// from pairing up across the patch.
+/// A pair forms only between a whole removal run and a whole addition run
+/// with identical content. Line-level matching inside runs was rejected:
+/// it flagged fragments of hunks as moved even though the surrounding
+/// edit meant the reviewer had to read them anyway. Matches are exact:
+/// whitespace differences break them, because an indentation change is an
+/// edit the reviewer may care about. A match shorter than 20 alphanumeric
+/// characters is ignored, the same bar `git diff --color-moved` uses to
+/// keep lone braces and blank lines from pairing up across the patch.
 pub fn moved_blocks(patch: &str) -> Vec<MovedBlock> {
     let (removed, added) = runs(patch);
 
-    // Every added line, addressable by content.
-    let mut index: HashMap<&str, Vec<(usize, usize)>> = HashMap::new();
+    // Every addition run, addressable by its full content.
+    let mut index: HashMap<&[String], Vec<usize>> = HashMap::new();
     for (run_index, run) in added.iter().enumerate() {
-        for (offset, text) in run.texts.iter().enumerate() {
-            index.entry(text).or_default().push((run_index, offset));
-        }
+        index
+            .entry(run.texts.as_slice())
+            .or_default()
+            .push(run_index);
     }
-    let mut consumed: Vec<Vec<bool>> = added
-        .iter()
-        .map(|run| vec![false; run.texts.len()])
-        .collect();
 
     let mut blocks = Vec::new();
     for removal in &removed {
-        let mut at = 0;
-        while at < removal.texts.len() {
-            let Some(candidates) = index.get(removal.texts[at].as_str()) else {
-                at += 1;
-                continue;
-            };
-            // The longest verbatim continuation wins among all the places
-            // this line was added.
-            let best = candidates
-                .iter()
-                .filter(|(run, offset)| !consumed[*run][*offset])
-                .map(|&(run, offset)| {
-                    let length = removal.texts[at..]
-                        .iter()
-                        .zip(&added[run].texts[offset..])
-                        .zip(&consumed[run][offset..])
-                        .take_while(|((mine, theirs), used)| mine == theirs && !**used)
-                        .count();
-                    (length, run, offset)
-                })
-                .max();
-            match best {
-                Some((length, run, offset)) if significant(&removal.texts[at..at + length]) => {
-                    for used in &mut consumed[run][offset..offset + length] {
-                        *used = true;
-                    }
-                    blocks.push(MovedBlock {
-                        from_path: removal.path.clone(),
-                        from_start: removal.start + at,
-                        to_path: added[run].path.clone(),
-                        to_start: added[run].start + offset,
-                        lines: length,
-                    });
-                    at += length;
-                }
-                _ => at += 1,
-            }
+        if !significant(&removal.texts) {
+            continue;
         }
+        let Some(candidates) = index.get_mut(removal.texts.as_slice()) else {
+            continue;
+        };
+        if candidates.is_empty() {
+            continue;
+        }
+        // Identical runs pair one to one, earliest addition first.
+        let run = candidates.remove(0);
+        blocks.push(MovedBlock {
+            from_path: removal.path.clone(),
+            from_start: removal.start,
+            to_path: added[run].path.clone(),
+            to_start: added[run].start,
+            lines: removal.texts.len(),
+        });
     }
     blocks
 }
@@ -273,8 +255,7 @@ mod tests {
             ("a.rs", &format!("@@ -10,4 +9,0 @@\n{}", minus(BLOCK))),
             ("b.rs", &format!("@@ -0,0 +5,4 @@\n{}", plus(&edited))),
         ]);
-        // The matching run ("fn moved_one() {" plus the tail) survives, but
-        // each fragment alone stays under the significance bar.
+        // The runs share most lines, but only whole-run matches pair.
         assert_eq!(moved_blocks(&text), []);
     }
 
@@ -298,6 +279,18 @@ mod tests {
             ("a.rs", &format!("@@ -10,4 +9,0 @@\n{}", minus(BLOCK))),
             ("b.rs", &format!("@@ -0,0 +5,4 @@\n{}", plus(&indented))),
         ]);
+        assert_eq!(moved_blocks(&text), []);
+    }
+
+    #[test]
+    fn a_fragment_of_a_larger_removal_is_not_moved() {
+        let enlarged = format!("{BLOCK}\nextra_tail_line(epsilon);");
+        let text = patch(&[
+            ("a.rs", &format!("@@ -10,5 +9,0 @@\n{}", minus(&enlarged))),
+            ("b.rs", &format!("@@ -0,0 +5,4 @@\n{}", plus(BLOCK))),
+        ]);
+        // The extra removed line means the block was edited on its way,
+        // so the whole run stays an ordinary removal.
         assert_eq!(moved_blocks(&text), []);
     }
 
