@@ -2040,7 +2040,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=folded-ranges#ea91fdd387b5b2ef1fa7e926fadc2ca66aae0590"
+source = "git+https://github.com/sassman/gpui-kit?branch=folded-ranges#d37f9904714e8a6a4f91f8b14e03092512f54402"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2070,6 +2070,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "smol",
+ "sys-locale",
  "tracing",
  "unicode-linebreak",
  "unicode-segmentation",
@@ -2080,7 +2081,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=folded-ranges#ea91fdd387b5b2ef1fa7e926fadc2ca66aae0590"
+source = "git+https://github.com/sassman/gpui-kit?branch=folded-ranges#d37f9904714e8a6a4f91f8b14e03092512f54402"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2128,7 +2129,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=folded-ranges#ea91fdd387b5b2ef1fa7e926fadc2ca66aae0590"
+source = "git+https://github.com/sassman/gpui-kit?branch=folded-ranges#d37f9904714e8a6a4f91f8b14e03092512f54402"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2139,7 +2140,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=folded-ranges#ea91fdd387b5b2ef1fa7e926fadc2ca66aae0590"
+source = "git+https://github.com/sassman/gpui-kit?branch=folded-ranges#d37f9904714e8a6a4f91f8b14e03092512f54402"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -2153,7 +2154,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=folded-ranges#ea91fdd387b5b2ef1fa7e926fadc2ca66aae0590"
+source = "git+https://github.com/sassman/gpui-kit?branch=folded-ranges#d37f9904714e8a6a4f91f8b14e03092512f54402"
 dependencies = [
  "anyhow",
  "gpui-pre",
