@@ -164,7 +164,9 @@ fn whole_branch_covers_every_file() {
     let fixture = Fixture::new();
     let backend = fixture.backend();
     let resolved = backend.resolve(&Fixture::comparison()).unwrap();
-    let patch = backend.patch(&resolved, &Scope::WholeBranch, &[]).unwrap();
+    let patch = backend
+        .patch(&resolved, &Scope::WholeBranch, &[], false)
+        .unwrap();
     assert_eq!(paths(&patch.files), ["a.txt", "b.txt"]);
     assert_eq!(patch.new_side, NewSide::Commit(resolved.head.clone()));
     let a = patch
@@ -181,6 +183,38 @@ fn whole_branch_covers_every_file() {
     assert_eq!(b.status, FileStatus::Added);
     // Generous context: the whole ten-line file is in the patch.
     assert!(patch.text.contains(" line 5\n"));
+}
+
+#[test]
+fn ignore_whitespace_hides_whitespace_only_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("w.txt"), "hello\nworld\n").unwrap();
+    std::fs::write(root.join("real.txt"), "old\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "feat"]);
+    std::fs::write(root.join("w.txt"), "  hello\nworld   \n").unwrap();
+    std::fs::write(root.join("real.txt"), "new\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "reindent w, edit real"]);
+
+    let backend = GitCli::open(root).unwrap();
+    let resolved = backend.resolve(&Fixture::comparison()).unwrap();
+    let plain = backend
+        .patch(&resolved, &Scope::WholeBranch, &[], false)
+        .unwrap();
+    assert_eq!(paths(&plain.files), ["real.txt", "w.txt"]);
+    let tidy = backend
+        .patch(&resolved, &Scope::WholeBranch, &[], true)
+        .unwrap();
+    assert_eq!(paths(&tidy.files), ["real.txt"]);
+    // The file list is a scope concern and stays complete either way.
+    assert_eq!(
+        backend.changed_paths(&resolved).unwrap(),
+        ["real.txt", "w.txt"]
+    );
 }
 
 #[test]
@@ -218,7 +252,7 @@ fn a_contiguous_selection_is_a_plain_range() {
     let resolved = backend.resolve(&Fixture::comparison()).unwrap();
     let picked = vec![fixture.commits[2].clone(), fixture.commits[1].clone()];
     let patch = backend
-        .patch(&resolved, &Scope::Commits(picked), &[])
+        .patch(&resolved, &Scope::Commits(picked), &[], false)
         .unwrap();
     assert_eq!(paths(&patch.files), ["a.txt", "b.txt"]);
     assert_eq!(patch.new_side, NewSide::Commit(fixture.commits[2].clone()));
@@ -236,7 +270,7 @@ fn skipped_commits_are_left_out_without_writing_to_the_repository() {
     // c1 and c3, skipping c2 (which adds b.txt).
     let picked = vec![fixture.commits[0].clone(), fixture.commits[2].clone()];
     let patch = backend
-        .patch(&resolved, &Scope::Commits(picked), &[])
+        .patch(&resolved, &Scope::Commits(picked), &[], false)
         .unwrap();
     assert_eq!(patch.new_side, NewSide::Synthetic);
     assert_eq!(paths(&patch.files), ["a.txt"]);
@@ -264,7 +298,7 @@ fn a_file_that_cannot_be_combined_is_reported() {
     // c2 and c5, skipping c3: c5 rewrites the line c3 introduced.
     let picked = vec![fixture.commits[1].clone(), fixture.commits[4].clone()];
     let patch = backend
-        .patch(&resolved, &Scope::Commits(picked), &[])
+        .patch(&resolved, &Scope::Commits(picked), &[], false)
         .unwrap();
     let a = patch
         .files
@@ -318,7 +352,9 @@ fn new_for_me_compares_each_file_with_its_tick() {
     };
 
     // Nothing ticked: same as the whole branch.
-    let patch = backend.patch(&resolved, &Scope::NewForMe, &[]).unwrap();
+    let patch = backend
+        .patch(&resolved, &Scope::NewForMe, &[], false)
+        .unwrap();
     assert_eq!(paths(&patch.files), ["a.txt", "b.txt"]);
 
     // a.txt was reviewed at c1, b.txt at head.
@@ -327,7 +363,7 @@ fn new_for_me_compares_each_file_with_its_tick() {
         tick("b.txt", &resolved.head),
     ];
     let patch = backend
-        .patch(&resolved, &Scope::NewForMe, &reviewed)
+        .patch(&resolved, &Scope::NewForMe, &reviewed, false)
         .unwrap();
     let a = patch
         .files
@@ -365,7 +401,9 @@ fn new_for_me_keeps_a_reviewed_deletion_collapsed() {
     let resolved = backend.resolve(&Fixture::comparison()).unwrap();
 
     // Unticked, the deletion shows in full.
-    let patch = backend.patch(&resolved, &Scope::NewForMe, &[]).unwrap();
+    let patch = backend
+        .patch(&resolved, &Scope::NewForMe, &[], false)
+        .unwrap();
     let a = patch
         .files
         .iter()
@@ -382,7 +420,7 @@ fn new_for_me_keeps_a_reviewed_deletion_collapsed() {
         at: "2026-11-11T00:00:00Z".into(),
     }];
     let patch = backend
-        .patch(&resolved, &Scope::NewForMe, &reviewed)
+        .patch(&resolved, &Scope::NewForMe, &reviewed, false)
         .unwrap();
     let a = patch
         .files
@@ -467,7 +505,9 @@ fn reviews_the_uncommitted_working_tree() {
     changed.sort();
     assert_eq!(changed, ["a.txt", "b.txt", "c.txt"]);
 
-    let patch = backend.patch(&resolved, &Scope::WholeBranch, &[]).unwrap();
+    let patch = backend
+        .patch(&resolved, &Scope::WholeBranch, &[], false)
+        .unwrap();
     assert_eq!(patch.new_side, NewSide::Synthetic);
     let status = |path: &str| {
         patch
@@ -516,7 +556,12 @@ fn an_uncommitted_tick_holds_the_content_on_disk() {
     };
 
     let patch = backend
-        .patch(&resolved, &Scope::NewForMe, &[tick("b.txt"), tick("c.txt")])
+        .patch(
+            &resolved,
+            &Scope::NewForMe,
+            &[tick("b.txt"), tick("c.txt")],
+            false,
+        )
         .unwrap();
     for path in ["b.txt", "c.txt"] {
         let file = patch.files.iter().find(|file| file.path == path).unwrap();
@@ -527,7 +572,7 @@ fn an_uncommitted_tick_holds_the_content_on_disk() {
     // Edited after the tick: the full file comes back.
     std::fs::write(root.join("c.txt"), "fresher\n").unwrap();
     let patch = backend
-        .patch(&resolved, &Scope::NewForMe, &[tick("c.txt")])
+        .patch(&resolved, &Scope::NewForMe, &[tick("c.txt")], false)
         .unwrap();
     let c = patch
         .files

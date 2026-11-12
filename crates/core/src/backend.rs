@@ -48,11 +48,15 @@ pub trait ReviewBackend: Send + Sync {
     ) -> Result<std::collections::HashMap<String, Vec<Oid>>>;
 
     /// The diff for one scope. `reviewed` is only read for [`Scope::NewForMe`].
+    /// With `ignore_whitespace` the diff hides changes in amount of
+    /// whitespace; a file whose changes are all whitespace drops out of the
+    /// patch entirely, matching `git diff --ignore-all-space`.
     fn patch(
         &self,
         resolved: &Resolved,
         scope: &Scope,
         reviewed: &[ReviewedFile],
+        ignore_whitespace: bool,
     ) -> Result<ScopedPatch>;
 
     /// The commit that wrote `line` (1-based) of `path` as of `rev`.

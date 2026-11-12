@@ -148,7 +148,7 @@ impl GitCli {
             .unwrap_or_else(|| EMPTY_TREE.to_string()))
     }
 
-    fn diff_args() -> Vec<String> {
+    fn diff_args(ignore_whitespace: bool) -> Vec<String> {
         [
             "diff",
             "--no-color",
@@ -163,6 +163,7 @@ impl GitCli {
         ]
         .into_iter()
         .map(String::from)
+        .chain(ignore_whitespace.then(|| "--ignore-all-space".to_string()))
         .chain([format!("-U{CONTEXT_LINES}")])
         .collect()
     }
@@ -172,7 +173,12 @@ impl GitCli {
     /// them, so this runs against a scratch index holding `base`'s tree
     /// plus intent-to-add entries; the repository's real index stays
     /// untouched.
-    fn worktree_diff(&self, base: &str, name_only: bool) -> Result<String> {
+    fn worktree_diff(
+        &self,
+        base: &str,
+        name_only: bool,
+        ignore_whitespace: bool,
+    ) -> Result<String> {
         let scratch = Scratch::new()?;
         let objects = scratch.path.join("objects");
         std::fs::create_dir_all(&objects)?;
@@ -191,7 +197,7 @@ impl GitCli {
         // `:/` keeps the sweep repository-wide even when the backend was
         // opened from a subdirectory.
         scratch_read(&["add", "--intent-to-add", "--", ":/"])?;
-        let mut args = Self::diff_args();
+        let mut args = Self::diff_args(ignore_whitespace);
         if name_only {
             args.push("--name-only".to_string());
             args.push("-z".to_string());
@@ -202,8 +208,14 @@ impl GitCli {
         scratch_read(&args)
     }
 
-    fn diff(&self, from: &str, to: &str, paths: &[&str]) -> Result<String> {
-        let mut args = Self::diff_args();
+    fn diff(
+        &self,
+        from: &str,
+        to: &str,
+        paths: &[&str],
+        ignore_whitespace: bool,
+    ) -> Result<String> {
+        let mut args = Self::diff_args(ignore_whitespace);
         args.push(from.to_string());
         args.push(to.to_string());
         args.push("--".to_string());
@@ -230,14 +242,19 @@ impl GitCli {
         Ok((ordered, contiguous))
     }
 
-    fn new_for_me(&self, resolved: &Resolved, reviewed: &[ReviewedFile]) -> Result<ScopedPatch> {
+    fn new_for_me(
+        &self,
+        resolved: &Resolved,
+        reviewed: &[ReviewedFile],
+        ignore_whitespace: bool,
+    ) -> Result<ScopedPatch> {
         let base = resolved.base.as_str();
         let head = resolved.head.as_str();
         let uncommitted = resolved.comparison.uncommitted;
         let whole = if uncommitted {
-            self.worktree_diff(base, false)?
+            self.worktree_diff(base, false, ignore_whitespace)?
         } else {
-            self.diff(base, head, &[])?
+            self.diff(base, head, &[], ignore_whitespace)?
         };
         let tree = if uncommitted {
             let paths: Vec<String> = split_files(&whole)
@@ -271,7 +288,8 @@ impl GitCli {
                     }),
                     Some(current),
                 ) if !uncommitted && self.object_exists(old)? => {
-                    let since = self.diff(old.as_str(), current.as_str(), &[])?;
+                    let since =
+                        self.diff(old.as_str(), current.as_str(), &[], ignore_whitespace)?;
                     let since = relabel_blob_diff(&since, &summary.path);
                     let counted = split_files(&since)
                         .into_iter()
@@ -307,7 +325,7 @@ impl GitCli {
     /// Replay only `picked` (oldest first) onto the parent of the first one,
     /// file by file, and diff the result. A file that cannot be replayed
     /// cleanly stops at the commit that failed and is reported as such.
-    fn combine(&self, picked: &[Oid]) -> Result<ScopedPatch> {
+    fn combine(&self, picked: &[Oid], ignore_whitespace: bool) -> Result<ScopedPatch> {
         let scratch = Scratch::new()?;
         let objects = scratch.path.join("objects");
         std::fs::create_dir_all(&objects)?;
@@ -378,7 +396,7 @@ impl GitCli {
         }
 
         let tree = scratch_read(&["write-tree"], None)?;
-        let mut args = Self::diff_args();
+        let mut args = Self::diff_args(ignore_whitespace);
         args.push(base);
         args.push(tree.trim().to_string());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -497,7 +515,9 @@ impl ReviewBackend for GitCli {
 
     fn changed_paths(&self, resolved: &Resolved) -> Result<Vec<String>> {
         if resolved.comparison.uncommitted {
-            let output = self.worktree_diff(resolved.base.as_str(), true)?;
+            // The file list stays complete: hiding whitespace is a view
+            // concern and must not unlist a file from scopes or blob maps.
+            let output = self.worktree_diff(resolved.base.as_str(), true, false)?;
             return Ok(output
                 .split('\0')
                 .filter(|path| !path.is_empty())
@@ -561,14 +581,20 @@ impl ReviewBackend for GitCli {
         resolved: &Resolved,
         scope: &Scope,
         reviewed: &[ReviewedFile],
+        ignore_whitespace: bool,
     ) -> Result<ScopedPatch> {
         match scope {
-            Scope::NewForMe => self.new_for_me(resolved, reviewed),
+            Scope::NewForMe => self.new_for_me(resolved, reviewed, ignore_whitespace),
             Scope::WholeBranch => {
                 let text = if resolved.comparison.uncommitted {
-                    self.worktree_diff(resolved.base.as_str(), false)?
+                    self.worktree_diff(resolved.base.as_str(), false, ignore_whitespace)?
                 } else {
-                    self.diff(resolved.base.as_str(), resolved.head.as_str(), &[])?
+                    self.diff(
+                        resolved.base.as_str(),
+                        resolved.head.as_str(),
+                        &[],
+                        ignore_whitespace,
+                    )?
                 };
                 Ok(patch_from(text, new_side_of(resolved)))
             }
@@ -581,10 +607,15 @@ impl ReviewBackend for GitCli {
                     ));
                 };
                 if contiguous {
-                    let text = self.diff(&self.parent_of(oldest)?, newest.as_str(), &[])?;
+                    let text = self.diff(
+                        &self.parent_of(oldest)?,
+                        newest.as_str(),
+                        &[],
+                        ignore_whitespace,
+                    )?;
                     Ok(patch_from(text, NewSide::Commit(newest.clone())))
                 } else {
-                    self.combine(&ordered)
+                    self.combine(&ordered, ignore_whitespace)
                 }
             }
         }

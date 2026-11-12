@@ -195,6 +195,12 @@ Assumed: generated files such as lockfiles start collapsed; the tree shows a
 status letter, comment count, added and removed lines, and a tick for reviewed
 files.
 
+Decided: a hide-whitespace toggle (the pilcrow icon in the title bar)
+reloads the diff with `--ignore-all-space`; a file whose changes are all
+whitespace leaves the view and the reviewed count while the toggle is on
+(owner, 2026-11-12; a GitHub-style placeholder row for such files was not
+built, git's own `-w` behaviour was kept).
+
 ## 8. Layout
 
 Decided: each split panel is half the window and scrolls its long lines on

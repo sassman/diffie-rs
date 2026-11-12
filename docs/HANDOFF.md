@@ -236,8 +236,10 @@ Implemented in `app.rs` (compiled; see the verification table for what was
 actually exercised):
 
 - Title bar: repository, "changes in X going into Y" with chips, swap,
-  Split/Unified as a segmented control, collapse/expand all as a joined icon
-  pair, "Outdated comments" as a real switch (Kit `Switch`, state in the knob),
+  Split/Unified as a segmented control, wrap and hide-whitespace as icon
+  toggles (the pilcrow reloads with `--ignore-all-space`, so whitespace-only
+  files leave the view), collapse/expand all as a joined icon pair,
+  "Outdated comments" as a real switch (Kit `Switch`, state in the knob),
   copy all as prompt, a theme menu behind the palette button.
 - Scope bar: segmented scopes; the commit picker with search, group
   checkboxes, skipped markers, comment badges, Show-more rows, shift-click

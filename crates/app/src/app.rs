@@ -510,6 +510,9 @@ pub struct ReviewApp {
     manual_mode: DiffMode,
     /// Soft-wrap long lines instead of scrolling the diff horizontally.
     wrap: bool,
+    /// Hide changes in amount of whitespace. The diff is rebuilt with
+    /// `--ignore-all-space`, so whitespace-only files drop out of the view.
+    ignore_whitespace: bool,
     /// Folders the reviewer closed in the file panel, by full path.
     collapsed_folders: HashSet<String>,
     runs: Vec<ChangedRun>,
@@ -603,6 +606,7 @@ impl ReviewApp {
             diff,
             manual_mode: DiffMode::Split,
             wrap: false,
+            ignore_whitespace: false,
             collapsed_folders: HashSet::new(),
             runs: Vec::new(),
             picker_query,
@@ -654,9 +658,12 @@ impl ReviewApp {
         let comparison = self.comparison.clone();
         let scope = self.core_scope();
         let mine = self.reviews.as_ref().map(|set| set.mine.clone());
+        let ignore_whitespace = self.ignore_whitespace;
         self._load = cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { load(&*backend, &comparison, &scope, mine) })
+                .background_spawn(async move {
+                    load(&*backend, &comparison, &scope, mine, ignore_whitespace)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| this.install(revision, result, cx));
         });
@@ -1587,6 +1594,22 @@ impl ReviewApp {
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.wrap = !this.wrap;
                                     cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("ignore-whitespace")
+                                .outline()
+                                .xsmall()
+                                .w(px(28.))
+                                .h(px(24.))
+                                .icon(Icon::new(Lucide::Pilcrow))
+                                .selected(self.ignore_whitespace)
+                                .tooltip("Hide whitespace-only changes")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.ignore_whitespace = !this.ignore_whitespace;
+                                    // The patch itself changes, not just the
+                                    // rendering: a reload is required.
+                                    this.reload(cx);
                                 })),
                         )
                         .child(
@@ -3198,6 +3221,7 @@ fn load(
     comparison: &Comparison,
     scope: &Scope,
     mine: Option<ReviewFile>,
+    ignore_whitespace: bool,
 ) -> Result<Loaded, String> {
     let text = |error: diffie_core::BackendError| error.to_string();
     let resolved = backend.resolve(comparison).map_err(text)?;
@@ -3234,7 +3258,7 @@ fn load(
     }
 
     let mut patch = backend
-        .patch(&resolved, scope, &reviews.mine.reviewed)
+        .patch(&resolved, scope, &reviews.mine.reviewed, ignore_whitespace)
         .map_err(text)?;
     let mut files = DiffFile::parse(&patch.text).map_err(|error| {
         format!(
