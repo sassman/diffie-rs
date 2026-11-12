@@ -1217,7 +1217,6 @@ dependencies = [
 name = "diffie"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "diffie-core",
  "gpui-kit",
 ]
@@ -1226,7 +1225,6 @@ dependencies = [
 name = "diffie-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "serde",
  "tempfile",
  "thiserror 2.0.21",

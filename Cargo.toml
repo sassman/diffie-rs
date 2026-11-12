@@ -13,7 +13,6 @@ diffie-core = { path = "crates/core" }
 # GPUI Kit re-exports GPUI and pins the matching GPUI snapshot itself.
 # Pin exactly: every Kit release may move to a GPUI snapshot with API changes.
 gpui-kit = { version = "=0.9.1", features = ["syntect"] }
-anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 thiserror = "2"
