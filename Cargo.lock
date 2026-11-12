@@ -2040,7 +2040,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#7530dcab910cda826ccc4c51d7eb16a83b195c98"
+source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#968476114e868113c21a328ad68a5f76fc9a5a8b"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2081,7 +2081,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#7530dcab910cda826ccc4c51d7eb16a83b195c98"
+source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#968476114e868113c21a328ad68a5f76fc9a5a8b"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2129,7 +2129,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#7530dcab910cda826ccc4c51d7eb16a83b195c98"
+source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#968476114e868113c21a328ad68a5f76fc9a5a8b"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2140,7 +2140,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#7530dcab910cda826ccc4c51d7eb16a83b195c98"
+source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#968476114e868113c21a328ad68a5f76fc9a5a8b"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -2154,7 +2154,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#7530dcab910cda826ccc4c51d7eb16a83b195c98"
+source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#968476114e868113c21a328ad68a5f76fc9a5a8b"
 dependencies = [
  "anyhow",
  "gpui-pre",
