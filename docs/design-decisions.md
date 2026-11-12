@@ -219,6 +219,15 @@ was rejected, carried in the owner's fork until upstream takes it).
 Decided: split view by default, switching to unified automatically when the
 window is too narrow; one key toggles it and the choice is remembered.
 
+Decided: `/` opens a search bar under the scope bar, seeded from the text
+selection when there is one (owner, 2026-11-12). It searches the scoped
+patch - what the view shows - matching smartcase; enter and shift-enter
+walk the matches and tint their lines. An "All commits" checkbox extends
+the search over the whole branch; stepping onto a hit the scoped patch
+does not hold switches the scope to Whole branch and lands on it after
+the reload. Per-file state never changes the scope; this explicit jump
+does.
+
 ## 9. Comments
 
 Decided:
@@ -336,6 +345,7 @@ Assumed key map (the mockup's hint bar):
 | `e` | react |
 | `n` `N` | next, previous comment |
 | `o` | toggle outdated comments (other revisions') |
+| `/` | search the changeset |
 | `s` | split or unified |
 | `za` `zM` `zR` | fold file, collapse all, expand all |
 | `t` | file tree |

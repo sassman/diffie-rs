@@ -11,6 +11,7 @@ pub mod git_cli;
 pub mod model;
 pub mod moved;
 pub mod review;
+pub mod search;
 pub mod time;
 
 pub use backend::{BackendError, ReviewBackend};

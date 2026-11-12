@@ -12,6 +12,7 @@ use std::sync::Arc;
 use diffie_core::review::{
     NewComment, Placement, ReactionKind, ReviewFile, ReviewSet, ReviewState, Side, as_prompt, place,
 };
+use diffie_core::search::{SearchHit, search_patch};
 use diffie_core::time::ago;
 use diffie_core::{
     BlameLine, Commit, Comparison, FileState, FileStatus, FileSummary, NewSide, Oid, Resolved,
@@ -58,6 +59,7 @@ mod commands {
             PreviousFile,
             NextComment,
             PreviousComment,
+            OpenSearch,
             ToggleMode,
             ToggleOtherRevisions,
             ToggleSidebar,
@@ -148,6 +150,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("r", MarkReviewed, DIFF),
         KeyBinding::new("n", NextComment, DIFF),
         KeyBinding::new("shift-n", PreviousComment, DIFF),
+        KeyBinding::new("/", OpenSearch, DIFF),
         KeyBinding::new("space", PickerToggle, Some("CommitList")),
         KeyBinding::new("escape", CancelDraft, REVIEW),
         KeyBinding::new(submit, SubmitDraft, REVIEW),
@@ -524,6 +527,21 @@ pub struct ReviewApp {
     /// The open comment `n`/`N` last jumped to, so the walk continues from
     /// there instead of restarting at the top.
     comment_cursor: Option<String>,
+    search_open: bool,
+    search_query: Entity<InputState>,
+    /// Extend the search past the picked commits to the whole branch.
+    search_all: bool,
+    /// The scoped patch's text, kept so the search sees what the view shows.
+    patch_text: Arc<String>,
+    /// The whole-branch patch, fetched when the reviewer extends the search;
+    /// keyed by the load revision that fetched it, so a reload drops it.
+    whole_patch: Option<(usize, Arc<String>)>,
+    search_hits: Vec<SearchHit>,
+    search_all_hits: Vec<SearchHit>,
+    search_cursor: Option<usize>,
+    /// A search hit to land on after the reload a scope widening triggers.
+    pending_jump: Option<(String, Side, usize)>,
+    _whole_patch: Task<()>,
     /// Folders the reviewer closed in the file panel, by full path.
     collapsed_folders: HashSet<String>,
     runs: Vec<ChangedRun>,
@@ -582,6 +600,8 @@ impl ReviewApp {
         let diff = cx.new(|cx| DiffState::new([], cx).with_mode(DiffMode::Split));
         let picker_query =
             cx.new(|cx| InputState::new(window, cx).placeholder("Message, hash or author"));
+        let search_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search the changeset"));
         let subscriptions = vec![
             cx.observe(&diff, |_, _, cx| cx.notify()),
             cx.subscribe(&diff, |this, _, event: &DiffEvent, cx| {
@@ -595,6 +615,14 @@ impl ReviewApp {
                     cx.notify();
                 }
             }),
+            cx.subscribe(
+                &search_query,
+                |this, _, event: &InputEvent, cx| match event {
+                    InputEvent::Change => this.run_search(cx),
+                    InputEvent::PressEnter { shift, .. } => this.search_step(!shift, cx),
+                    _ => {}
+                },
+            ),
         ];
         diff.read(cx).focus_handle(cx).focus(window, cx);
         let mut this = Self {
@@ -619,6 +647,16 @@ impl ReviewApp {
             wrap: false,
             ignore_whitespace: false,
             comment_cursor: None,
+            search_open: false,
+            search_query,
+            search_all: false,
+            patch_text: Arc::default(),
+            whole_patch: None,
+            search_hits: Vec::new(),
+            search_all_hits: Vec::new(),
+            search_cursor: None,
+            pending_jump: None,
+            _whole_patch: Task::ready(()),
             collapsed_folders: HashSet::new(),
             runs: Vec::new(),
             picker_query,
@@ -692,7 +730,13 @@ impl ReviewApp {
         }
         self.loading = false;
         match result {
-            Ok(loaded) => {
+            Ok(mut loaded) => {
+                self.patch_text = Arc::new(std::mem::take(&mut loaded.patch.text));
+                // The whole-branch cache belongs to the load that made it.
+                self.whole_patch = self
+                    .whole_patch
+                    .take()
+                    .filter(|(cached, _)| *cached == revision);
                 let reviewed: Vec<String> = loaded
                     .patch
                     .files
@@ -778,11 +822,18 @@ impl ReviewApp {
                 if loaded.completed_cleared {
                     self.save_review(cx);
                 }
+                if let Some((path, side, line)) = self.pending_jump.take() {
+                    self.show_hit(&path, side, line, cx);
+                }
+                if self.search_open {
+                    self.run_search(cx);
+                }
             }
             Err(error) => {
                 self.diff.update(cx, |state, cx| state.set_files([], cx));
                 self.files = Arc::default();
                 self.placed.clear();
+                self.pending_jump = None;
                 self.error = Some(error.into());
             }
         }
@@ -1265,9 +1316,136 @@ impl ReviewApp {
     }
 
     fn cancel_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Escape peels one layer at a time: a draft first, then the search.
+        if self.draft.is_none() && self.search_open {
+            self.close_search(window, cx);
+            return;
+        }
         self.draft = None;
         self.focus_diff(window, cx);
         cx.notify();
+    }
+
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = true;
+        // A selection seeds the needle: select a name, press `/`, and the
+        // search asks where else the changeset touches it.
+        let selected = gpui_kit::base::TextSelection::selected_text(window, cx);
+        let selected = selected.trim().to_string();
+        if !selected.is_empty() && !selected.contains('\n') {
+            self.search_query
+                .update(cx, |input, cx| input.set_value(selected, window, cx));
+        }
+        self.search_query
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        self.run_search(cx);
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = false;
+        self.search_cursor = None;
+        self.focus_diff(window, cx);
+        cx.notify();
+    }
+
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        let needle = self.search_query.read(cx).value().trim().to_string();
+        self.search_cursor = None;
+        self.search_hits = search_patch(&self.patch_text, &needle);
+        self.search_all_hits = match &self.whole_patch {
+            Some((revision, text)) if self.search_all && *revision == self.revision => {
+                search_patch(text, &needle)
+            }
+            _ => Vec::new(),
+        };
+        cx.notify();
+    }
+
+    /// Fetch the whole-branch patch once per load so the extended search
+    /// has something to walk; the scoped view stays untouched.
+    fn ensure_whole_patch(&mut self, cx: &mut Context<Self>) {
+        if self
+            .whole_patch
+            .as_ref()
+            .is_some_and(|(revision, _)| *revision == self.revision)
+        {
+            return;
+        }
+        let backend = self.backend.clone();
+        let comparison = self.comparison.clone();
+        let revision = self.revision;
+        let ignore_whitespace = self.ignore_whitespace;
+        self._whole_patch = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let resolved = backend.resolve(&comparison)?;
+                    backend.patch(&resolved, &Scope::WholeBranch, &[], ignore_whitespace)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.revision != revision {
+                    return;
+                }
+                match result {
+                    Ok(patch) => {
+                        this.whole_patch = Some((revision, Arc::new(patch.text)));
+                        this.run_search(cx);
+                    }
+                    Err(error) => {
+                        this.error = Some(error.to_string().into());
+                        cx.notify();
+                    }
+                }
+            });
+        });
+    }
+
+    fn search_step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let extended = self.search_all && self.scope != ScopeKind::WholeBranch;
+        let hits = if extended {
+            &self.search_all_hits
+        } else {
+            &self.search_hits
+        };
+        if hits.is_empty() {
+            return;
+        }
+        let next = match (self.search_cursor, forward) {
+            (Some(index), true) => (index + 1) % hits.len(),
+            (Some(index), false) => (index + hits.len() - 1) % hits.len(),
+            (None, true) => 0,
+            (None, false) => hits.len() - 1,
+        };
+        self.search_cursor = Some(next);
+        let hit = hits[next].clone();
+        // In view means the scoped patch itself contains the hit; a ticked
+        // file keeps a header-only entry in the file list, so a file-level
+        // check would aim at lines the view does not hold.
+        if self.search_hits.contains(&hit) {
+            self.show_hit(&hit.path, hit.side, hit.line, cx);
+        } else {
+            // The hit sits outside the picked commits: widen to the whole
+            // branch and land on it once the reload installs. An explicit
+            // jump may change the scope; per-file state never does.
+            self.pending_jump = Some((hit.path, hit.side, hit.line));
+            self.set_scope(ScopeKind::WholeBranch, cx);
+        }
+        cx.notify();
+    }
+
+    fn show_hit(&mut self, path: &str, side: Side, line: usize, cx: &mut Context<Self>) {
+        let side = match side {
+            Side::Old => DiffSide::Original,
+            Side::New => DiffSide::Modified,
+        };
+        let path = SharedString::from(path.to_string());
+        self.diff.update(cx, |state, cx| {
+            state.set_file_collapsed(&path, false, cx);
+            state.scroll_to_line(DiffLinePosition::new(path.clone(), side, line), cx);
+        });
+        self.current_file = Some(path);
     }
 
     fn submit_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2247,6 +2425,87 @@ impl ReviewApp {
             )
     }
 
+    fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let extended = self.search_all && self.scope != ScopeKind::WholeBranch;
+        let count = if self.search_query.read(cx).value().trim().is_empty() {
+            None
+        } else if extended {
+            Some(format!(
+                "{} in view · {} across all commits",
+                self.search_hits.len(),
+                self.search_all_hits.len()
+            ))
+        } else {
+            Some(match self.search_hits.len() {
+                0 => "no matches".to_string(),
+                1 => "1 match".to_string(),
+                n => format!("{n} matches"),
+            })
+        };
+        h_flex()
+            .flex_none()
+            .px(px(10.))
+            .py(px(3.))
+            .gap(px(8.))
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .w(px(280.))
+                    .child(Input::new(&self.search_query).small().cleanable(true)),
+            )
+            .child(
+                Button::new("search-previous")
+                    .ghost()
+                    .xsmall()
+                    .w(px(24.))
+                    .h(px(24.))
+                    .icon(Icon::new(Lucide::ChevronUp))
+                    .tooltip("Previous match (shift-enter)")
+                    .on_click(cx.listener(|this, _, _, cx| this.search_step(false, cx))),
+            )
+            .child(
+                Button::new("search-next")
+                    .ghost()
+                    .xsmall()
+                    .w(px(24.))
+                    .h(px(24.))
+                    .icon(Icon::new(Lucide::ChevronDown))
+                    .tooltip("Next match (enter)")
+                    .on_click(cx.listener(|this, _, _, cx| this.search_step(true, cx))),
+            )
+            .when_some(count, |bar, count| {
+                bar.child(div().text_color(muted).child(count))
+            })
+            .when(self.scope != ScopeKind::WholeBranch, |bar| {
+                bar.child(
+                    Checkbox::new("search-all")
+                        .xsmall()
+                        .label("All commits")
+                        .checked(self.search_all)
+                        .on_change(cx.listener(|this, checked: &bool, _, cx| {
+                            this.search_all = *checked;
+                            if this.search_all {
+                                this.ensure_whole_patch(cx);
+                            }
+                            this.run_search(cx);
+                        })),
+                )
+            })
+            .child(div().flex_1())
+            .child(
+                Button::new("search-close")
+                    .ghost()
+                    .xsmall()
+                    .w(px(24.))
+                    .h(px(24.))
+                    .icon(Icon::new(Lucide::X))
+                    .tooltip("Close search (esc)")
+                    .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx))),
+            )
+    }
+
     fn render_file_row(&self, index: usize, depth: usize, cx: &mut Context<Self>) -> AnyElement {
         let file = &self.files[index];
         let muted = cx.theme().muted_foreground;
@@ -2583,6 +2842,27 @@ impl ReviewApp {
             .as_ref()
             .filter(|draft| draft.selection.is_some())
             .map(|draft| DiffDecoration::new(draft.range.clone()).with_background(span_tint));
+        // Search hits tint their whole line: the Kit decorates lines, not
+        // character spans, and the last tint supplied wins on overlap.
+        let search_tint = cx.theme().blue_light.opacity(0.20);
+        let search_spans = self
+            .search_open
+            .then(|| self.search_hits.iter())
+            .into_iter()
+            .flatten()
+            .map(move |hit| {
+                let side = match hit.side {
+                    Side::Old => DiffSide::Original,
+                    Side::New => DiffSide::Modified,
+                };
+                DiffDecoration::new(DiffLineRange::new(
+                    SharedString::from(hit.path.clone()),
+                    side,
+                    hit.line,
+                    hit.line,
+                ))
+                .with_background(search_tint)
+            });
         let decorations: Vec<DiffDecoration> = self
             .runs
             .iter()
@@ -2597,6 +2877,7 @@ impl ReviewApp {
             })
             .chain(selection_spans)
             .chain(draft_span)
+            .chain(search_spans)
             .collect();
 
         Diff::new(&self.diff)
@@ -2877,6 +3158,7 @@ impl ReviewApp {
             ("r", "mark reviewed"),
             ("c", "comment"),
             ("n N", "open comments"),
+            ("/", "search"),
             ("s", "split / unified"),
             ("o", "outdated comments"),
             ("zM zR", "fold"),
@@ -3292,6 +3574,9 @@ impl Render for ReviewApp {
             .on_action(
                 cx.listener(|this, _: &PreviousComment, _, cx| this.jump_comment(false, cx)),
             )
+            .on_action(cx.listener(|this, _: &OpenSearch, window, cx| {
+                this.open_search(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &PreviousChange, _, cx| {
                 this.diff.update(cx, |state, cx| state.previous_change(cx))
             }))
@@ -3350,6 +3635,9 @@ impl Render for ReviewApp {
             .on_action(|_: &Quit, _, cx| cx.quit())
             .child(self.render_title(cx))
             .child(self.render_scope_bar(cx))
+            .when(self.search_open, |root| {
+                root.child(self.render_search_bar(cx))
+            })
             .child({
                 let diff_column = v_flex().flex_1().h_full().min_w_0().child(
                     div()

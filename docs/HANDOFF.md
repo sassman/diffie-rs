@@ -247,6 +247,13 @@ actually exercised):
   comment accent ("comments handled" once every thread is resolved);
   the files-reviewed count with a progress bar. `n`/`N` walk the open
   comments in reading order and reveal a collapsed file on landing.
+- Search: `/` opens a bar under the scope bar, seeded from the text
+  selection; smartcase matches over the scoped patch text
+  (`diffie_core::search::search_patch`), enter/shift-enter walk them,
+  matched lines carry a blue tint. "All commits" fetches the
+  whole-branch patch in the background and counts both ("0 in view · 1
+  across all commits"); stepping onto an out-of-view hit switches the
+  scope to Whole branch and lands there after the reload.
 - File panel: a tree with folder rows, coloured status letters, split +/−
   counts, comment badges, reviewed ticks, "generated"; truncation that keeps
   badges inside the panel; resizable by dragging its edge; Hide in its
