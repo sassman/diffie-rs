@@ -265,7 +265,12 @@ Decided:
   the revision still shows them.
 - Comments from commits outside the current scope are shown by default
   (settled 2026-11-11; they started out hidden), with a toggle that hides
-  them. They appear wherever their line is still unchanged.
+  them. They appear wherever their line is still unchanged. The toggle is
+  an icon button like wrap and hide-whitespace - the dashed comment bubble,
+  "Earlier comments - from other revisions" on hover (owner, 2026-11-12;
+  first a labelled button, then a switch saying "Outdated comments", which
+  was dropped because "outdated" judges relevance while the comments are
+  only pinned to another revision).
 - Comments can be marked done.
 
 Assumed:
@@ -357,7 +362,7 @@ Assumed key map (the mockup's hint bar):
 | `c` | comment |
 | `e` | react |
 | `n` `N` | next, previous comment |
-| `o` | toggle outdated comments (other revisions') |
+| `o` | toggle earlier comments (other revisions') |
 | `/` | search the changeset |
 | `s` | split or unified |
 | `za` `zM` `zR` | fold file, collapse all, expand all |

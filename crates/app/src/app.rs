@@ -39,7 +39,6 @@ use gpui_kit::component::{
     resizable::{ResizableState, h_resizable, resizable_panel},
     scroll::ScrollableElement as _,
     spinner::Spinner,
-    switch::Switch,
     text::TextView,
     v_flex,
 };
@@ -2036,17 +2035,22 @@ impl ReviewApp {
                                 ),
                         )
                         .child(
-                            // A switch, not a labelled button: showing comments
-                            // from other revisions is an overlay on the view,
-                            // not a mode, and the knob carries the state so the
-                            // label no longer has to spell out "on" or "off".
-                            Switch::new("other-revisions")
+                            // An icon toggle like wrap and hide-whitespace,
+                            // named only in the tooltip. "Outdated comments"
+                            // (and a labelled switch) was rejected: it judged
+                            // relevance, while the comments are merely pinned
+                            // to another revision - the dashed bubble is how
+                            // the diff already draws them.
+                            Button::new("earlier-comments")
+                                .outline()
                                 .xsmall()
-                                .checked(revisions_on)
-                                .label("Outdated comments")
-                                .tooltip("Show comments from other revisions")
-                                .on_change(cx.listener(|this, checked: &bool, _, cx| {
-                                    this.show_other_revisions = *checked;
+                                .w(px(28.))
+                                .h(px(24.))
+                                .icon(Icon::new(Lucide::MessageSquareDashed))
+                                .selected(revisions_on)
+                                .tooltip("Earlier comments - from other revisions")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_other_revisions = !this.show_other_revisions;
                                     cx.notify();
                                 })),
                         )
@@ -3358,7 +3362,7 @@ impl ReviewApp {
             ("n N", "open comments"),
             ("/", "search"),
             ("s", "split / unified"),
-            ("o", "outdated comments"),
+            ("o", "earlier comments"),
             ("zM zR", "fold"),
             ("t", "files"),
         ];
