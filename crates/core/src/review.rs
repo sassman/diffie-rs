@@ -528,11 +528,20 @@ pub fn as_prompt(threads: &[Thread<'_>]) -> String {
         // `path:line at hash` over prose: the owner wants the header to read
         // like a compiler location, and agents parse that form natively.
         out.push_str(&format!(
-            "\n{}. {}:{lines} at {}\n",
+            "\n{}. {}:{lines} at {}",
             index + 1,
             comment.path,
             comment.commit.short()
         ));
+        // The author only when reviewers differ; [resolved] only reaches
+        // callers that include closed threads (the app copies open ones).
+        if threads.iter().any(|other| other.author != thread.author) {
+            out.push_str(&format!(" ({})", thread.author));
+        }
+        if thread.resolved() {
+            out.push_str(" [resolved]");
+        }
+        out.push('\n');
         out.push_str("```\n");
         out.push_str(comment.snippet.trim_end_matches('\n'));
         out.push_str("\n```\n");
@@ -548,6 +557,135 @@ pub fn as_prompt(threads: &[Thread<'_>]) -> String {
         }
     }
     out
+}
+
+/// Why the headless prompt (`diffie --prompt`) produced nothing.
+#[derive(Debug)]
+pub enum PromptError {
+    /// No review folder with files under the review dir.
+    NoReviews(PathBuf),
+    /// The asked-for source has no review; the sources that do are listed.
+    UnknownSource {
+        asked: String,
+        available: Vec<String>,
+    },
+    File(PathBuf, ReviewFileError),
+}
+
+impl std::fmt::Display for PromptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoReviews(dir) => write!(f, "No reviews under {}", dir.display()),
+            Self::UnknownSource { asked, available } => {
+                write!(
+                    f,
+                    "No review for '{asked}'. Sources: {}",
+                    available.join(", ")
+                )
+            }
+            Self::File(path, error) => write!(f, "{}: {error}", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for PromptError {}
+
+/// Render one review source like "Copy all as prompt", without the UI.
+///
+/// `source` picks the review folder, slugged exactly like the app names it;
+/// without it the most recently written review wins, on the grounds that the
+/// review the caller means is almost always the one touched last. Returns
+/// the chosen source's folder name with the rendered text.
+pub fn prompt(
+    review_dir: &Path,
+    source: Option<&str>,
+    include_resolved: bool,
+) -> Result<(String, String), PromptError> {
+    let folders: Vec<PathBuf> = std::fs::read_dir(review_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    if folders.is_empty() {
+        return Err(PromptError::NoReviews(review_dir.to_path_buf()));
+    }
+    let folder = match source {
+        Some(asked) => {
+            let want = slug(asked);
+            folders
+                .iter()
+                .find(|folder| folder.file_name().is_some_and(|name| name == want.as_str()))
+                .ok_or_else(|| PromptError::UnknownSource {
+                    asked: asked.to_string(),
+                    available: {
+                        let mut names: Vec<String> = folders
+                            .iter()
+                            .filter_map(|folder| folder.file_name())
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .collect();
+                        names.sort();
+                        names
+                    },
+                })?
+                .clone()
+        }
+        None => folders
+            .into_iter()
+            .max_by_key(|folder| newest_file(folder))
+            .expect("the folder list was checked for emptiness"),
+    };
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+        .collect();
+    // Sorted for a stable comment order; which file plays "mine" does not
+    // matter here, no file is written.
+    files.sort();
+    let mut files = files.into_iter();
+    let Some(first) = files.next() else {
+        return Err(PromptError::NoReviews(folder));
+    };
+    let mut set = ReviewSet::new(
+        ReviewFile::load(&first).map_err(|error| PromptError::File(first.clone(), error))?,
+    );
+    for path in files {
+        let file =
+            ReviewFile::load(&path).map_err(|error| PromptError::File(path.clone(), error))?;
+        set.add_other(file);
+    }
+    let threads: Vec<Thread<'_>> = set
+        .threads()
+        .into_iter()
+        .filter(|thread| include_resolved || !thread.resolved())
+        .collect();
+    let name = folder
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let text = if threads.is_empty() {
+        "No open review comments.\n".to_string()
+    } else {
+        as_prompt(&threads)
+    };
+    Ok((name, text))
+}
+
+/// When the folder's newest review file was written; the epoch for an
+/// unreadable or empty folder, which then loses every comparison.
+fn newest_file(folder: &Path) -> std::time::SystemTime {
+    std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok()?.modified().ok())
+        .max()
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
 }
 
 fn slug(name: &str) -> String {
@@ -835,6 +973,86 @@ mod tests {
         assert!(prompt.contains("src/index/cache.rs:45 at a3f9c1e"));
         assert!(prompt.contains("if entry.mtime != meta.modified().ok()? {"));
         assert!(prompt.contains("About `meta.modified().ok()?`: This swallows permission errors."));
+    }
+
+    fn set_written(path: &Path, seconds_after_epoch: u64) {
+        // Explicit, not sleeps: the latest-review pick compares mtimes.
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_secs(seconds_after_epoch),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn prompt_picks_the_latest_review_and_merges_reviewers() {
+        let dir = tempfile::tempdir().unwrap();
+        let review_dir = dir.path();
+        let mut old = ReviewFile::new("Ada", &resolved());
+        old.add_comment(comment("c0ffee00000", 3));
+        let old_path = ReviewFile::path_in(review_dir, "old-branch", "Ada");
+        old.save(&old_path).unwrap();
+        let mut mine = ReviewFile::new("Ada", &resolved());
+        let done_id = mine.add_comment(comment("a3f9c1e0000", 45));
+        mine.add_comment(comment("b4e8d2f0000", 9));
+        let mine_path = ReviewFile::path_in(review_dir, "feature", "Ada");
+        mine.save(&mine_path).unwrap();
+        let mut theirs = ReviewFile::new("Grace", &resolved());
+        theirs.toggle_reaction(&done_id, ReactionKind::Done);
+        let theirs_path = ReviewFile::path_in(review_dir, "feature", "Grace");
+        theirs.save(&theirs_path).unwrap();
+        set_written(&old_path, 1_000);
+        set_written(&mine_path, 2_000);
+        set_written(&theirs_path, 2_000);
+
+        let (source, text) = prompt(review_dir, None, false).unwrap();
+        assert_eq!(source, "feature");
+        assert!(text.contains("at b4e8d2f"));
+        // Grace's Done closes Ada's first comment across files.
+        assert!(!text.contains("at a3f9c1e"));
+
+        let (_, text) = prompt(review_dir, None, true).unwrap();
+        assert!(text.contains("at a3f9c1e [resolved]"));
+
+        let (source, _) = prompt(review_dir, Some("old-branch"), false).unwrap();
+        assert_eq!(source, "old-branch");
+
+        let error = prompt(review_dir, Some("gone"), false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "No review for 'gone'. Sources: feature, old-branch"
+        );
+    }
+
+    #[test]
+    fn prompt_names_authors_only_when_reviewers_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mine = ReviewFile::new("Ada", &resolved());
+        mine.add_comment(comment("a3f9c1e0000", 45));
+        mine.save(&ReviewFile::path_in(dir.path(), "feature", "Ada"))
+            .unwrap();
+        let (_, text) = prompt(dir.path(), None, false).unwrap();
+        assert!(!text.contains("(Ada)"));
+
+        let mut theirs = ReviewFile::new("Grace", &resolved());
+        theirs.add_comment(comment("b4e8d2f0000", 9));
+        theirs
+            .save(&ReviewFile::path_in(dir.path(), "feature", "Grace"))
+            .unwrap();
+        let (_, text) = prompt(dir.path(), None, false).unwrap();
+        assert!(text.contains("(Ada)"));
+        assert!(text.contains("(Grace)"));
+    }
+
+    #[test]
+    fn prompt_without_reviews_says_where_it_looked() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = prompt(&dir.path().join("review"), None, false).unwrap_err();
+        assert!(error.to_string().starts_with("No reviews under "));
     }
 
     #[test]

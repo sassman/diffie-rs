@@ -105,6 +105,12 @@ Decided:
   is accepted when exactly one remote has it, and the review names that
   remote's ref (`o/x` for `x`); with several candidates the app lists them
   and asks the user to say which.
+- `diffie --prompt` prints the open review comments headless, exactly as
+  the "Copy all as prompt" button renders them (owner, 2026-11-12). The
+  agent skill calls the binary instead of shipping its own reader, so the
+  rendering cannot drift from the app. `--source` picks the review (default
+  the most recently written, named on stderr); `--all` includes resolved
+  comments, marked; with several reviewers the header names each author.
 
 Assumed:
 

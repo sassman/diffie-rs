@@ -59,8 +59,9 @@ folder.
 
 `skills/diffie-review/` teaches a coding agent (Claude Code and compatible)
 to open the right comparison for a review request and to read the finished
-review back - the bundled `review-prompt.py` renders open comments exactly
-like the app's "Copy all as prompt" button. Install from this repository:
+review back through `diffie --prompt`, which prints the open comments
+exactly like the app's "Copy all as prompt" button. Install from this
+repository:
 
 ```sh
 npx skills add sassman/diffie-rs

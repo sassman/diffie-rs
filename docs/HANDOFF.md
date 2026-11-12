@@ -57,7 +57,11 @@ the checked-out branch; one: the working tree into it; two or `A..B`: the
 first into the second), `--source`/`--target`/`--every-difference` stay as
 the explicit form. A revision that does not resolve fails before the window
 opens; a branch that exactly one remote has is taken from there (`o/x`
-stands in for `x`), several candidates are listed and refused. With no revision at all, the review is the working tree's
+stands in for `x`), several candidates are listed and refused.
+`diffie --prompt` opens no window: it prints the open review comments the
+way "Copy all as prompt" does (`--source` picks the review, default the
+most recently written; `--all` includes resolved ones, marked).
+With no revision at all, the review is the working tree's
 uncommitted changes going into the checked-out branch
 (`Comparison::uncommitted`): the diff runs against a scratch index seeded
 with intent-to-add entries so untracked files show, ticks hash the file on

@@ -44,18 +44,17 @@ to drive the app.
 ## Reading the review back
 
 The app writes review files (TOML, one per reviewer) under
-`$(git rev-parse --git-common-dir)/review/<source>/`. Do not parse them ad
-hoc - run the bundled reader, which renders them exactly like the app's
-"Copy all as prompt" button. It lives next to this SKILL.md (the skill
-loader names this skill's base directory when it loads):
+`$(git rev-parse --git-common-dir)/review/<source>/`. Do not parse them -
+diffie itself renders them exactly like the app's "Copy all as prompt"
+button, without opening a window:
 
 ```bash
-python3 <skill-base-dir>/review-prompt.py -C /path/to/repo
+diffie --prompt -C /path/to/repo
 ```
 
 - No `--source` needed normally: it picks the most recently touched review
-  and names it on stderr. Pass `--source main..HEAD`-style names only if the
-  user reviewed several comparisons (`--source uncommitted`, `--source feature`).
+  and names it on stderr. Pass `--source feature`-style names only if the
+  user reviewed several comparisons (`--source uncommitted`).
 - Only open comments are printed. A Done or Won't fix reaction from any
   reviewer closes a comment; `--all` includes closed ones marked `[resolved]`.
 - Output format, same as a pasted prompt:
