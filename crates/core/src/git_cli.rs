@@ -179,6 +179,40 @@ impl GitCli {
         name_only: bool,
         ignore_whitespace: bool,
     ) -> Result<String> {
+        let mut args = Self::diff_args(ignore_whitespace);
+        if name_only {
+            args.push("--name-only".to_string());
+            args.push("-z".to_string());
+        }
+        args.push(base.to_string());
+        args.push("--".to_string());
+        self.worktree_run(base, &args)
+    }
+
+    /// The uncommitted layer as a replayable patch: the working tree against
+    /// `base`, in the exact shape `combine` applies commit patches with.
+    fn worktree_apply_patch(&self, base: &str) -> Result<String> {
+        let args: Vec<String> = [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "--full-index",
+            "--no-renames",
+            base,
+            "--",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        self.worktree_run(base, &args)
+    }
+
+    /// Runs one git command against a scratch index holding `base`'s tree
+    /// plus intent-to-add entries, so a diff lists untracked files too; the
+    /// repository's real index stays untouched.
+    fn worktree_run(&self, base: &str, args: &[String]) -> Result<String> {
         let scratch = Scratch::new()?;
         let objects = scratch.path.join("objects");
         std::fs::create_dir_all(&objects)?;
@@ -197,13 +231,6 @@ impl GitCli {
         // `:/` keeps the sweep repository-wide even when the backend was
         // opened from a subdirectory.
         scratch_read(&["add", "--intent-to-add", "--", ":/"])?;
-        let mut args = Self::diff_args(ignore_whitespace);
-        if name_only {
-            args.push("--name-only".to_string());
-            args.push("-z".to_string());
-        }
-        args.push(base.to_string());
-        args.push("--".to_string());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         scratch_read(&args)
     }
@@ -325,7 +352,14 @@ impl GitCli {
     /// Replay only `picked` (oldest first) onto the parent of the first one,
     /// file by file, and diff the result. A file that cannot be replayed
     /// cleanly stops at the commit that failed and is reported as such.
-    fn combine(&self, picked: &[Oid], ignore_whitespace: bool) -> Result<ScopedPatch> {
+    /// With `worktree_on`, the working tree's uncommitted changes (its diff
+    /// against that revision) are replayed as one more layer on top.
+    fn combine(
+        &self,
+        picked: &[Oid],
+        worktree_on: Option<Oid>,
+        ignore_whitespace: bool,
+    ) -> Result<ScopedPatch> {
         let scratch = Scratch::new()?;
         let objects = scratch.path.join("objects");
         std::fs::create_dir_all(&objects)?;
@@ -395,6 +429,31 @@ impl GitCli {
             }
         }
 
+        let mut uncommitted_failed: Vec<String> = Vec::new();
+        if let Some(head) = worktree_on {
+            let layer = self.worktree_apply_patch(head.as_str())?;
+            for (summary, section) in split_files(&layer) {
+                // A file a commit layer already gave up on keeps that state;
+                // its patch stops there either way.
+                if failed.contains_key(&summary.path) {
+                    continue;
+                }
+                let saved = std::fs::read(&index)?;
+                let applied = scratch_read(
+                    &["apply", "--cached", "--3way", "--whitespace=nowarn", "-"],
+                    Some(section.as_bytes()),
+                );
+                match applied {
+                    Ok(_) => {}
+                    Err(BackendError::Git { .. }) => {
+                        std::fs::write(&index, saved)?;
+                        uncommitted_failed.push(summary.path);
+                    }
+                    Err(other) => return Err(other),
+                }
+            }
+        }
+
         let tree = scratch_read(&["write-tree"], None)?;
         let mut args = Self::diff_args(ignore_whitespace);
         args.push(base);
@@ -406,19 +465,25 @@ impl GitCli {
             .into_iter()
             .map(|(summary, _)| summary)
             .collect();
+        let mut mark = |path: String, state: FileState| match files
+            .iter_mut()
+            .find(|file| file.path == path)
+        {
+            Some(file) => file.state = state,
+            None => files.push(FileSummary {
+                path,
+                status: FileStatus::Modified,
+                additions: 0,
+                deletions: 0,
+                state,
+                binary: false,
+            }),
+        };
         for (path, commit) in failed {
-            let state = FileState::CouldNotCombine { commit };
-            match files.iter_mut().find(|file| file.path == path) {
-                Some(file) => file.state = state,
-                None => files.push(FileSummary {
-                    path,
-                    status: FileStatus::Modified,
-                    additions: 0,
-                    deletions: 0,
-                    state,
-                    binary: false,
-                }),
-            }
+            mark(path, FileState::CouldNotCombine { commit });
+        }
+        for path in uncommitted_failed {
+            mark(path, FileState::UncommittedNotCombined);
         }
         Ok(ScopedPatch {
             text,
@@ -542,6 +607,18 @@ impl ReviewBackend for GitCli {
             .collect())
     }
 
+    fn uncommitted_paths(&self, resolved: &Resolved) -> Result<Vec<String>> {
+        if !resolved.comparison.uncommitted {
+            return Ok(Vec::new());
+        }
+        let output = self.worktree_diff(resolved.head.as_str(), true, false)?;
+        Ok(output
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(String::from)
+            .collect())
+    }
+
     fn commits_touching(&self, resolved: &Resolved) -> Result<HashMap<String, Vec<Oid>>> {
         let range = format!("{}..{}", resolved.base, resolved.head);
         // One record per commit: `\x01<hash>\0`, then the touched paths
@@ -598,15 +675,32 @@ impl ReviewBackend for GitCli {
                 };
                 Ok(patch_from(text, new_side_of(resolved)))
             }
-            Scope::Commits(picked) => {
+            Scope::Commits {
+                picked,
+                uncommitted,
+            } => {
+                let worktree = *uncommitted && resolved.comparison.uncommitted;
                 let (ordered, contiguous) = self.in_history_order(resolved, picked)?;
                 let (Some(oldest), Some(newest)) = (ordered.first(), ordered.last()) else {
+                    if worktree {
+                        // Only the uncommitted layer: the working tree
+                        // against `head`.
+                        let text =
+                            self.worktree_diff(resolved.head.as_str(), false, ignore_whitespace)?;
+                        return Ok(patch_from(text, NewSide::Synthetic));
+                    }
                     return Ok(patch_from(
                         String::new(),
                         NewSide::Commit(resolved.head.clone()),
                     ));
                 };
-                if contiguous {
+                if contiguous && worktree && *newest == resolved.head {
+                    // A run ending at `head` plus the uncommitted layer is
+                    // simply the working tree against the run's parent.
+                    let text =
+                        self.worktree_diff(&self.parent_of(oldest)?, false, ignore_whitespace)?;
+                    Ok(patch_from(text, NewSide::Synthetic))
+                } else if contiguous && !worktree {
                     let text = self.diff(
                         &self.parent_of(oldest)?,
                         newest.as_str(),
@@ -615,7 +709,11 @@ impl ReviewBackend for GitCli {
                     )?;
                     Ok(patch_from(text, NewSide::Commit(newest.clone())))
                 } else {
-                    self.combine(&ordered, ignore_whitespace)
+                    self.combine(
+                        &ordered,
+                        worktree.then(|| resolved.head.clone()),
+                        ignore_whitespace,
+                    )
                 }
             }
         }

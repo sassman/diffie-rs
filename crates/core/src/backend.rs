@@ -38,6 +38,11 @@ pub trait ReviewBackend: Send + Sync {
     /// [`FileSummary`](crate::model::FileSummary).
     fn changed_paths(&self, resolved: &Resolved) -> Result<Vec<String>>;
 
+    /// The paths whose working-tree content differs from `head`: the files
+    /// the uncommitted layer of an uncommitted comparison touches. Empty
+    /// when the comparison reviews committed revisions.
+    fn uncommitted_paths(&self, resolved: &Resolved) -> Result<Vec<String>>;
+
     /// The commits (`base..head`, newest first like [`Self::commits`]) that
     /// touched each path. Paths are the names each commit used, so a file
     /// renamed inside the range appears under its old name for the commits

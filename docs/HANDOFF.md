@@ -117,6 +117,12 @@ How `GitCli` produces each scope:
   is written to the repository (a test counts loose objects to prove it). A
   file that cannot be replayed stops before the failing commit and is reported
   as `FileState::CouldNotCombine`.
+- **Custom, in an uncommitted review**: `Scope::Commits` carries an
+  `uncommitted` flag; the working tree is one more pickable layer. All checked
+  through head: one worktree diff. Otherwise the worktree-against-head patch
+  is replayed on top of the combined tree; a file it cannot sit on is
+  `FileState::UncommittedNotCombined`. `uncommitted_paths` on the trait lists
+  the files the layer touches.
 - **New for me**: per file. Ticked and unchanged: listed, no diff. Ticked and
   changed: `git diff <ticked blob> <current blob>`, relabelled with the path.
   Otherwise the file's whole-branch diff. A blobless tick on a still-deleted
@@ -243,7 +249,10 @@ actually exercised):
   copy all as prompt, a theme menu behind the palette button.
 - Scope bar: segmented scopes; the commit picker with search, group
   checkboxes, skipped markers, comment badges, Show-more rows, shift-click
-  runs and Space on the hovered row; the open-comments count in the
+  runs and Space on the hovered row; in an uncommitted review an
+  "Uncommitted changes" row leads "New since your review" so the working
+  tree can be excluded like a commit (files carrying its changes say
+  "uncommitted" in the diff header, warning-coloured); the open-comments count in the
   comment accent ("comments handled" once every thread is resolved);
   the files-reviewed count with a progress bar. `n`/`N` walk the open
   comments in reading order and reveal a collapsed file on landing.

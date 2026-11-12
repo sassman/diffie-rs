@@ -88,7 +88,10 @@ pub enum Scope {
     /// `base..head`, the big picture.
     WholeBranch,
     /// Any subset of the comparison's commits. May skip commits in between.
-    Commits(Vec<Oid>),
+    /// With `uncommitted`, the working tree's uncommitted changes count as
+    /// one more pickable layer on top; the flag only means something when
+    /// [`Comparison::uncommitted`] is set.
+    Commits { picked: Vec<Oid>, uncommitted: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +112,10 @@ pub enum FileState {
     /// not be combined for this file. `commit` is the first one that failed.
     /// The file's diff in the patch stops before that commit.
     CouldNotCombine { commit: Oid },
+    /// The working tree's uncommitted changes could not be laid on top of
+    /// the checked commits (a skipped commit touches the same lines). The
+    /// file's diff in the patch stops at the last checked commit.
+    UncommittedNotCombined,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

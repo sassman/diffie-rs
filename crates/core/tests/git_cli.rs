@@ -252,7 +252,15 @@ fn a_contiguous_selection_is_a_plain_range() {
     let resolved = backend.resolve(&Fixture::comparison()).unwrap();
     let picked = vec![fixture.commits[2].clone(), fixture.commits[1].clone()];
     let patch = backend
-        .patch(&resolved, &Scope::Commits(picked), &[], false)
+        .patch(
+            &resolved,
+            &Scope::Commits {
+                picked,
+                uncommitted: false,
+            },
+            &[],
+            false,
+        )
         .unwrap();
     assert_eq!(paths(&patch.files), ["a.txt", "b.txt"]);
     assert_eq!(patch.new_side, NewSide::Commit(fixture.commits[2].clone()));
@@ -270,7 +278,15 @@ fn skipped_commits_are_left_out_without_writing_to_the_repository() {
     // c1 and c3, skipping c2 (which adds b.txt).
     let picked = vec![fixture.commits[0].clone(), fixture.commits[2].clone()];
     let patch = backend
-        .patch(&resolved, &Scope::Commits(picked), &[], false)
+        .patch(
+            &resolved,
+            &Scope::Commits {
+                picked,
+                uncommitted: false,
+            },
+            &[],
+            false,
+        )
         .unwrap();
     assert_eq!(patch.new_side, NewSide::Synthetic);
     assert_eq!(paths(&patch.files), ["a.txt"]);
@@ -298,7 +314,15 @@ fn a_file_that_cannot_be_combined_is_reported() {
     // c2 and c5, skipping c3: c5 rewrites the line c3 introduced.
     let picked = vec![fixture.commits[1].clone(), fixture.commits[4].clone()];
     let patch = backend
-        .patch(&resolved, &Scope::Commits(picked), &[], false)
+        .patch(
+            &resolved,
+            &Scope::Commits {
+                picked,
+                uncommitted: false,
+            },
+            &[],
+            false,
+        )
         .unwrap();
     let a = patch
         .files
@@ -525,6 +549,161 @@ fn reviews_the_uncommitted_working_tree() {
     // The repository itself is untouched: still clean apart from our edits.
     let dirty = git(root, &["status", "--porcelain"]);
     assert!(!dirty.contains("A "), "nothing staged: {dirty}");
+}
+
+#[test]
+fn the_uncommitted_layer_is_pickable() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    // One uncommitted edit on top of the branch: line 5.
+    std::fs::write(
+        root.join("a.txt"),
+        lines(&[(2, "TWO"), (5, "FIVE"), (9, "NINE")]),
+    )
+    .unwrap();
+
+    let backend = fixture.backend();
+    let comparison = Comparison {
+        source: "uncommitted".into(),
+        target: "main".into(),
+        mode: CompareMode::BranchAdds,
+        uncommitted: true,
+    };
+    let resolved = backend.resolve(&comparison).unwrap();
+    assert_eq!(backend.uncommitted_paths(&resolved).unwrap(), ["a.txt"]);
+
+    // Every commit plus the layer: the whole worktree diff.
+    let all = fixture.commits.clone();
+    let patch = backend
+        .patch(
+            &resolved,
+            &Scope::Commits {
+                picked: all.clone(),
+                uncommitted: true,
+            },
+            &[],
+            false,
+        )
+        .unwrap();
+    assert_eq!(patch.new_side, NewSide::Synthetic);
+    assert!(patch.text.contains("+FIVE") && patch.text.contains("+NINE"));
+
+    // Layer unchecked: the uncommitted edit stays out, the commits stay in.
+    let patch = backend
+        .patch(
+            &resolved,
+            &Scope::Commits {
+                picked: all,
+                uncommitted: false,
+            },
+            &[],
+            false,
+        )
+        .unwrap();
+    assert!(!patch.text.contains("FIVE") && patch.text.contains("+NINE"));
+
+    // The layer alone: only the uncommitted edit.
+    let patch = backend
+        .patch(
+            &resolved,
+            &Scope::Commits {
+                picked: Vec::new(),
+                uncommitted: true,
+            },
+            &[],
+            false,
+        )
+        .unwrap();
+    assert_eq!(paths(&patch.files), ["a.txt"]);
+    assert!(patch.text.contains("+FIVE") && !patch.text.contains("+NINE"));
+
+    // A committed comparison has no uncommitted layer.
+    let committed = backend.resolve(&Fixture::comparison()).unwrap();
+    assert!(backend.uncommitted_paths(&committed).unwrap().is_empty());
+}
+
+#[test]
+fn the_uncommitted_layer_combines_with_skipped_commits() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    std::fs::write(
+        root.join("a.txt"),
+        lines(&[(2, "TWO"), (5, "FIVE"), (9, "NINE")]),
+    )
+    .unwrap();
+
+    let backend = fixture.backend();
+    let comparison = Comparison {
+        source: "uncommitted".into(),
+        target: "main".into(),
+        mode: CompareMode::BranchAdds,
+        uncommitted: true,
+    };
+    let resolved = backend.resolve(&comparison).unwrap();
+
+    // Skip c5 (it rewrote line 9) but keep the uncommitted line-5 edit.
+    let patch = backend
+        .patch(
+            &resolved,
+            &Scope::Commits {
+                picked: fixture.commits[..4].to_vec(),
+                uncommitted: true,
+            },
+            &[],
+            false,
+        )
+        .unwrap();
+    assert_eq!(patch.new_side, NewSide::Synthetic);
+    assert!(patch.text.contains("+FIVE"), "the layer is applied");
+    assert!(!patch.text.contains("NINE"), "c5 stays out");
+    assert!(
+        patch
+            .files
+            .iter()
+            .all(|file| file.state == FileState::Changed)
+    );
+}
+
+#[test]
+fn an_uncombinable_uncommitted_layer_is_reported() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    // The uncommitted edit rewrites the line c5 wrote; skipping c5 then
+    // leaves the layer nothing to sit on.
+    std::fs::write(root.join("a.txt"), lines(&[(2, "TWO"), (9, "NINE edited")])).unwrap();
+
+    let backend = fixture.backend();
+    let comparison = Comparison {
+        source: "uncommitted".into(),
+        target: "main".into(),
+        mode: CompareMode::BranchAdds,
+        uncommitted: true,
+    };
+    let resolved = backend.resolve(&comparison).unwrap();
+
+    let patch = backend
+        .patch(
+            &resolved,
+            &Scope::Commits {
+                picked: fixture.commits[..4].to_vec(),
+                uncommitted: true,
+            },
+            &[],
+            false,
+        )
+        .unwrap();
+    let a = patch
+        .files
+        .iter()
+        .find(|file| file.path == "a.txt")
+        .unwrap();
+    assert_eq!(a.state, FileState::UncommittedNotCombined);
+    assert!(!patch.text.contains("NINE"), "the layer is left out");
+    // Unstaged-modified only: the failed apply wrote nothing to the repository.
+    assert_eq!(
+        git(root, &["status", "--porcelain", "--", "a.txt"]),
+        "M a.txt"
+    );
 }
 
 #[test]

@@ -456,6 +456,7 @@ struct Loaded {
     /// is judged against this list, never against the scope on screen.
     branch: Vec<(String, Option<Oid>)>,
     touched: HashMap<String, Vec<Oid>>,
+    uncommitted_paths: HashSet<String>,
     /// A stale `completed` marker was cleared and the file needs saving.
     completed_cleared: bool,
     placed: Vec<Placed>,
@@ -509,6 +510,8 @@ struct FileView {
     /// Checked commits that touched this file, and how many are checked.
     touched: usize,
     in_scope: usize,
+    /// The diff on screen carries uncommitted changes of this file.
+    uncommitted: bool,
     comments: usize,
     other_revision: usize,
 }
@@ -522,6 +525,12 @@ pub struct ReviewApp {
     comparison: Comparison,
     scope: ScopeKind,
     picked: Vec<Oid>,
+    /// Whether the uncommitted layer of an uncommitted review is checked in
+    /// the commit picker. Like `picked`, only the Custom scope reads it.
+    picked_uncommitted: bool,
+    /// Files whose working-tree content differs from `head`: the ones the
+    /// uncommitted layer touches. Empty for a committed comparison.
+    uncommitted_paths: HashSet<String>,
     resolved: Option<Resolved>,
     commits: Arc<Vec<Commit>>,
     files: Arc<Vec<FileSummary>>,
@@ -649,6 +658,8 @@ impl ReviewApp {
             comparison,
             scope: ScopeKind::NewForMe,
             picked: Vec::new(),
+            picked_uncommitted: true,
+            uncommitted_paths: HashSet::new(),
             resolved: None,
             commits: Arc::default(),
             files: Arc::default(),
@@ -711,7 +722,10 @@ impl ReviewApp {
         match self.scope {
             ScopeKind::NewForMe => Scope::NewForMe,
             ScopeKind::WholeBranch => Scope::WholeBranch,
-            ScopeKind::Custom => Scope::Commits(self.picked.clone()),
+            ScopeKind::Custom => Scope::Commits {
+                picked: self.picked.clone(),
+                uncommitted: self.comparison.uncommitted && self.picked_uncommitted,
+            },
         }
     }
 
@@ -830,6 +844,7 @@ impl ReviewApp {
                 self.files = Arc::new(loaded.patch.files);
                 self.branch = loaded.branch;
                 self.touched = loaded.touched;
+                self.uncommitted_paths = loaded.uncommitted_paths;
                 self.new_side = Some(loaded.patch.new_side);
                 self.blobs = loaded.blobs;
                 self.reviews = Some(loaded.reviews);
@@ -897,37 +912,49 @@ impl ReviewApp {
         self.reload(cx);
     }
 
-    fn toggle_commit(&mut self, id: &Oid, cx: &mut Context<Self>) {
-        match self.picked.iter().position(|picked| picked == id) {
-            Some(index) => {
-                self.picked.remove(index);
-            }
-            None => self.picked.push(id.clone()),
-        }
-        self.scope = ScopeKind::Custom;
-        self.reload(cx);
-    }
-
-    fn pick_many(&mut self, ids: Vec<Oid>, checked: bool, cx: &mut Context<Self>) {
-        self.picked.retain(|picked| !ids.contains(picked));
-        if checked {
-            self.picked.extend(ids);
-        }
-        self.scope = ScopeKind::Custom;
-        self.reload(cx);
-    }
-
-    /// A click on a picker row. Shift checks the run from the last toggled
-    /// commit; a plain click toggles one.
-    fn picker_click(&mut self, id: &Oid, shift: bool, cx: &mut Context<Self>) {
-        // Leaving a non-custom scope starts from "all checked".
+    /// Entering the custom scope from another starts from "all checked",
+    /// uncommitted layer included; unchecking then narrows from there.
+    fn enter_custom(&mut self) {
         if self.scope != ScopeKind::Custom {
             self.picked = self
                 .commits
                 .iter()
                 .map(|commit| commit.id.clone())
                 .collect();
+            self.picked_uncommitted = true;
         }
+        self.scope = ScopeKind::Custom;
+    }
+
+    fn toggle_commit(&mut self, id: &Oid, cx: &mut Context<Self>) {
+        self.enter_custom();
+        match self.picked.iter().position(|picked| picked == id) {
+            Some(index) => {
+                self.picked.remove(index);
+            }
+            None => self.picked.push(id.clone()),
+        }
+        self.reload(cx);
+    }
+
+    fn toggle_uncommitted(&mut self, cx: &mut Context<Self>) {
+        self.enter_custom();
+        self.picked_uncommitted = !self.picked_uncommitted;
+        self.reload(cx);
+    }
+
+    fn pick_many(&mut self, ids: Vec<Oid>, checked: bool, cx: &mut Context<Self>) {
+        self.enter_custom();
+        self.picked.retain(|picked| !ids.contains(picked));
+        if checked {
+            self.picked.extend(ids);
+        }
+        self.reload(cx);
+    }
+
+    /// A click on a picker row. Shift checks the run from the last toggled
+    /// commit; a plain click toggles one.
+    fn picker_click(&mut self, id: &Oid, shift: bool, cx: &mut Context<Self>) {
         let position =
             |id: &Oid| -> Option<usize> { self.commits.iter().position(|commit| &commit.id == id) };
         if shift
@@ -949,6 +976,7 @@ impl ReviewApp {
     fn swap_direction(&mut self, cx: &mut Context<Self>) {
         std::mem::swap(&mut self.comparison.source, &mut self.comparison.target);
         self.picked.clear();
+        self.picked_uncommitted = true;
         self.scope = ScopeKind::NewForMe;
         // The review file belongs to the other direction.
         self.reviews = None;
@@ -1676,6 +1704,8 @@ impl ReviewApp {
             }
         }
         let in_scope_set = self.in_scope();
+        let shows_uncommitted = self.comparison.uncommitted
+            && (self.scope != ScopeKind::Custom || self.picked_uncommitted);
         let files = self
             .files
             .iter()
@@ -1694,6 +1724,10 @@ impl ReviewApp {
                     _ if is_generated(&file.path) => {
                         Some("generated file · collapsed by default".into())
                     }
+                    _ if file.state == FileState::UncommittedNotCombined => Some(
+                        "uncommitted changes left out: a skipped commit touches the same lines"
+                            .into(),
+                    ),
                     _ if self.review_state(&file.path) == ReviewState::ChangedSince => {
                         Some("changed since your review".into())
                     }
@@ -1726,6 +1760,9 @@ impl ReviewApp {
                         generated: is_generated(&file.path),
                         touched,
                         in_scope: in_scope_set.len(),
+                        uncommitted: shows_uncommitted
+                            && file.state != FileState::UncommittedNotCombined
+                            && self.uncommitted_paths.contains(&file.path),
                         comments,
                         other_revision,
                     },
@@ -2096,6 +2133,60 @@ impl ReviewApp {
             .into_any_element()
     }
 
+    /// The uncommitted layer's picker row, styled like a commit item, so the
+    /// working-tree changes can be excluded from a custom scope explicitly.
+    fn render_uncommitted_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let checked = self.picked_uncommitted || self.scope != ScopeKind::Custom;
+        let muted = cx.theme().muted_foreground;
+        let files = self.uncommitted_paths.len();
+        h_flex()
+            .id("pick-uncommitted")
+            .w_full()
+            .items_start()
+            .gap_2()
+            .px_1()
+            .py(px(3.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .when(checked, |row| row.bg(cx.theme().accent))
+            .on_click(cx.listener(|this, _: &gpui_kit::ClickEvent, window, cx| {
+                window.focus(&this.picker_focus, cx);
+                this.toggle_uncommitted(cx);
+            }))
+            .child(
+                Checkbox::new("pick-box-uncommitted")
+                    .xsmall()
+                    .checked(checked),
+            )
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .child(
+                        div()
+                            .truncate()
+                            .when(!checked, |title| title.text_color(muted))
+                            .child("Uncommitted changes"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .text_size(px(11.))
+                            .text_color(if checked {
+                                cx.theme().blue_light
+                            } else {
+                                muted
+                            })
+                            .child(Icon::new(Lucide::Pencil).xsmall())
+                            .child(format!(
+                                "{files} file{} · working tree",
+                                if files == 1 { "" } else { "s" }
+                            )),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_scope_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let total = self.commits.len();
         let muted = cx.theme().muted_foreground;
@@ -2157,23 +2248,32 @@ impl ReviewApp {
                 || commit.id.short().to_lowercase().starts_with(&query)
         };
 
+        // The uncommitted layer only earns a row when it has changes to show.
+        let uncommitted_entry = self.comparison.uncommitted && !self.uncommitted_paths.is_empty();
         let split_at = self.reviewed_from().unwrap_or(total);
         let group = |title: &'static str,
                      range: std::ops::Range<usize>,
                      heading_color: Hsla,
                      bordered: bool,
+                     with_uncommitted: bool,
                      cx: &mut Context<Self>| {
             let ids: Vec<Oid> = self.commits[range.clone()]
                 .iter()
                 .map(|commit| commit.id.clone())
                 .collect();
             // Outside the custom scope every commit counts as checked.
-            let checked = if self.scope == ScopeKind::Custom {
+            let mut checked = if self.scope == ScopeKind::Custom {
                 ids.iter().filter(|id| self.picked.contains(id)).count()
             } else {
                 ids.len()
             };
-            let all = checked == ids.len() && !ids.is_empty();
+            // The uncommitted row counts like a commit in its group.
+            let mut len = ids.len();
+            if with_uncommitted {
+                len += 1;
+                checked += usize::from(self.picked_uncommitted || self.scope != ScopeKind::Custom);
+            }
+            let all = checked == len && len > 0;
             h_flex()
                 .w_full()
                 .h(px(24.))
@@ -2187,6 +2287,13 @@ impl ReviewApp {
                         .xsmall()
                         .checked(all)
                         .on_change(cx.listener(move |this, checked: &bool, _, cx| {
+                            if with_uncommitted {
+                                // enter_custom first: it would otherwise reset
+                                // the layer to checked when leaving another
+                                // scope, overriding this very click.
+                                this.enter_custom();
+                                this.picked_uncommitted = *checked;
+                            }
                             this.pick_many(ids.clone(), *checked, cx)
                         })),
                 )
@@ -2201,7 +2308,7 @@ impl ReviewApp {
                     div()
                         .font_normal()
                         .text_color(muted)
-                        .child(format!("{checked} of {}", range.len())),
+                        .child(format!("{checked} of {len}")),
                 )
         };
 
@@ -2212,12 +2319,23 @@ impl ReviewApp {
                        heading_color: Hsla,
                        bordered: bool,
                        expanded: bool,
+                       with_uncommitted: bool,
                        cx: &mut Context<Self>| {
             let mut list = list;
-            if range.is_empty() {
+            if range.is_empty() && !with_uncommitted {
                 return list;
             }
-            list = list.child(group(title, range.clone(), heading_color, bordered, cx));
+            list = list.child(group(
+                title,
+                range.clone(),
+                heading_color,
+                bordered,
+                with_uncommitted,
+                cx,
+            ));
+            if with_uncommitted && (query.is_empty() || "uncommitted changes".contains(&query)) {
+                list = list.child(self.render_uncommitted_row(cx));
+            }
             let rows: Vec<&Commit> = self.commits[range.clone()]
                 .iter()
                 .filter(|commit| matches(commit))
@@ -2264,6 +2382,7 @@ impl ReviewApp {
             blue_light,
             false,
             self.show_all_new,
+            uncommitted_entry,
             cx,
         );
         list = section(
@@ -2273,6 +2392,7 @@ impl ReviewApp {
             muted,
             split_at > 0,
             self.show_all_reviewed,
+            false,
             cx,
         );
 
@@ -3060,6 +3180,11 @@ impl ReviewApp {
                             counts(view.deletions, '−', cx.theme().danger)
                         }
                     }))
+                    // The warning colour, plain weight: noticeable beside the
+                    // muted touched-by text without shouting like an alert.
+                    .when(view.is_some_and(|view| view.uncommitted), |row| {
+                        row.child(div().flex_none().text_color(warning).child("uncommitted"))
+                    })
                     .when_some(touched, |row, touched| {
                         row.child(div().flex_none().text_color(muted).child(touched))
                     })
@@ -3823,8 +3948,13 @@ fn load(
             .map(|(path, blob)| (path.as_str(), blob.as_ref())),
     );
     let touched = backend.commits_touching(&resolved).map_err(text)?;
+    let uncommitted_paths: HashSet<String> = backend
+        .uncommitted_paths(&resolved)
+        .map_err(text)?
+        .into_iter()
+        .collect();
     let in_scope: HashSet<Oid> = match scope {
-        Scope::Commits(picked) => picked.iter().cloned().collect(),
+        Scope::Commits { picked, .. } => picked.iter().cloned().collect(),
         _ => commits.iter().map(|commit| commit.id.clone()).collect(),
     };
     let placed = place_all(
@@ -3848,6 +3978,7 @@ fn load(
         blobs,
         branch,
         touched,
+        uncommitted_paths,
         completed_cleared,
         placed,
         moved,

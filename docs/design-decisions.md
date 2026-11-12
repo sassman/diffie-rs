@@ -129,6 +129,11 @@ Decided:
     commits.
   - Commits in the middle can be left unchecked, so a review can follow a
     topic that is not one continuous range.
+- In an uncommitted review the working-tree changes are one more pickable
+  entry, "Uncommitted changes", first under "New since your review", so they
+  can be excluded explicitly; a file whose shown diff carries uncommitted
+  content says "uncommitted" in its header, where the touched-by text sits
+  (owner, 2026-11-12).
 - "Commits since last review" must be available as a range definition.
 - Only the reviewer's own reviews define "last review". Colleagues' files do
   not.
