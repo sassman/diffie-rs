@@ -3626,9 +3626,12 @@ impl Render for ReviewApp {
                 cx.listener(|this, _: &SubmitDraft, window, cx| this.submit_draft(window, cx)),
             )
             .on_action(cx.listener(|this, _: &MarkReviewed, _, cx| {
-                if let Some(path) = this.current_file.clone() {
-                    let reviewed = this.review_state(&path) == ReviewState::Reviewed;
-                    this.set_reviewed(&path, !reviewed, cx);
+                // Only sets, never clears: un-reviewing is deliberate and
+                // stays on the checkbox, out of reach of a stray keypress.
+                if let Some(path) = this.current_file.clone()
+                    && this.review_state(&path) != ReviewState::Reviewed
+                {
+                    this.set_reviewed(&path, true, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &Refresh, _, cx| this.reload(cx)))
