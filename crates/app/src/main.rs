@@ -466,10 +466,44 @@ fn main() {
                 .expect("the embedded fonts must load");
             gpui_kit::init(cx);
             app::init(cx);
+            // Only the X11 backend reads `icon` (it becomes _NET_WM_ICON);
+            // Wayland takes the icon from the .desktop entry matched by
+            // `app_id`. A broken embed must not stop a review, so decode
+            // failure just logs.
+            let icon = image::load_from_memory(include_bytes!("../../../assets/icon-256.png"))
+                .map(|decoded| Arc::new(decoded.into_rgba8()))
+                .inspect_err(|error| tracing::warn!("window icon not decodable: {error}"))
+                .ok();
+            // GPUI never touches the macOS app icon and the dev binary has
+            // no bundle to carry an .icns, so the Dock gets the mark at
+            // runtime - X11 and Wayland are covered above, which closes the
+            // cross-platform story. The 1024 px master because the Dock and
+            // Cmd-Tab render large; a failure here costs only the icon.
+            #[cfg(target_os = "macos")]
+            {
+                use objc2::{AnyThread as _, MainThreadMarker};
+                use objc2_app_kit::{NSApplication, NSImage};
+                use objc2_foundation::NSData;
+
+                let mark = NSImage::initWithData(
+                    NSImage::alloc(),
+                    &NSData::with_bytes(include_bytes!("../../../assets/icon-1024.png")),
+                );
+                match (mark, MainThreadMarker::new()) {
+                    (Some(mark), Some(mtm)) => unsafe {
+                        NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&mark));
+                    },
+                    (mark, _) => tracing::warn!(
+                        decoded = mark.is_some(),
+                        "dock icon skipped: image or main thread unavailable"
+                    ),
+                }
+            }
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1440.), px(900.)), cx)),
                 window_min_size: Some(size(px(900.), px(560.))),
                 app_id: Some("diff-review".into()),
+                icon,
                 ..TitleBar::window_options()
             };
             // A single-window tool ends with its window; macOS would

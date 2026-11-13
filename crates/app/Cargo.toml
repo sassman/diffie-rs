@@ -13,5 +13,31 @@ path = "src/main.rs"
 [dependencies]
 diffie-core.workspace = true
 gpui-kit.workspace = true
+# Decodes the embedded window icon. `WindowOptions::icon` wants this crate's
+# `RgbaImage` and neither Kit nor GPUI re-exports the crate, so we name it
+# ourselves; `0.25` unifies with GPUI's own requirement instead of pulling a
+# second copy. PNG alone - the icon is the only use.
+image = { version = "0.25", default-features = false, features = ["png"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# Runtime Dock icon and the standard About panel: GPUI covers neither, and
+# the dev binary has no bundle to carry an .icns or an Info.plist. The objc2
+# 0.6 family already rides in through gpui-pre-macos; these specs resolve to
+# those same builds, so the lock gains nothing. Features name just the
+# classes used.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSImage",
+    "NSResponder",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSData",
+    "NSDictionary",
+    "NSObject",
+    "NSString",
+] }
