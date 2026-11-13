@@ -75,11 +75,34 @@ one asks at the given `path:line`, using the snippet to find the spot even
 if lines have shifted, and apply `Suggested replacement` blocks verbatim
 unless they conflict with something newer. Report per item what was done.
 
+## Answering back
+
+Each comment's header ends in its short id (`#89fe6a0c`). After addressing
+an item - or to answer a question that needs no code change - thread a
+reply under it:
+
+```bash
+diffie -C /path/to/repo --reply '#89fe6a0c' "renamed in 698c1af - it counts comments on rewritten code" --session "<your session id>"
+```
+
+- One short sentence saying what was done and where (name the commit), or
+  the answer itself. `Reply (Claude): ...` lines in later `--prompt` output
+  are answers already given - do not repeat them.
+- Pass your session id when you know it (it appears in your transcript and
+  scratchpad paths; `$CLAUDE_SESSION_ID` is read automatically when set).
+  The app then shows the answer with a robot badge whose click hands the
+  reviewer `claude --resume <id>` to dig into the reasoning.
+- Replies are conversation, never verdict: resolving a comment stays the
+  human's reaction in the app. Never mark anything done.
+- The id finds its comment across all reviews here; an ambiguous or
+  unknown prefix is refused, never guessed.
+
 ## Rules
 
-- **Never write to the review files or the reviewed repository's git dir.**
-  The app owns `<git-common-dir>/review/`; reviewers own their files. Read
-  only.
+- **Never edit review files or the reviewed repository's git dir.** The
+  app owns `<git-common-dir>/review/`; reviewers own their files. The one
+  sanctioned write is `diffie --reply`, which writes the agent's own
+  reviewer file through diffie itself - never touch the TOML directly.
 - The comment's hash is the commit that wrote the line (7 chars), not a
   branch tip - do not try to check it out to "see the comment".
 - `diffie <rev>` compares the **working tree** (uncommitted edits included)

@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use diffie_core::review::ReviewedFile;
+use diffie_core::review::{ReviewInput, ReviewedFile};
 use diffie_core::{
     BackendError, CompareMode, Comparison, FileState, FileStatus, GitCli, NewSide, Oid,
     ReviewBackend, Scope,
@@ -186,7 +186,7 @@ fn whole_branch_covers_every_file() {
     let backend = fixture.backend();
     let resolved = backend.resolve(&Fixture::comparison()).unwrap();
     let patch = backend
-        .patch(&resolved, &Scope::WholeBranch, &[], false)
+        .patch(&resolved, &Scope::WholeBranch, ReviewInput::EMPTY, false)
         .unwrap();
     assert_eq!(paths(&patch.files), ["a.txt", "b.txt"]);
     assert_eq!(patch.new_side, NewSide::Commit(resolved.head.clone()));
@@ -224,11 +224,11 @@ fn ignore_whitespace_hides_whitespace_only_changes() {
     let backend = GitCli::open(root).unwrap();
     let resolved = backend.resolve(&Fixture::comparison()).unwrap();
     let plain = backend
-        .patch(&resolved, &Scope::WholeBranch, &[], false)
+        .patch(&resolved, &Scope::WholeBranch, ReviewInput::EMPTY, false)
         .unwrap();
     assert_eq!(paths(&plain.files), ["real.txt", "w.txt"]);
     let tidy = backend
-        .patch(&resolved, &Scope::WholeBranch, &[], true)
+        .patch(&resolved, &Scope::WholeBranch, ReviewInput::EMPTY, true)
         .unwrap();
     assert_eq!(paths(&tidy.files), ["real.txt"]);
     // The file list is a scope concern and stays complete either way.
@@ -279,7 +279,7 @@ fn a_contiguous_selection_is_a_plain_range() {
                 picked,
                 uncommitted: false,
             },
-            &[],
+            ReviewInput::EMPTY,
             false,
         )
         .unwrap();
@@ -305,7 +305,7 @@ fn skipped_commits_are_left_out_without_writing_to_the_repository() {
                 picked,
                 uncommitted: false,
             },
-            &[],
+            ReviewInput::EMPTY,
             false,
         )
         .unwrap();
@@ -341,7 +341,7 @@ fn a_file_that_cannot_be_combined_is_reported() {
                 picked,
                 uncommitted: false,
             },
-            &[],
+            ReviewInput::EMPTY,
             false,
         )
         .unwrap();
@@ -385,6 +385,33 @@ fn blame_finds_the_commit_that_wrote_a_line() {
 }
 
 #[test]
+fn changed_regions_follow_a_commented_line_into_a_newer_revision() {
+    let fixture = Fixture::new();
+    let backend = fixture.backend();
+    // A comment written on c1's line 2 ("two"): c4 rewrote that line, so a
+    // blame at head no longer finds it. The regions of c1..head carry it to
+    // the replacement instead.
+    let regions = backend
+        .changed_regions(&fixture.commits[0], &fixture.commits[4], "a.txt")
+        .unwrap()
+        .unwrap();
+    use diffie_core::review::{LineFate, map_line};
+    assert_eq!(map_line(2, &regions), LineFate::Rewritten { line: 2 });
+    assert_eq!(map_line(9, &regions), LineFate::Rewritten { line: 9 });
+    assert_eq!(map_line(5, &regions), LineFate::Untouched { line: 5 });
+
+    // A revision git does not have - a rebase dropped the comment's commit -
+    // is "cannot answer", never an error or a guess.
+    let gone = Oid::new("b".repeat(40));
+    assert_eq!(
+        backend
+            .changed_regions(&gone, &fixture.commits[4], "a.txt")
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn new_for_me_compares_each_file_with_its_tick() {
     let fixture = Fixture::new();
     let backend = fixture.backend();
@@ -398,7 +425,7 @@ fn new_for_me_compares_each_file_with_its_tick() {
 
     // Nothing ticked: same as the whole branch.
     let patch = backend
-        .patch(&resolved, &Scope::NewForMe, &[], false)
+        .patch(&resolved, &Scope::NewForMe, ReviewInput::EMPTY, false)
         .unwrap();
     assert_eq!(paths(&patch.files), ["a.txt", "b.txt"]);
 
@@ -408,7 +435,15 @@ fn new_for_me_compares_each_file_with_its_tick() {
         tick("b.txt", &resolved.head),
     ];
     let patch = backend
-        .patch(&resolved, &Scope::NewForMe, &reviewed, false)
+        .patch(
+            &resolved,
+            &Scope::NewForMe,
+            ReviewInput {
+                reviewed: &reviewed,
+                commented: &[],
+            },
+            false,
+        )
         .unwrap();
     let a = patch
         .files
@@ -447,7 +482,7 @@ fn new_for_me_keeps_a_reviewed_deletion_collapsed() {
 
     // Unticked, the deletion shows in full.
     let patch = backend
-        .patch(&resolved, &Scope::NewForMe, &[], false)
+        .patch(&resolved, &Scope::NewForMe, ReviewInput::EMPTY, false)
         .unwrap();
     let a = patch
         .files
@@ -465,7 +500,15 @@ fn new_for_me_keeps_a_reviewed_deletion_collapsed() {
         at: "2026-11-11T00:00:00Z".into(),
     }];
     let patch = backend
-        .patch(&resolved, &Scope::NewForMe, &reviewed, false)
+        .patch(
+            &resolved,
+            &Scope::NewForMe,
+            ReviewInput {
+                reviewed: &reviewed,
+                commented: &[],
+            },
+            false,
+        )
         .unwrap();
     let a = patch
         .files
@@ -551,7 +594,7 @@ fn reviews_the_uncommitted_working_tree() {
     assert_eq!(changed, ["a.txt", "b.txt", "c.txt"]);
 
     let patch = backend
-        .patch(&resolved, &Scope::WholeBranch, &[], false)
+        .patch(&resolved, &Scope::WholeBranch, ReviewInput::EMPTY, false)
         .unwrap();
     assert_eq!(patch.new_side, NewSide::Synthetic);
     let status = |path: &str| {
@@ -602,7 +645,7 @@ fn the_uncommitted_layer_is_pickable() {
                 picked: all.clone(),
                 uncommitted: true,
             },
-            &[],
+            ReviewInput::EMPTY,
             false,
         )
         .unwrap();
@@ -617,7 +660,7 @@ fn the_uncommitted_layer_is_pickable() {
                 picked: all,
                 uncommitted: false,
             },
-            &[],
+            ReviewInput::EMPTY,
             false,
         )
         .unwrap();
@@ -631,7 +674,7 @@ fn the_uncommitted_layer_is_pickable() {
                 picked: Vec::new(),
                 uncommitted: true,
             },
-            &[],
+            ReviewInput::EMPTY,
             false,
         )
         .unwrap();
@@ -670,7 +713,7 @@ fn the_uncommitted_layer_combines_with_skipped_commits() {
                 picked: fixture.commits[..4].to_vec(),
                 uncommitted: true,
             },
-            &[],
+            ReviewInput::EMPTY,
             false,
         )
         .unwrap();
@@ -709,7 +752,7 @@ fn an_uncombinable_uncommitted_layer_is_reported() {
                 picked: fixture.commits[..4].to_vec(),
                 uncommitted: true,
             },
-            &[],
+            ReviewInput::EMPTY,
             false,
         )
         .unwrap();
@@ -759,7 +802,10 @@ fn an_uncommitted_tick_holds_the_content_on_disk() {
         .patch(
             &resolved,
             &Scope::NewForMe,
-            &[tick("b.txt"), tick("c.txt")],
+            ReviewInput {
+                reviewed: &[tick("b.txt"), tick("c.txt")],
+                commented: &[],
+            },
             false,
         )
         .unwrap();
@@ -772,7 +818,15 @@ fn an_uncommitted_tick_holds_the_content_on_disk() {
     // Edited after the tick: the full file comes back.
     std::fs::write(root.join("c.txt"), "fresher\n").unwrap();
     let patch = backend
-        .patch(&resolved, &Scope::NewForMe, &[tick("c.txt")], false)
+        .patch(
+            &resolved,
+            &Scope::NewForMe,
+            ReviewInput {
+                reviewed: &[tick("c.txt")],
+                commented: &[],
+            },
+            false,
+        )
         .unwrap();
     let c = patch
         .files
@@ -781,4 +835,59 @@ fn an_uncommitted_tick_holds_the_content_on_disk() {
         .unwrap();
     assert_eq!(c.state, FileState::Changed);
     assert!(patch.text.contains("+fresher"));
+}
+
+#[test]
+fn open_comments_keep_a_ticked_file_in_new_for_me() {
+    let fixture = Fixture::new();
+    let backend = fixture.backend();
+    let resolved = backend.resolve(&Fixture::comparison()).unwrap();
+    let tick = ReviewedFile {
+        path: "a.txt".into(),
+        blob: backend.blob_id(&resolved.head, "a.txt").unwrap(),
+        commit: resolved.head.clone(),
+        at: "2026-11-11T00:00:00Z".into(),
+    };
+
+    // Ticked at head and quiet: the file collapses out of New for me, and
+    // its comments would have no rows to sit on.
+    let patch = backend
+        .patch(
+            &resolved,
+            &Scope::NewForMe,
+            ReviewInput {
+                reviewed: std::slice::from_ref(&tick),
+                commented: &[],
+            },
+            false,
+        )
+        .unwrap();
+    let a = patch
+        .files
+        .iter()
+        .find(|file| file.path == "a.txt")
+        .unwrap();
+    assert_eq!(a.state, FileState::UnchangedSinceReview);
+    assert!(!patch.text.contains("a.txt"));
+
+    // The same tick with an open comment: the tick does not end the work,
+    // so the file keeps its branch diff for the comment to sit on.
+    let patch = backend
+        .patch(
+            &resolved,
+            &Scope::NewForMe,
+            ReviewInput {
+                reviewed: &[tick],
+                commented: &["a.txt".into()],
+            },
+            false,
+        )
+        .unwrap();
+    let a = patch
+        .files
+        .iter()
+        .find(|file| file.path == "a.txt")
+        .unwrap();
+    assert_eq!(a.state, FileState::KeptForComments);
+    assert!(patch.text.contains("+TWO"));
 }

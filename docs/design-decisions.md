@@ -114,10 +114,46 @@ Decided:
   without one only a sole review prints - several are listed and refused,
   never guessed, because the wrong pick hands out another review's comments
   (owner, 2026-11-12). `--all` includes resolved comments, marked; with
-  several reviewers the header names each author.
+  several reviewers the header names each author. Each comment's header
+  carries its short id - the address replies go to.
+- Comments thread (owner, 2026-11-13). A reply lives in the replier's own
+  file as a `[[reply]]` record pointing at the comment id - the same
+  ownership rule as reactions, so nobody ever edits a colleague's file.
+  Replies are conversation, never verdict: only a reaction resolves. The
+  agent answers headless via `diffie --reply <id> <answer>`, which writes
+  the agent's own reviewer file; agents still never touch review TOML
+  directly. An open comment answered by someone else shows an "answered"
+  tag when its code did not change, because a question can be settled by
+  an answer alone; "code changed" outranks it (the fix still needs
+  judging), and the thread shows the replies either way.
+- An agent's answer names its conversation (owner, 2026-11-13): `--reply
+  --session <id>` (default `$CLAUDE_SESSION_ID`) stores the session on the
+  reply, and the card renders the author as a robot badge - hover shows
+  the id, a click copies `claude --resume <id>` - so the reviewer can dig
+  into the reasoning behind an answer or recover a lost conversation.
+- Resolving changes nothing but the reaction (owner, 2026-11-13; it
+  first folded the body, which read as losing the question under its own
+  answers): question, answers and the respond box all stay - the thread
+  is the record. Folding long answers GitHub-style is parked until it is
+  actually needed.
+- A conversation invites the next word (owner, 2026-11-13): an open
+  thread with answers always shows a quiet "Respond…" stand-in below; a click
+  turns it into the real box (Cmd/Ctrl+Enter sends, Escape closes; one
+  box at a time keeps the key-context juggling simple). The reviewer's
+  answer is a `[[reply]]` in their own file, exactly like the agent's.
+  An explicit Resolve button sits in the actions row of every open
+  thread - it is the Done reaction with a door handle on it, never a
+  second closure concept. Renaming the "code changed" tag on answered
+  changes ("change + feedback") is still being shaped, not settled.
+- The comment walk stops at the ends instead of circling (owner,
+  2026-11-13): wrapping made it impossible to feel where the list ends.
+  `p`, not `shift-n`, steps back.
 
 Assumed:
 
+- The headless reply writes as author "Claude", not `user.name`: the
+  thread must show who wrote the answer, and `user.name` is the human the
+  agent works for. A flag can name another agent when one exists.
 - The default comparison is "only what the branch adds": from the common
   ancestor to the source tip, ignoring newer work on the target. The UI states
   this in those words.
@@ -261,10 +297,12 @@ Decided:
   selection inside a line.
 - The scope bar counts open comments ("3 open comments" in the comment
   accent, "comments handled" once every thread carries a resolving
-  reaction), and `n`/`N` walk the open comments in reading order,
-  revealing a collapsed file on landing (owner, 2026-11-12). The counter
-  counts every open comment; the walk skips ones the other-revisions
-  toggle currently hides, because a jump must land on something visible.
+  reaction), and `n`/`p` walk the comments in reading order,
+  revealing a collapsed file on landing (owner, 2026-11-12; resolved ones
+  included since 2026-11-13 - the walk is for reading and must not die
+  with the last verdict). The counter counts every open comment; the walk
+  skips ones the other-revisions toggle currently hides, because a jump
+  must land on something visible.
 - Two entry points (owner, 2026-11-12; a + pinned at the pointer after a
   text drag was dropped - it stuck around through clicks and keypresses):
   a + beside the hovered line number for line comments, and the context
@@ -285,12 +323,42 @@ Decided:
   was dropped because "outdated" judges relevance while the comments are
   only pinned to another revision).
 - Comments can be marked done.
+- A comment whose code was rewritten since follows the rewrite instead of
+  vanishing: blame loses the line, the diff from the comment's commit to the
+  view's new side carries it to the replacement, and the card sits there
+  tagged "code changed" with the stored snippet quoted - the reviewer sees
+  comment and fix together and reacts (owner, 2026-11-12; before this such
+  comments dropped out of the view entirely while still counting as open,
+  which made them unreachable and let "Copy all as prompt" hand agents
+  already-addressed comments with nothing on screen to resolve them with).
+  The tag says "code changed", never "addressed" or "fixed": diffie knows the
+  lines moved, only the reviewer can judge the fix. A commit git no longer
+  has (a rebase dropped it) cannot be followed; the comment stays unplaced
+  rather than guessed at.
+- The status bar names open comments no row can show ("n not in this
+  comparison"), so the open count never promises more than the window
+  delivers.
+- An open comment is "new for me" by definition: in the New-for-me scope a
+  ticked-unchanged file that carries open comments keeps its branch diff
+  (header note "no new changes - shown for its open comments") instead of
+  collapsing, so the fix and its comment stay judgeable; resolving the
+  comment lets the file fall back to quiet, and the scope empties itself as
+  fixes are approved (owner, 2026-11-12). This does not break "one scope
+  rules the view": the override is never silent, the header names it.
+- The open-comments count is also the way in: clicking it (like `n`) walks
+  to the next open comment and clears what hides it - the earlier-comments
+  toggle first, then, like a search hit outside the view, the scope widens
+  to Whole branch and lands there after the reload (owner, 2026-11-12; a
+  count badge on the scope buttons was considered and dropped as
+  duplication once nothing stays scope-hidden).
 
 Assumed:
 
 - The comment box names the commit it will attach to before saving.
 - In split view a comment sits under the side it belongs to.
-- Other-revision comments are visually quieter (dashed, dimmed).
+- Other-revision comments are visually quieter (dashed, dimmed). Changed-since
+  cards are dashed too, in the warning tint, and keep their reaction and
+  copy actions - approving the fix is their point.
 - Each comment stores the commented lines as a snippet, so it stays readable
   after a rebase removes its commit.
 - A comment on a removed line belongs to the commit that removed it.
@@ -374,7 +442,7 @@ Assumed key map (the mockup's hint bar):
 | `v` | extend a selection |
 | `c` | comment |
 | `e` | react |
-| `n` `N` | next, previous comment |
+| `n` `p` | next, previous comment (the walk stops at the ends) |
 | `o` | toggle earlier comments (other revisions') |
 | `/` | search the changeset |
 | `s` | split or unified |

@@ -3,8 +3,10 @@
 //! Every method blocks. The UI must call them from a background task, never
 //! from the render path, and must be able to show a loading state for each.
 
-use crate::model::{BlameLine, Commit, Comparison, LineOrigin, Oid, Resolved, Scope, ScopedPatch};
-use crate::review::ReviewedFile;
+use crate::model::{
+    BlameLine, ChangedRegion, Commit, Comparison, LineOrigin, Oid, Resolved, Scope, ScopedPatch,
+};
+use crate::review::ReviewInput;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
@@ -52,15 +54,18 @@ pub trait ReviewBackend: Send + Sync {
         resolved: &Resolved,
     ) -> Result<std::collections::HashMap<String, Vec<Oid>>>;
 
-    /// The diff for one scope. `reviewed` is only read for [`Scope::NewForMe`].
-    /// With `ignore_whitespace` the diff hides changes in amount of
+    /// The diff for one scope. `review` is only read for [`Scope::NewForMe`]:
+    /// its ticks are what each file diffs against, and a ticked-unchanged
+    /// file among its commented paths keeps its diff instead of collapsing,
+    /// because the comments need rows to sit on and judging a fix is still
+    /// work. With `ignore_whitespace` the diff hides changes in amount of
     /// whitespace; a file whose changes are all whitespace drops out of the
     /// patch entirely, matching `git diff --ignore-all-space`.
     fn patch(
         &self,
         resolved: &Resolved,
         scope: &Scope,
-        reviewed: &[ReviewedFile],
+        review: ReviewInput<'_>,
         ignore_whitespace: bool,
     ) -> Result<ScopedPatch>;
 
@@ -71,6 +76,17 @@ pub trait ReviewBackend: Send + Sync {
     /// Blame for every line of `path` as of `rev`. Used to place comments
     /// from other revisions on lines that are still unchanged.
     fn blame(&self, rev: &Oid, path: &str) -> Result<Vec<BlameLine>>;
+
+    /// The regions `git diff from to -- path` rewrites, for following a
+    /// comment's line into a newer revision once blame no longer finds it.
+    /// `None` when git cannot answer - a rebase may have dropped `from` -
+    /// and the caller then leaves the comment unplaced rather than guessing.
+    fn changed_regions(
+        &self,
+        from: &Oid,
+        to: &Oid,
+        path: &str,
+    ) -> Result<Option<Vec<ChangedRegion>>>;
 
     /// The content id of `path` at `rev`, or `None` if it does not exist
     /// there. A "reviewed" tick stores this.

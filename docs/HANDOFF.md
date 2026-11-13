@@ -61,7 +61,10 @@ stands in for `x`), several candidates are listed and refused.
 `diffie --prompt [<review>]` opens no window: it prints the open review
 comments the way "Copy all as prompt" does (no name works only for a sole
 review, several are listed and refused; `--all` includes resolved ones,
-marked).
+marked), each headed by its short id. `diffie --reply <id> <answer>`
+threads an answer under that comment, written into the agent's own
+reviewer file ("Claude"), found by unique id prefix across all reviews -
+ambiguous or unknown prefixes are refused, never guessed.
 With no revision at all, the review is the working tree's
 uncommitted changes going into the checked-out branch
 (`Comparison::uncommitted`): the diff runs against a scratch index seeded
@@ -256,7 +259,8 @@ actually exercised):
   toggles (the pilcrow reloads with `--ignore-all-space`, so whitespace-only
   files leave the view), collapse/expand all as a joined icon pair,
   earlier comments (other revisions') as an icon toggle (dashed comment
-  bubble, "Earlier comments - from other revisions" on hover),
+  bubble, "Earlier comments - from other revisions" on hover; it also
+  hides the changed-since cards, which are earlier comments too),
   copy all as prompt, a theme menu behind the palette button.
 - Scope bar: segmented scopes; the commit picker with search, group
   checkboxes, skipped markers, comment badges, Show-more rows, shift-click
@@ -264,9 +268,18 @@ actually exercised):
   "Uncommitted changes" row leads "New since your review" so the working
   tree can be excluded like a commit (files carrying its changes say
   "uncommitted" in the diff header, warning-coloured); the open-comments count in the
-  comment accent ("comments handled" once every thread is resolved);
-  the files-reviewed count with a progress bar. `n`/`N` walk the open
-  comments in reading order and reveal a collapsed file on landing.
+  comment accent ("comments handled" once every thread is resolved) -
+  clickable: it walks to the next open comment like `n`;
+  the files-reviewed count with a progress bar. `n`/`p` walk the
+  comments, resolved included, in reading order, stop at the ends instead of circling, and
+  reveal a collapsed file on landing; when
+  every stop is hidden they clear the blocker instead of dying silently -
+  the earlier-comments toggle flips on, or the scope widens to Whole
+  branch and lands there after the reload (the search out-of-view
+  pattern). In New for me, a ticked-unchanged file with open comments
+  keeps its branch diff (`FileState::KeptForComments`, note "no new
+  changes - shown for its open comments") so the comments stay visible
+  and judgeable; resolving them lets it collapse again.
 - Search: `/` opens a bar under the scope bar, seeded from the text
   selection; smartcase matches over the scoped patch text
   (`diffie_core::search::search_patch`), enter/shift-enter walk them,
@@ -294,7 +307,22 @@ actually exercised):
   auto-unified when the window is too narrow with the manual choice kept.
 - Comments: cards in the mockup's style with hash and line label, reaction
   chips and the smile-plus picker, Edit, per-comment Copy as prompt, Delete;
-  other-revision comments dashed and quiet. The add-comment + sits in the
+  other-revision comments dashed and quiet. A comment whose code was
+  rewritten since follows the rewrite (blame misses, `changed_regions` +
+  `map_line` carry it to the replacement) and sits there dashed in the
+  warning tint, tagged "code changed", header "was line n", the stored
+  snippet quoted above the body, actions kept so the reviewer can react
+  Done to approve the fix; file headers count these as "on changed code"
+  and the status bar names open comments nothing can show ("n not in this
+  comparison"). Replies thread under the comment body (author plus
+  markdown, left-bordered). Resolving changes nothing but the reaction:
+  question, answers and respond box all stay, the thread is the record.
+  A thread with answers carries a quiet "Respond…" stand-in that a click
+  turns into a textarea (Cmd/Ctrl+Enter sends the reply into the
+  reviewer's own file, Escape closes), and every open thread's actions
+  row ends in a Resolve button that applies the Done reaction; an open
+  comment answered by someone else wears an "answered" tag in the success
+  tint unless "code changed" already covers it. The add-comment + sits in the
   gutter-marker lane. The comment box names the commit it will attach to
   before saving, and Comment/Suggest change (disabled)/Cancel carry their
   shortcut hints. Right-clicking in the diff opens a context menu with Copy
@@ -304,8 +332,9 @@ actually exercised):
   selection-comment entry points; there is no floating button.
 - Ticking Reviewed (or `r`) collapses the file and moves the current-file
   marker to the next one without scrolling; the collapse pulls it up.
-- Shortcuts: `]` `[` `}` `{` `s` `o` `t` `1` `2` `3` `zM` `zR` `c` `r`, Escape,
-  Cmd/Ctrl+Enter, Cmd/Ctrl+R, Cmd/Ctrl+Q, Space in the commit list.
+- Shortcuts: `]` `[` `}` `{` `s` `o` `t` `n` `p` `1` `2` `3` `zM` `zR` `c`
+  `r`, Escape, Cmd/Ctrl+Enter, Cmd/Ctrl+R, Cmd/Ctrl+Q, Space in the commit
+  list.
 
 Not implemented or not possible, against the mockup and the design document:
 
@@ -316,7 +345,7 @@ Not implemented or not possible, against the mockup and the design document:
 | Per-file horizontal scrolling | Unified scrolls the whole list as one canvas (see the trap above). Scrolling is the default since 2026-11-11, with a wrap toggle in the title bar |
 | Per-file commit stepper | Removed as YAGNI on 2026-11-11 (it only ever rendered disabled); design document section 14 holds the idea, `commits_touching` still feeds the touched-by text |
 | Suggestions | "Suggest change" renders disabled; no flow behind it |
-| `j` `k` line cursor, `v`, `g`, `(` `)`, `e`, `n` `N`, `za`, command palette | Design question 8 for the cursor |
+| `j` `k` line cursor, `v`, `g`, `(` `)`, `e`, `za`, command palette | Design question 8 for the cursor |
 | Selections inside a line | Design question 7 |
 | "Branch has moved since this review" warning | Header data is stored |
 | Importing a colleague's file from the UI | Works by dropping the file in the folder |

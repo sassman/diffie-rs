@@ -16,10 +16,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backend::{BackendError, Result, ReviewBackend};
 use crate::model::{
-    BlameLine, Commit, CompareMode, Comparison, FileState, FileStatus, FileSummary, LineOrigin,
-    NewSide, Oid, Resolved, Scope, ScopedPatch,
+    BlameLine, ChangedRegion, Commit, CompareMode, Comparison, FileState, FileStatus, FileSummary,
+    LineOrigin, NewSide, Oid, Resolved, Scope, ScopedPatch,
 };
-use crate::review::ReviewedFile;
+use crate::review::{ReviewInput, ReviewedFile};
 
 /// Unchanged lines git supplies around each change. The Diff view folds them
 /// and can only expand what the patch contains, so this is generous.
@@ -311,7 +311,7 @@ impl GitCli {
     fn new_for_me(
         &self,
         resolved: &Resolved,
-        reviewed: &[ReviewedFile],
+        review: ReviewInput<'_>,
         ignore_whitespace: bool,
     ) -> Result<ScopedPatch> {
         let base = resolved.base.as_str();
@@ -335,16 +335,29 @@ impl GitCli {
         let mut files = Vec::new();
 
         for (summary, section) in split_files(&whole) {
-            let tick = reviewed.iter().find(|tick| tick.path == summary.path);
+            let tick = review
+                .reviewed
+                .iter()
+                .find(|tick| tick.path == summary.path);
             let current = tree.get(summary.path.as_str()).cloned();
             match (tick, current) {
                 // Same content as the tick; a tick without a blob matches a
-                // file that is still deleted.
+                // file that is still deleted. Open comments overrule the
+                // tick: judging a fix is still work, so the file keeps its
+                // branch diff and the comments keep rows to sit on.
                 (Some(tick), current) if tick.blob == current => {
-                    files.push(FileSummary {
-                        state: FileState::UnchangedSinceReview,
-                        ..summary
-                    });
+                    if review.commented.contains(&summary.path) {
+                        files.push(FileSummary {
+                            state: FileState::KeptForComments,
+                            ..summary
+                        });
+                        text.push_str(section);
+                    } else {
+                        files.push(FileSummary {
+                            state: FileState::UnchangedSinceReview,
+                            ..summary
+                        });
+                    }
                 }
                 // A worktree hash names no stored object, so an uncommitted
                 // review cannot diff since the tick and shows the full file.
@@ -696,11 +709,11 @@ impl ReviewBackend for GitCli {
         &self,
         resolved: &Resolved,
         scope: &Scope,
-        reviewed: &[ReviewedFile],
+        review: ReviewInput<'_>,
         ignore_whitespace: bool,
     ) -> Result<ScopedPatch> {
         match scope {
-            Scope::NewForMe => self.new_for_me(resolved, reviewed, ignore_whitespace),
+            Scope::NewForMe => self.new_for_me(resolved, review, ignore_whitespace),
             Scope::WholeBranch => {
                 let text = if resolved.comparison.uncommitted {
                     self.worktree_diff(resolved.base.as_str(), false, ignore_whitespace)?
@@ -767,6 +780,32 @@ impl ReviewBackend for GitCli {
 
     fn blame(&self, rev: &Oid, path: &str) -> Result<Vec<BlameLine>> {
         Ok(self.blame_with(rev, path, None)?.unwrap_or_default())
+    }
+
+    fn changed_regions(
+        &self,
+        from: &Oid,
+        to: &Oid,
+        path: &str,
+    ) -> Result<Option<Vec<ChangedRegion>>> {
+        // -U0, unlike the view's generous context, because only the rewritten
+        // regions matter for mapping a line; context would blur the borders.
+        match self.try_read(&[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--histogram",
+            "--indent-heuristic",
+            "-U0",
+            from.as_str(),
+            to.as_str(),
+            "--",
+            path,
+        ])? {
+            Some(output) => Ok(Some(parse_regions(&output))),
+            None => Ok(None),
+        }
     }
 
     fn blob_id(&self, rev: &Oid, path: &str) -> Result<Option<Oid>> {
@@ -1041,6 +1080,32 @@ fn parse_blame(porcelain: &str) -> Vec<BlameLine> {
     rows
 }
 
+/// The `@@ -a,b +c,d @@` headers of a `-U0` diff, one region each.
+fn parse_regions(patch: &str) -> Vec<ChangedRegion> {
+    let span = |text: &str| -> Option<(usize, usize)> {
+        match text.split_once(',') {
+            Some((start, lines)) => Some((start.parse().ok()?, lines.parse().ok()?)),
+            None => Some((text.parse().ok()?, 1)),
+        }
+    };
+    patch
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("@@ -")?;
+            let (old, rest) = rest.split_once(" +")?;
+            let (new, _) = rest.split_once(" @@")?;
+            let (old_start, old_lines) = span(old)?;
+            let (new_start, new_lines) = span(new)?;
+            Some(ChangedRegion {
+                old_start,
+                old_lines,
+                new_start,
+                new_lines,
+            })
+        })
+        .collect()
+}
+
 /// A temporary directory removed on drop.
 struct Scratch {
     path: PathBuf,
@@ -1127,5 +1192,39 @@ Binary files a/logo.png and b/logo.png differ
         assert_eq!(rows[0].final_line, 48);
         assert_eq!(rows[0].origin.line, 45);
         assert_eq!(rows[1].final_line, 49);
+    }
+
+    #[test]
+    fn parses_hunk_headers_into_regions() {
+        let patch = "diff --git a/x b/x\n--- a/x\n+++ b/x\n\
+                     @@ -3,0 +4,2 @@ fn context() {\n+a\n+b\n\
+                     @@ -10,2 +12,3 @@\n-c\n-d\n+e\n+f\n+g\n";
+        assert_eq!(
+            parse_regions(patch),
+            vec![
+                ChangedRegion {
+                    old_start: 3,
+                    old_lines: 0,
+                    new_start: 4,
+                    new_lines: 2,
+                },
+                ChangedRegion {
+                    old_start: 10,
+                    old_lines: 2,
+                    new_start: 12,
+                    new_lines: 3,
+                },
+            ]
+        );
+        // The single-line short form `@@ -5 +5 @@` means one line each.
+        assert_eq!(
+            parse_regions("@@ -5 +5 @@\n"),
+            vec![ChangedRegion {
+                old_start: 5,
+                old_lines: 1,
+                new_start: 5,
+                new_lines: 1,
+            }]
+        );
     }
 }

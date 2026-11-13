@@ -9,6 +9,7 @@ use gpui_kit::{AppContext as _, WindowBounds, WindowOptions, component::TitleBar
 const USAGE: &str = "\
 Usage: diffie [-C <path>] [<revision> [<revision>]] [--every-difference]
        diffie [-C <path>] --prompt [<review>] [--all]
+       diffie [-C <path>] --reply <id> <answer> [--session <id>]
 
 Reads in the merge direction. With no revision, reviews the uncommitted
 changes going into the checked-out branch. With one revision, reviews
@@ -21,7 +22,14 @@ the current directory). Requires git on PATH.
 --prompt opens no window: it prints the open review comments the way the
 app's \"Copy all as prompt\" button does, and exits. Without a review name
 the repository's only review is printed; with several, they are listed and
-one must be named. --all includes resolved comments, marked as such.";
+one must be named. --all includes resolved comments, marked as such.
+
+--reply opens no window either: it threads <answer> under the comment whose
+id starts with <id> (--prompt prints the ids), writing the agent's own
+review file. Replies are conversation, never verdict: resolving stays a
+human reaction in the app. --session records the agent conversation the
+answer came from (default: $CLAUDE_SESSION_ID); the app then offers
+`claude --resume <id>` behind the answer's robot badge.";
 
 fn exit_usage(message: &str) -> ! {
     eprintln!("{message}\n\n{USAGE}");
@@ -43,6 +51,8 @@ fn main() {
     let mut mode = CompareMode::BranchAdds;
     let mut prompt_mode = false;
     let mut include_resolved = false;
+    let mut reply: Option<(String, String)> = None;
+    let mut session: Option<String> = None;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         let text = argument.to_string_lossy().into_owned();
@@ -54,6 +64,20 @@ fn main() {
             "--every-difference" => mode = CompareMode::EveryDifference,
             "--prompt" => prompt_mode = true,
             "--all" => include_resolved = true,
+            "--reply" => {
+                let (Some(id), Some(body)) = (arguments.next(), arguments.next()) else {
+                    exit_usage("--reply needs a comment id and the answer.");
+                };
+                // Agents paste the id as --prompt prints it, `#` included.
+                let id = id.to_string_lossy().trim_start_matches('#').to_string();
+                reply = Some((id, body.to_string_lossy().into_owned()));
+            }
+            "--session" => {
+                let Some(value) = arguments.next() else {
+                    exit_usage("--session needs the agent conversation's id.");
+                };
+                session = Some(value.to_string_lossy().into_owned());
+            }
             "-C" => {
                 let Some(value) = arguments.next() else {
                     exit_usage("-C needs a path.");
@@ -100,6 +124,12 @@ fn main() {
     if include_resolved && !prompt_mode {
         exit_usage("--all only applies to --prompt.");
     }
+    if reply.is_some() && (prompt_mode || !revisions.is_empty()) {
+        exit_usage("--reply takes only a comment id and the answer.");
+    }
+    if session.is_some() && reply.is_none() {
+        exit_usage("--session only applies to --reply.");
+    }
 
     let path = repository.unwrap_or_else(|| PathBuf::from("."));
     let backend = match GitCli::open(&path) {
@@ -109,6 +139,31 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Some((id, body)) = reply {
+        // Headless: the agent answers a comment back. "Claude" rather than
+        // `user.name`, which is the human the agent works for - the thread
+        // must show who actually wrote the answer.
+        const REPLY_AUTHOR: &str = "Claude";
+        // The flag wins; the environment covers runners that export it.
+        let session = session.or_else(|| std::env::var("CLAUDE_SESSION_ID").ok());
+        let result = backend
+            .review_dir()
+            .map_err(|error| error.to_string())
+            .and_then(|dir| {
+                diffie_core::review::reply(&dir, &id, &body, REPLY_AUTHOR, session.as_deref())
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(to) => {
+                eprintln!("Replied under {}:{} in {}", to.path, to.line, to.review);
+                return;
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if prompt_mode {
         // Headless: agents and scripts read the review back without a window.
         let review = revisions.first().map(String::as_str);

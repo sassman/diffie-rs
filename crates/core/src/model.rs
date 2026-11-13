@@ -108,6 +108,10 @@ pub enum FileState {
     Changed,
     /// Ticked as reviewed and identical since. No diff in the patch.
     UnchangedSinceReview,
+    /// Ticked and identical since, but carrying open comments: the diff
+    /// stays in the patch so the comments have rows to sit on. An open
+    /// comment is unfinished business, whatever the tick says.
+    KeptForComments,
     /// A skipped commit touched the same lines, so the checked commits could
     /// not be combined for this file. `commit` is the first one that failed.
     /// The file's diff in the patch stops before that commit.
@@ -151,6 +155,19 @@ pub struct ScopedPatch {
     pub text: String,
     pub files: Vec<FileSummary>,
     pub new_side: NewSide,
+}
+
+/// One region a diff between two revisions of a file rewrites:
+/// `old_start..old_start+old_lines` of the old revision became
+/// `new_start..new_start+new_lines` of the new one. Zero-length sides follow
+/// the unified-diff convention: a pure insertion has `old_lines == 0` with
+/// `old_start` naming the line it comes after, a pure deletion the mirror.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChangedRegion {
+    pub old_start: usize,
+    pub old_lines: usize,
+    pub new_start: usize,
+    pub new_lines: usize,
 }
 
 /// The commit that wrote a line, and the line's number in that commit's

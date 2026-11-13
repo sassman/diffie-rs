@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{BlameLine, Oid, Resolved};
+use crate::model::{BlameLine, ChangedRegion, Oid, Resolved};
 use crate::time::now_rfc3339;
 
 pub const FORMAT_VERSION: u32 = 1;
@@ -43,6 +43,8 @@ pub struct ReviewFile {
     pub comments: Vec<Comment>,
     #[serde(default, rename = "reaction", skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<Reaction>,
+    #[serde(default, rename = "reply", skip_serializing_if = "Vec::is_empty")]
+    pub replies: Vec<Reply>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +79,23 @@ pub struct ReviewedFile {
     /// Tip of `source` at the time of the tick. Informational.
     pub commit: Oid,
     pub at: String,
+}
+
+/// What of the reviewer's own review building a patch may read: the ticks
+/// New for me diffs against, and the paths whose open comments keep a
+/// ticked file visible. Other scopes read neither - `EMPTY` says exactly
+/// that at a call site, where a pair of bare `&[]` said nothing.
+#[derive(Clone, Copy)]
+pub struct ReviewInput<'a> {
+    pub reviewed: &'a [ReviewedFile],
+    pub commented: &'a [String],
+}
+
+impl ReviewInput<'static> {
+    pub const EMPTY: Self = Self {
+        reviewed: &[],
+        commented: &[],
+    };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -163,6 +182,23 @@ pub struct Reaction {
     pub at: String,
 }
 
+/// A threaded answer under a comment. Like a reaction it lives in the
+/// replier's own file and points at the comment's id, so an agent or a
+/// colleague answers without touching the author's file. Replies are
+/// conversation, never verdict: only a reaction resolves.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reply {
+    /// Id of the comment, which may live in another reviewer's file.
+    pub comment: String,
+    pub body: String,
+    pub at: String,
+    /// The agent conversation the answer came from, when one did: the UI
+    /// offers it as `claude --resume <id>` so the reviewer can dig into
+    /// the reasoning behind the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReviewState {
     NotReviewed,
@@ -201,6 +237,7 @@ impl ReviewFile {
             reviewed: Vec::new(),
             comments: Vec::new(),
             reactions: Vec::new(),
+            replies: Vec::new(),
         }
     }
 
@@ -380,6 +417,22 @@ impl ReviewFile {
         }
     }
 
+    /// Thread an answer under a comment, which may live in another
+    /// reviewer's file.
+    pub fn add_reply(
+        &mut self,
+        comment_id: &str,
+        body: impl Into<String>,
+        session: Option<String>,
+    ) {
+        self.replies.push(Reply {
+            comment: comment_id.to_string(),
+            body: body.into(),
+            at: now_rfc3339(),
+            session,
+        });
+    }
+
     /// Reactions this reviewer has not given to the comment yet: what the
     /// picker offers.
     pub fn reactions_left(&self, comment_id: &str) -> Vec<ReactionKind> {
@@ -395,13 +448,15 @@ impl ReviewFile {
     }
 }
 
-/// A comment together with who wrote it and every reaction to it.
+/// A comment together with who wrote it, every reaction and every reply.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Thread<'a> {
     pub author: &'a str,
     pub comment: &'a Comment,
     /// `(reactor, kind)`, across all loaded files.
     pub reactions: Vec<(&'a str, ReactionKind)>,
+    /// `(replier, reply)`, across all loaded files, oldest first.
+    pub replies: Vec<(&'a str, &'a Reply)>,
     /// True when the comment is in the reviewer's own file and may be edited.
     pub mine: bool,
 }
@@ -409,6 +464,14 @@ pub struct Thread<'a> {
 impl Thread<'_> {
     pub fn resolved(&self) -> bool {
         self.reactions.iter().any(|(_, kind)| kind.resolves())
+    }
+
+    /// Someone other than the comment's author replied. The question has an
+    /// answer to read, which is not the same as being resolved.
+    pub fn answered(&self) -> bool {
+        self.replies
+            .iter()
+            .any(|(replier, _)| *replier != self.author)
     }
 
     pub fn count(&self, kind: ReactionKind) -> usize {
@@ -461,10 +524,23 @@ impl ReviewSet {
                             .map(|reaction| (reactor.review.author.as_str(), reaction.kind))
                     })
                     .collect();
+                let mut replies: Vec<(&str, &Reply)> = self
+                    .files()
+                    .flat_map(|(replier, _)| {
+                        replier
+                            .replies
+                            .iter()
+                            .filter(|reply| reply.comment == comment.id)
+                            .map(|reply| (replier.review.author.as_str(), reply))
+                    })
+                    .collect();
+                // RFC 3339 sorts as text, so the thread reads oldest first.
+                replies.sort_by_key(|(_, reply)| reply.at.as_str());
                 threads.push(Thread {
                     author: &file.review.author,
                     comment,
                     reactions,
+                    replies,
                     mine,
                 });
             }
@@ -488,9 +564,59 @@ pub enum Placement {
     /// Its commit is outside the scope, but the line is still unchanged.
     /// Shown dimmed, and only while "other revisions' comments" is on.
     OtherRevision { line: usize },
-    /// The line no longer exists in this view. The comment stays reachable
-    /// through the comment list, with its stored snippet.
+    /// Blame no longer finds the line: the code it described was rewritten.
+    /// [`map_line`] then follows it to the replacement, so the comment can
+    /// sit beside the fix marked "code changed" instead of vanishing.
     NotInView,
+}
+
+/// Where a line of the old revision ends up after the changed regions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineFate {
+    /// No region rewrote it; `line` is its shifted position in the new
+    /// revision. Rare after a blame miss (whitespace-rewritten attribution),
+    /// but still the best anchor there is.
+    Untouched { line: usize },
+    /// A region rewrote it; `line` is the first line of the replacement, or
+    /// the line before the gap when the region only deleted.
+    Rewritten { line: usize },
+}
+
+impl LineFate {
+    pub fn line(self) -> usize {
+        match self {
+            LineFate::Untouched { line } | LineFate::Rewritten { line } => line,
+        }
+    }
+}
+
+/// Follow `line` of the old revision through `regions` (ascending, as git
+/// emits them) to its place in the new revision.
+pub fn map_line(line: usize, regions: &[ChangedRegion]) -> LineFate {
+    let mut mapped = line as isize;
+    for region in regions {
+        let rewritten = region.old_lines > 0
+            && line >= region.old_start
+            && line < region.old_start + region.old_lines;
+        if rewritten {
+            return LineFate::Rewritten {
+                line: region.new_start.max(1),
+            };
+        }
+        // A pure insertion sits after `old_start`, so it shifts only lines
+        // strictly beyond it; a real region shifts everything past its end.
+        let past = if region.old_lines == 0 {
+            line > region.old_start
+        } else {
+            line >= region.old_start + region.old_lines
+        };
+        if past {
+            mapped += region.new_lines as isize - region.old_lines as isize;
+        }
+    }
+    LineFate::Untouched {
+        line: mapped.max(1) as usize,
+    }
 }
 
 /// Place a new-side comment using a blame of the view's new side.
@@ -527,11 +653,13 @@ pub fn as_prompt(threads: &[Thread<'_>]) -> String {
         };
         // `path:line at hash` over prose: the owner wants the header to read
         // like a compiler location, and agents parse that form natively.
+        // The short id is the address `diffie --reply` answers to.
         out.push_str(&format!(
-            "\n{}. {}:{lines} at {}",
+            "\n{}. {}:{lines} at {} #{}",
             index + 1,
             comment.path,
-            comment.commit.short()
+            comment.commit.short(),
+            &comment.id[..comment.id.len().min(8)]
         ));
         // The author only when reviewers differ; [resolved] only reaches
         // callers that include closed threads (the app copies open ones).
@@ -554,6 +682,9 @@ pub fn as_prompt(threads: &[Thread<'_>]) -> String {
             out.push_str("Suggested replacement:\n```\n");
             out.push_str(suggestion.trim_end_matches('\n'));
             out.push_str("\n```\n");
+        }
+        for (replier, reply) in &thread.replies {
+            out.push_str(&format!("Reply ({replier}): {}\n", reply.body.trim()));
         }
     }
     out
@@ -703,6 +834,153 @@ fn slug(name: &str) -> String {
         "unnamed".to_string()
     } else {
         slug
+    }
+}
+
+/// Why `diffie --reply` could not thread an answer.
+#[derive(Debug)]
+pub enum ReplyError {
+    /// No review folder with files under the review dir.
+    NoReviews(PathBuf),
+    /// No comment id starts with the prefix.
+    UnknownComment {
+        prefix: String,
+    },
+    /// Several comments match the prefix. Never guessed: the answer would
+    /// thread under the wrong question.
+    AmbiguousComment {
+        prefix: String,
+        matches: Vec<String>,
+    },
+    File(PathBuf, ReviewFileError),
+}
+
+impl std::fmt::Display for ReplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoReviews(dir) => write!(f, "No reviews under {}", dir.display()),
+            Self::UnknownComment { prefix } => {
+                write!(f, "No comment starts with #{prefix}.")
+            }
+            Self::AmbiguousComment { prefix, matches } => {
+                write!(
+                    f,
+                    "#{prefix} matches several comments: {}. Give more of the id.",
+                    matches.join(", ")
+                )
+            }
+            Self::File(path, error) => write!(f, "{}: {error}", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for ReplyError {}
+
+/// Where [`reply`] threaded the answer: enough to confirm the address.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RepliedTo {
+    pub review: String,
+    pub path: String,
+    pub line: usize,
+}
+
+/// Thread `body` under the comment whose id starts with `id_prefix`, as
+/// `author`: the reply goes into the author's own file beside the comment's,
+/// never into the file the comment lives in. An id addresses one comment
+/// across every review here, so unlike [`prompt`] no review needs naming -
+/// but an ambiguous prefix is refused, never guessed.
+pub fn reply(
+    review_dir: &Path,
+    id_prefix: &str,
+    body: &str,
+    author: &str,
+    session: Option<&str>,
+) -> Result<RepliedTo, ReplyError> {
+    let folders: Vec<PathBuf> = std::fs::read_dir(review_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    if folders.is_empty() {
+        return Err(ReplyError::NoReviews(review_dir.to_path_buf()));
+    }
+    // (folder, the file holding the comment, its index): the host header
+    // seeds the replier's file when this review has none from them yet.
+    let mut matches: Vec<(&PathBuf, ReviewFile, usize)> = Vec::new();
+    for folder in &folders {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        files.sort();
+        for path in files {
+            let file =
+                ReviewFile::load(&path).map_err(|error| ReplyError::File(path.clone(), error))?;
+            for index in 0..file.comments.len() {
+                if file.comments[index].id.starts_with(id_prefix) {
+                    matches.push((folder, file.clone(), index));
+                }
+            }
+        }
+    }
+    match matches.as_slice() {
+        [] => Err(ReplyError::UnknownComment {
+            prefix: id_prefix.to_string(),
+        }),
+        [(folder, host, index)] => {
+            let comment = &host.comments[*index];
+            let target = folder.join(format!("{}.toml", slug(author)));
+            let mut mine = match ReviewFile::load(&target) {
+                Ok(file) => file,
+                Err(ReviewFileError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    ReviewFile {
+                        review: Header {
+                            author: author.to_string(),
+                            ..host.review.clone()
+                        },
+                        completed: None,
+                        reviewed: Vec::new(),
+                        comments: Vec::new(),
+                        reactions: Vec::new(),
+                        replies: Vec::new(),
+                        version: FORMAT_VERSION,
+                    }
+                }
+                Err(error) => return Err(ReplyError::File(target, error)),
+            };
+            mine.add_reply(&comment.id, body, session.map(String::from));
+            mine.save(&target)
+                .map_err(|error| ReplyError::File(target, error))?;
+            Ok(RepliedTo {
+                review: folder
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                path: comment.path.clone(),
+                line: comment.line,
+            })
+        }
+        several => Err(ReplyError::AmbiguousComment {
+            prefix: id_prefix.to_string(),
+            matches: several
+                .iter()
+                .map(|(_, host, index)| {
+                    let comment = &host.comments[*index];
+                    format!(
+                        "#{} {}:{}",
+                        &comment.id[..comment.id.len().min(8)],
+                        comment.path,
+                        comment.line
+                    )
+                })
+                .collect(),
+        }),
     }
 }
 
@@ -964,6 +1242,36 @@ mod tests {
     }
 
     #[test]
+    fn maps_lines_through_changed_regions() {
+        let region = |old_start, old_lines, new_start, new_lines| ChangedRegion {
+            old_start,
+            old_lines,
+            new_start,
+            new_lines,
+        };
+        // Lines 10-11 became lines 12-14 after an insertion of 2 above.
+        let regions = [region(3, 0, 4, 2), region(10, 2, 12, 3)];
+        assert_eq!(map_line(2, &regions), LineFate::Untouched { line: 2 });
+        // The insertion comes after line 3, so line 3 itself does not move.
+        assert_eq!(map_line(3, &regions), LineFate::Untouched { line: 3 });
+        assert_eq!(map_line(4, &regions), LineFate::Untouched { line: 6 });
+        assert_eq!(map_line(10, &regions), LineFate::Rewritten { line: 12 });
+        assert_eq!(map_line(11, &regions), LineFate::Rewritten { line: 12 });
+        // Past the rewrite: shifted by both regions (+2, then +1).
+        assert_eq!(map_line(12, &regions), LineFate::Untouched { line: 15 });
+        // A pure deletion of lines 5-6 anchors at the line before the gap,
+        // and a deletion at the top of the file clamps to line 1.
+        assert_eq!(
+            map_line(5, &[region(5, 2, 4, 0)]),
+            LineFate::Rewritten { line: 4 }
+        );
+        assert_eq!(
+            map_line(1, &[region(1, 2, 0, 0)]),
+            LineFate::Rewritten { line: 1 }
+        );
+    }
+
+    #[test]
     fn prompt_carries_snippet_selection_and_body() {
         let mut file = ReviewFile::new("Ada", &resolved());
         file.add_comment(comment("a3f9c1e0000", 45));
@@ -1007,7 +1315,9 @@ mod tests {
         assert!(!text.contains("at a3f9c1e"));
 
         let (_, text) = prompt(review_dir, Some("feature"), true).unwrap();
-        assert!(text.contains("at a3f9c1e [resolved]"));
+        // The random id sits between hash and tag: `at a3f9c1e #<id> [resolved]`.
+        assert!(text.contains("at a3f9c1e #"));
+        assert!(text.contains(" [resolved]"));
 
         let (source, _) = prompt(review_dir, Some("old-branch"), false).unwrap();
         assert_eq!(source, "old-branch");
@@ -1017,6 +1327,65 @@ mod tests {
             error.to_string(),
             "No review for 'gone'. Reviews: feature, old-branch"
         );
+    }
+
+    #[test]
+    fn reply_threads_an_answer_into_the_repliers_own_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let review_dir = dir.path();
+        let mut mine = ReviewFile::new("Ada", &resolved());
+        let id = mine.add_comment(comment("a3f9c1e0000", 45));
+        mine.save(&ReviewFile::path_in(review_dir, "feature", "Ada"))
+            .unwrap();
+
+        // A unique prefix addresses the comment without naming the review.
+        let to = reply(
+            review_dir,
+            &id[..8],
+            "it counts, not a time",
+            "Claude",
+            Some("89c2fcec"),
+        )
+        .unwrap();
+        assert_eq!(to.review, "feature");
+        assert_eq!((to.path.as_str(), to.line), ("src/index/cache.rs", 45));
+        // The answer landed in Claude's file; Ada's was not touched.
+        let claudes =
+            ReviewFile::load(&ReviewFile::path_in(review_dir, "feature", "Claude")).unwrap();
+        assert_eq!(claudes.review.author, "Claude");
+        assert_eq!(claudes.replies.len(), 1);
+        assert_eq!(claudes.replies[0].session.as_deref(), Some("89c2fcec"));
+        let adas = ReviewFile::load(&ReviewFile::path_in(review_dir, "feature", "Ada")).unwrap();
+        assert!(adas.replies.is_empty());
+
+        // The thread knows the question has an answer, the prompt prints it,
+        // and an answer is conversation, not a verdict: still open.
+        let mut set = ReviewSet::new(adas);
+        set.add_other(claudes);
+        let threads = set.threads();
+        assert!(threads[0].answered());
+        assert!(!threads[0].resolved());
+        let text = as_prompt(&threads);
+        assert!(text.contains(&format!("#{}", &id[..8])));
+        assert!(text.contains("Reply (Claude): it counts, not a time"));
+
+        // A second reply from the same author appends; order is by time.
+        reply(review_dir, &id[..8], "see 698c1af", "Claude", None).unwrap();
+        let claudes =
+            ReviewFile::load(&ReviewFile::path_in(review_dir, "feature", "Claude")).unwrap();
+        assert_eq!(claudes.replies.len(), 2);
+
+        // No match and an ambiguous prefix are refused, never guessed.
+        let error = reply(review_dir, "0000", "x", "Claude", None).unwrap_err();
+        assert_eq!(error.to_string(), "No comment starts with #0000.");
+        let mut more =
+            ReviewFile::load(&ReviewFile::path_in(review_dir, "feature", "Ada")).unwrap();
+        more.add_comment(comment("b4e8d2f0000", 9));
+        more.save(&ReviewFile::path_in(review_dir, "feature", "Ada"))
+            .unwrap();
+        let error = reply(review_dir, "", "x", "Claude", None).unwrap_err();
+        assert!(error.to_string().contains("matches several comments"));
+        assert!(error.to_string().contains("Give more of the id."));
     }
 
     #[test]

@@ -4,19 +4,21 @@
 //! comes back through [`ReviewApp::install`]; nothing here calls the backend
 //! from the render path.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use diffie_core::review::{
-    NewComment, Placement, ReactionKind, ReviewFile, ReviewSet, ReviewState, Side, as_prompt, place,
+    NewComment, Placement, ReactionKind, ReviewFile, ReviewInput, ReviewSet, ReviewState, Side,
+    as_prompt, map_line, place,
 };
 use diffie_core::search::{SearchHit, search_patch};
 use diffie_core::time::ago;
 use diffie_core::{
-    BlameLine, Commit, Comparison, FileState, FileStatus, FileSummary, NewSide, Oid, Resolved,
-    ReviewBackend, Scope, ScopedPatch,
+    BlameLine, ChangedRegion, Commit, Comparison, FileState, FileStatus, FileSummary, NewSide, Oid,
+    Resolved, ReviewBackend, Scope, ScopedPatch,
 };
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
@@ -46,7 +48,7 @@ use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, ElementId, Entity,
     FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement, KeyBinding,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, WeakEntity, Window, div, prelude::FluentBuilder as _, px, rgb,
+    Subscription, Task, WeakEntity, Window, deferred, div, prelude::FluentBuilder as _, px, rgb,
 };
 
 mod commands {
@@ -149,7 +151,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("c", StartComment, DIFF),
         KeyBinding::new("r", MarkReviewed, DIFF),
         KeyBinding::new("n", NextComment, DIFF),
-        KeyBinding::new("shift-n", PreviousComment, DIFF),
+        KeyBinding::new("p", PreviousComment, DIFF),
         KeyBinding::new("/", OpenSearch, DIFF),
         KeyBinding::new("space", PickerToggle, Some("CommitList")),
         KeyBinding::new("escape", CancelDraft, REVIEW),
@@ -440,6 +442,17 @@ struct Placed {
     /// accent tint so the comment visibly belongs to the span, not the line.
     selection: bool,
     other_revision: bool,
+    /// The commented code was rewritten since: the comment sits at the
+    /// replacement, marked "code changed", so the reviewer can judge the fix.
+    changed_since: bool,
+}
+
+impl Placed {
+    /// Comments from earlier rounds - outside the picked commits, or on code
+    /// rewritten since. Both hide behind the earlier-comments toggle.
+    fn earlier(&self) -> bool {
+        self.other_revision || self.changed_since
+    }
 }
 
 struct Draft {
@@ -507,11 +520,39 @@ struct ThreadView {
     body: SharedString,
     selection: Option<SharedString>,
     other_revision: bool,
+    /// On code rewritten since the comment; shown with the stored snippet
+    /// so the reviewer can compare it with the fix and react.
+    changed_since: bool,
+    snippet: Option<SharedString>,
+    /// The threaded answers, oldest first.
+    replies: Vec<ReplyView>,
+    /// Someone else answered: worth a tag when the code did not change,
+    /// because a question can be settled by an answer alone.
+    answered: bool,
     mine: bool,
     resolved: bool,
     /// Kind, how many reviewers gave it, whether this reviewer did.
     reactions: Vec<(ReactionKind, usize, bool)>,
     left: Vec<ReactionKind>,
+    /// The open answer box, when it belongs to this thread.
+    answer_input: Option<Entity<TextareaState>>,
+    /// The diff's soft-wrap toggle; the quoted snippet follows it.
+    wrap: bool,
+}
+
+struct ReplyView {
+    author: SharedString,
+    body: SharedString,
+    /// The agent conversation behind the answer, shown as a robot badge
+    /// offering `claude --resume`.
+    session: Option<SharedString>,
+}
+
+/// The reviewer's answer box, open under one thread at a time.
+struct Answer {
+    comment: String,
+    input: Entity<TextareaState>,
+    _submit: Subscription,
 }
 
 struct FileView {
@@ -528,6 +569,8 @@ struct FileView {
     uncommitted: bool,
     comments: usize,
     other_revision: usize,
+    /// How many of the comments sit on code rewritten since they were made.
+    changed_code_comments: usize,
 }
 
 pub struct ReviewApp {
@@ -564,7 +607,7 @@ pub struct ReviewApp {
     /// Hide changes in amount of whitespace. The diff is rebuilt with
     /// `--ignore-all-space`, so whitespace-only files drop out of the view.
     ignore_whitespace: bool,
-    /// The open comment `n`/`N` last jumped to, so the walk continues from
+    /// The comment `n`/`p` last jumped to, so the walk continues from
     /// there instead of restarting at the top.
     comment_cursor: Option<String>,
     search_open: bool,
@@ -581,6 +624,9 @@ pub struct ReviewApp {
     search_cursor: Option<usize>,
     /// A search hit to land on after the reload a scope widening triggers.
     pending_jump: Option<(String, Side, usize)>,
+    /// Land on the first open comment after the reload a comment jump
+    /// triggered by widening the scope.
+    pending_comment_jump: bool,
     _whole_patch: Task<()>,
     /// Folders the reviewer closed in the file panel, by full path.
     collapsed_folders: HashSet<String>,
@@ -611,6 +657,7 @@ pub struct ReviewApp {
     show_all_new: bool,
     show_all_reviewed: bool,
     draft: Option<Draft>,
+    answer: Option<Answer>,
     current_file: Option<SharedString>,
     show_other_revisions: bool,
     sidebar_visible: bool,
@@ -696,6 +743,7 @@ impl ReviewApp {
             search_all_hits: Vec::new(),
             search_cursor: None,
             pending_jump: None,
+            pending_comment_jump: false,
             _whole_patch: Task::ready(()),
             collapsed_folders: HashSet::new(),
             runs: Vec::new(),
@@ -712,6 +760,7 @@ impl ReviewApp {
             show_all_new: false,
             show_all_reviewed: false,
             draft: None,
+            answer: None,
             current_file: None,
             // On by default: the owner wants other revisions' comments in
             // view unless they are toggled away.
@@ -785,9 +834,12 @@ impl ReviewApp {
                     .iter()
                     .filter(|file| {
                         let blob = loaded.blobs.get(&file.path).and_then(Option::as_ref);
-                        file.state == FileState::UnchangedSinceReview
-                            || loaded.reviews.mine.review_state(&file.path, blob)
-                                == ReviewState::Reviewed
+                        // A kept file is ticked too, but its open comments
+                        // are the point of showing it: never collapse it.
+                        file.state != FileState::KeptForComments
+                            && (file.state == FileState::UnchangedSinceReview
+                                || loaded.reviews.mine.review_state(&file.path, blob)
+                                    == ReviewState::Reviewed)
                     })
                     .map(|file| file.path.clone())
                     .collect();
@@ -868,6 +920,10 @@ impl ReviewApp {
                 if let Some((path, side, line)) = self.pending_jump.take() {
                     self.show_hit(&path, side, line, cx);
                 }
+                if std::mem::take(&mut self.pending_comment_jump) {
+                    self.comment_cursor = None;
+                    self.jump_comment(true, cx);
+                }
                 if self.search_open {
                     self.run_search(cx);
                 }
@@ -877,6 +933,7 @@ impl ReviewApp {
                 self.files = Arc::default();
                 self.placed.clear();
                 self.pending_jump = None;
+                self.pending_comment_jump = false;
                 self.error = Some(error.into());
             }
         }
@@ -1088,19 +1145,12 @@ impl ReviewApp {
         cx.notify();
     }
 
-    /// Open comments in reading order: files as the diff sorts them, then
-    /// line, the old side before the new. Comments hidden with the other
-    /// revisions' toggle are skipped; a jump must land on something visible.
-    fn open_comment_stops(&self) -> Vec<(String, String, Side, usize)> {
-        let Some(set) = &self.reviews else {
-            return Vec::new();
-        };
-        let open: HashSet<&str> = set
-            .threads()
-            .iter()
-            .filter(|thread| !thread.resolved())
-            .map(|thread| thread.comment.id.as_str())
-            .collect();
+    /// Comments in reading order: files as the diff sorts them, then line,
+    /// the old side before the new. Resolved threads count - the walk is
+    /// for reading, and must not die with the last verdict. Comments hidden
+    /// with the other revisions' toggle are skipped; a jump must land on
+    /// something visible.
+    fn comment_stops(&self) -> Vec<(String, String, Side, usize)> {
         let order: HashMap<&str, usize> = self
             .files
             .iter()
@@ -1110,8 +1160,7 @@ impl ReviewApp {
         let mut stops: Vec<(String, String, Side, usize)> = self
             .placed
             .iter()
-            .filter(|placed| open.contains(placed.id.as_str()))
-            .filter(|placed| self.show_other_revisions || !placed.other_revision)
+            .filter(|placed| self.show_other_revisions || !placed.earlier())
             .map(|placed| {
                 (
                     placed.id.clone(),
@@ -1132,17 +1181,41 @@ impl ReviewApp {
     }
 
     fn jump_comment(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let stops = self.open_comment_stops();
+        let mut stops = self.comment_stops();
+        // A jump is an explicit ask to see a comment, so it clears what
+        // hides them instead of dying silently: first the earlier-comments
+        // toggle, then - like a search hit outside the view - the scope.
+        if stops.is_empty() && !self.show_other_revisions {
+            self.show_other_revisions = true;
+            stops = self.comment_stops();
+            if stops.is_empty() {
+                self.show_other_revisions = false;
+            }
+        }
         if stops.is_empty() {
+            let any = self
+                .reviews
+                .as_ref()
+                .is_some_and(|set| !set.threads().is_empty());
+            if any && self.scope != ScopeKind::WholeBranch {
+                self.pending_comment_jump = true;
+                self.set_scope(ScopeKind::WholeBranch, cx);
+            }
+            // Still nothing at the whole branch: the comments' files are not
+            // in this comparison at all; the status bar says so.
             return;
         }
         let at = self
             .comment_cursor
             .as_ref()
             .and_then(|id| stops.iter().position(|(sid, ..)| sid == id));
+        // The walk stops at the ends instead of circling: wrapping around
+        // made it impossible to feel where the list ends.
         let next = match (at, forward) {
-            (Some(index), true) => (index + 1) % stops.len(),
-            (Some(index), false) => (index + stops.len() - 1) % stops.len(),
+            (Some(index), true) if index + 1 >= stops.len() => return,
+            (Some(index), true) => index + 1,
+            (Some(0), false) => return,
+            (Some(index), false) => index - 1,
             (None, true) => 0,
             (None, false) => stops.len() - 1,
         };
@@ -1367,12 +1440,65 @@ impl ReviewApp {
         }
     }
 
+    /// Opens the answer box under a thread; any other open one closes, so
+    /// Escape and the key context only ever juggle a single box.
+    fn start_answer(&mut self, comment: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 6)
+                .placeholder("Respond…")
+        });
+        // Focus once the box is in the element tree, like the comment box.
+        cx.on_next_frame(window, |this, window, cx| {
+            if let Some(answer) = &this.answer {
+                answer.input.update(cx, |state, cx| state.focus(window, cx));
+            }
+        });
+        let submit = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter {
+                secondary: true, ..
+            } = event
+            {
+                this.submit_answer(window, cx);
+            }
+        });
+        self.answer = Some(Answer {
+            comment: comment.to_string(),
+            input,
+            _submit: submit,
+        });
+        cx.notify();
+    }
+
+    fn submit_answer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(answer) = self.answer.take() else {
+            return;
+        };
+        let body = answer.input.read(cx).value().trim().to_string();
+        if body.is_empty() {
+            self.answer = Some(answer);
+            return;
+        }
+        if let Some(set) = self.reviews.as_mut() {
+            set.mine.add_reply(&answer.comment, body, None);
+            self.save_review(cx);
+        }
+        self.focus_diff(window, cx);
+        cx.notify();
+    }
+
     fn focus_diff(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.diff.read(cx).focus_handle(cx).focus(window, cx);
     }
 
     fn cancel_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Escape peels one layer at a time: a draft first, then the search.
+        // Escape peels one layer at a time: an answer box first, then a
+        // draft, then the search.
+        if self.answer.take().is_some() {
+            self.focus_diff(window, cx);
+            cx.notify();
+            return;
+        }
         if self.draft.is_none() && self.search_open {
             self.close_search(window, cx);
             return;
@@ -1437,7 +1563,12 @@ impl ReviewApp {
             let result = cx
                 .background_spawn(async move {
                     let resolved = backend.resolve(&comparison)?;
-                    backend.patch(&resolved, &Scope::WholeBranch, &[], ignore_whitespace)
+                    backend.patch(
+                        &resolved,
+                        &Scope::WholeBranch,
+                        ReviewInput::EMPTY,
+                        ignore_whitespace,
+                    )
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -1628,6 +1759,7 @@ impl ReviewApp {
                     lines,
                     selection: from_selection,
                     other_revision,
+                    changed_since: false,
                 });
                 this.save_review(cx);
                 cx.notify();
@@ -1691,7 +1823,7 @@ impl ReviewApp {
                 else {
                     continue;
                 };
-                if placed.other_revision && !self.show_other_revisions {
+                if placed.earlier() && !self.show_other_revisions {
                     continue;
                 }
                 let reactions = ReactionKind::ALL
@@ -1706,7 +1838,19 @@ impl ReviewApp {
                         (count > 0).then_some((kind, count, mine))
                     })
                     .collect();
-                let line_label = if thread.comment.lines > 1 {
+                // A changed-since comment names its stored lines: its placed
+                // line is the replacement's position, not where it was written.
+                let line_label = if placed.changed_since {
+                    let last = thread.comment.line;
+                    if thread.comment.lines > 1 {
+                        format!(
+                            "was lines {}–{last}",
+                            last + 1 - thread.comment.lines.min(last)
+                        )
+                    } else {
+                        format!("was line {last}")
+                    }
+                } else if thread.comment.lines > 1 {
                     format!(
                         "lines {}–{}",
                         placed.line.saturating_sub(thread.comment.lines - 1),
@@ -1725,10 +1869,32 @@ impl ReviewApp {
                     body: thread.comment.body.trim_end().to_string().into(),
                     selection: thread.comment.selection.clone().map(Into::into),
                     other_revision: placed.other_revision,
+                    changed_since: placed.changed_since,
+                    // The code the snippet quotes is gone from the view, so
+                    // the card must carry it; elsewhere the diff row shows it.
+                    snippet: placed
+                        .changed_since
+                        .then(|| thread.comment.snippet.trim_end().to_string().into()),
+                    replies: thread
+                        .replies
+                        .iter()
+                        .map(|(author, reply)| ReplyView {
+                            author: SharedString::from((*author).to_string()),
+                            body: SharedString::from(reply.body.trim_end().to_string()),
+                            session: reply.session.clone().map(SharedString::from),
+                        })
+                        .collect(),
+                    answered: thread.answered(),
                     mine: thread.mine,
                     resolved: thread.resolved(),
                     reactions,
                     left: set.mine.reactions_left(&thread.comment.id),
+                    answer_input: self
+                        .answer
+                        .as_ref()
+                        .filter(|answer| answer.comment == thread.comment.id)
+                        .map(|answer| answer.input.clone()),
+                    wrap: self.wrap,
                 });
             }
         }
@@ -1747,6 +1913,9 @@ impl ReviewApp {
                         )
                         .into(),
                     ),
+                    _ if file.state == FileState::KeptForComments => {
+                        Some("no new changes - shown for its open comments".into())
+                    }
                     _ if file.state == FileState::UnchangedSinceReview => {
                         Some("no changes since your review".into())
                     }
@@ -1778,6 +1947,11 @@ impl ReviewApp {
                     .iter()
                     .filter(|placed| placed.path == file.path && placed.other_revision)
                     .count();
+                let changed_code_comments = self
+                    .placed
+                    .iter()
+                    .filter(|placed| placed.path == file.path && placed.changed_since)
+                    .count();
                 (
                     SharedString::from(file.path.clone()),
                     FileView {
@@ -1794,6 +1968,7 @@ impl ReviewApp {
                             && self.uncommitted_paths.contains(&file.path),
                         comments,
                         other_revision,
+                        changed_code_comments,
                     },
                 )
             })
@@ -2588,13 +2763,49 @@ impl ReviewApp {
                     .reviews
                     .as_ref()
                     .is_some_and(|set| !set.threads().is_empty());
+                // Open comments no row can show - their file is not in this
+                // comparison. Named, so the count never promises more than
+                // the window can deliver.
+                let unplaced = self.reviews.as_ref().map_or(0, |set| {
+                    set.threads()
+                        .iter()
+                        .filter(|thread| {
+                            !thread.resolved()
+                                && !self
+                                    .placed
+                                    .iter()
+                                    .any(|placed| placed.id == thread.comment.id)
+                        })
+                        .count()
+                });
                 match (any, open) {
                     (false, _) => bar,
                     (true, 0) => bar.child(div().text_color(muted).child("comments handled")),
-                    (true, open) => bar.child(div().text_color(accent).child(format!(
-                        "{open} open comment{}",
-                        if open == 1 { "" } else { "s" }
-                    ))),
+                    // The count is also the way in: clicking walks to the
+                    // next open comment, clearing whatever hides it (the
+                    // earlier-comments toggle, or a scope that leaves its
+                    // file out) - the label alone left no path to them.
+                    (true, open) => bar
+                        .child(
+                            div()
+                                .id("open-comments")
+                                .text_color(accent)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.jump_comment(true, cx);
+                                }))
+                                .child(format!(
+                                    "{open} open comment{}",
+                                    if open == 1 { "" } else { "s" }
+                                )),
+                        )
+                        .when(unplaced > 0, |bar| {
+                            bar.child(
+                                div()
+                                    .text_color(muted)
+                                    .child(format!("{unplaced} not in this comparison")),
+                            )
+                        }),
                 }
             })
             .child(format!("{reviewed} of {} files reviewed", self.files.len()))
@@ -3195,6 +3406,12 @@ impl ReviewApp {
                                 view.other_revision
                             ));
                         }
+                        if view.changed_code_comments > 0 {
+                            text.push_str(&format!(
+                                " · {} on changed code",
+                                view.changed_code_comments
+                            ));
+                        }
                         text
                     })
                 });
@@ -3369,7 +3586,7 @@ impl ReviewApp {
             ("1 2 3", "scope"),
             ("r", "mark reviewed"),
             ("c", "comment"),
-            ("n N", "open comments"),
+            ("n p", "comments"),
             ("/", "search"),
             ("s", "split / unified"),
             ("o", "earlier comments"),
@@ -3430,9 +3647,16 @@ impl ReviewApp {
 fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let accent = comment_accent(cx);
+    let warning = cx.theme().warning;
+    let success = cx.theme().success;
     let mono = cx.theme().mono_font_family.clone();
     let id = thread.id.clone();
     let quiet_border = muted.opacity(0.5);
+    let submit_hint = if cx.platform_info().is_mac() {
+        "⌘↵"
+    } else {
+        "ctrl ↵"
+    };
 
     let mut actions = h_flex().w_full().h(px(22.)).gap_1();
     for (kind, count, mine) in &thread.reactions {
@@ -3471,20 +3695,8 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
         actions = actions.child(chip);
     }
     if !thread.left.is_empty() {
-        let mut picker = v_flex().gap_0p5();
-        for kind in thread.left.iter().copied() {
-            let (owner, id) = (owner.clone(), id.clone());
-            picker = picker.child(
-                Button::new(SharedString::from(format!("react-{id}-{}", kind.label())))
-                    .ghost()
-                    .xsmall()
-                    .h(px(24.))
-                    .label(format!("{} {}", kind.emoji(), kind.label()))
-                    .on_click(move |_, _, cx| {
-                        let _ = owner.update(cx, |this, cx| this.toggle_reaction(&id, kind, cx));
-                    }),
-            );
-        }
+        let kinds = thread.left.clone();
+        let (picker_owner, picker_id) = (owner.clone(), id.clone());
         actions = actions.child(
             Popover::new(SharedString::from(format!("react-menu-{id}")))
                 .anchor(Anchor::TopLeft)
@@ -3498,10 +3710,50 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
                         .icon(Icon::new(Lucide::FaceSlightlySmilingPlus))
                         .tooltip("Add reaction"),
                 )
-                .child(picker),
+                // Content, not a child: picking a reaction must also dismiss
+                // the popover, and only the content closure can reach it.
+                .content(move |_, _, cx| {
+                    let popover = cx.entity();
+                    let mut picker = v_flex().gap_0p5();
+                    for kind in kinds.iter().copied() {
+                        let (owner, id, popover) =
+                            (picker_owner.clone(), picker_id.clone(), popover.clone());
+                        picker = picker.child(
+                            Button::new(SharedString::from(format!("react-{id}-{}", kind.label())))
+                                .ghost()
+                                .xsmall()
+                                .h(px(24.))
+                                .label(format!("{} {}", kind.emoji(), kind.label()))
+                                .on_click(move |_, window, cx| {
+                                    let _ = owner
+                                        .update(cx, |this, cx| this.toggle_reaction(&id, kind, cx));
+                                    popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                }),
+                        );
+                    }
+                    picker
+                }),
         );
     }
     actions = actions.child(div().flex_1());
+    // The explicit way out of a thread: GitHub's "resolve conversation",
+    // here simply the Done reaction with a door handle on it.
+    if !thread.resolved {
+        let (owner, id) = (owner.clone(), id.clone());
+        actions = actions.child(
+            Button::new(SharedString::from(format!("resolve-{id}")))
+                .outline()
+                .xsmall()
+                .h(px(22.))
+                .label("Resolve")
+                .tooltip("Reacts Done and closes the thread")
+                .on_click(move |_, _, cx| {
+                    let _ = owner.update(cx, |this, cx| {
+                        this.toggle_reaction(&id, ReactionKind::Done, cx)
+                    });
+                }),
+        );
+    }
     let text_button = |id: SharedString, label: &'static str| {
         Button::new(id)
             .ghost()
@@ -3543,7 +3795,13 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
         );
     }
 
-    let header_color = if thread.other_revision { muted } else { accent };
+    // Both earlier kinds keep the meta line quiet; the changed-since tag
+    // alone carries the warning color, so it reads as the one alert.
+    let header_color = if thread.other_revision || thread.changed_since {
+        muted
+    } else {
+        accent
+    };
     let mut header = h_flex()
         .flex_wrap()
         .gap(px(6.))
@@ -3559,10 +3817,33 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
                 .child("other revision"),
         );
     }
+    if thread.changed_since {
+        header = header.child(
+            div()
+                .px(px(4.))
+                .border_1()
+                .border_color(warning.opacity(0.6))
+                .rounded(px(3.))
+                .text_color(warning)
+                .child("code changed"),
+        );
+    } else if thread.answered && !thread.resolved {
+        // An answer without a code change: the comment was a question. The
+        // code-changed tag outranks it - the thread shows the reply anyway.
+        header = header.child(
+            div()
+                .px(px(4.))
+                .border_1()
+                .border_color(success.opacity(0.6))
+                .rounded(px(3.))
+                .text_color(success)
+                .child("answered"),
+        );
+    }
     if thread.show_author {
         header = header.child(div().font_medium().child(thread.author.clone()));
     }
-    header = header.child(div().font_family(mono).child(thread.commit.clone()));
+    header = header.child(div().font_family(mono.clone()).child(thread.commit.clone()));
     header = header.child(if thread.other_revision {
         format!("{}, unchanged since", thread.line_label)
     } else {
@@ -3582,7 +3863,14 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
         .py(px(6.))
         .rounded(px(6.))
         .map(|card| {
-            if thread.other_revision {
+            if thread.changed_since {
+                // Dashed like the other earlier kind, in the warning tint:
+                // the fix below answers it and awaits the reviewer's verdict.
+                card.border_1()
+                    .border_dashed()
+                    .border_color(warning.opacity(0.55))
+                    .bg(warning.opacity(0.05))
+            } else if thread.other_revision {
                 card.border_1()
                     .border_dashed()
                     .border_color(quiet_border)
@@ -3594,15 +3882,150 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
             }
         })
         .child(header)
-        // A resolved comment keeps its header and reactions, and folds its body.
-        // Markdown, so fenced and backticked code in a comment reads as code.
-        .when(!thread.resolved, |card| {
-            card.child(TextView::markdown(
-                SharedString::from(format!("comment-body-{}", thread.id)),
-                thread.body.clone(),
-            ))
+        // The rewritten code the comment was about, quoted from the review
+        // file: no diff row shows it any more. The quote follows the diff's
+        // wrap toggle; unwrapped it is its own scroll area. The Diff's
+        // ScrollableMask owns horizontal wheel input for the whole pane in
+        // the capture phase, and it only yields to an occluding hitbox
+        // painted in front of it - so the quote paints deferred (layout
+        // stays in the card) and occludes. The price is that the wheel
+        // does nothing but horizontal scrolling while over the quote.
+        .when_some(thread.snippet.clone(), |card, snippet| {
+            let quote = v_flex()
+                .px(px(6.))
+                .py(px(4.))
+                .rounded(px(4.))
+                .bg(muted.opacity(0.08))
+                .font_family(mono.clone())
+                .text_size(px(11.))
+                .text_color(muted)
+                // Unwrapped lines must shrink-wrap their text: stretched to
+                // the column width they clip inside themselves and the
+                // scroll area never sees an overflow to scroll.
+                .when(!thread.wrap, |quote| quote.items_start())
+                .children(
+                    snippet
+                        .split('\n')
+                        .map(|line| {
+                            div()
+                                .when(!thread.wrap, |line| line.whitespace_nowrap())
+                                .child(line.to_string())
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            card.child(if thread.wrap {
+                quote.into_any_element()
+            } else {
+                // No scroll handler of our own: the occlusion already keeps
+                // the pane out of the hit test, and a stop-propagation here
+                // can cancel the element's own offset handling.
+                deferred(
+                    quote
+                        .id(SharedString::from(format!("snippet-{}", thread.id)))
+                        .overflow_x_scroll()
+                        .occlude(),
+                )
+                .into_any_element()
+            })
         })
-        .when(!thread.other_revision, |card| card.child(actions));
+        // Resolving changes nothing but the reaction: question, answers and
+        // the respond box all stay - the thread is the record, and hiding
+        // the question under its own answers read as losing it.
+        // Markdown, so fenced and backticked code in a comment reads as code.
+        .child(TextView::markdown(
+            SharedString::from(format!("comment-body-{}", thread.id)),
+            thread.body.clone(),
+        ))
+        .children(thread.replies.iter().enumerate().map(|(index, reply)| {
+            // With a session the author line becomes a robot badge: hover
+            // names the agent conversation, a click hands the user
+            // `claude --resume <id>` to dig into the reasoning.
+            let author: AnyElement = match &reply.session {
+                Some(session) => {
+                    let resume = format!("claude --resume {session}");
+                    Button::new(SharedString::from(format!(
+                        "reply-who-{}-{index}",
+                        thread.id
+                    )))
+                    .ghost()
+                    .xsmall()
+                    .h(px(18.))
+                    .icon(Icon::new(Lucide::Bot))
+                    .label(reply.author.clone())
+                    .text_color(muted)
+                    .tooltip(SharedString::from(format!(
+                        "Claude Code in session {session} - click copies the resume command"
+                    )))
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(resume.clone()));
+                    })
+                    .into_any_element()
+                }
+                None => div()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .font_medium()
+                    .child(reply.author.clone())
+                    .into_any_element(),
+            };
+            v_flex()
+                .gap_0p5()
+                .pl_2()
+                .border_l_2()
+                .border_color(quiet_border)
+                .child(h_flex().child(author))
+                .child(TextView::markdown(
+                    SharedString::from(format!("reply-{}-{index}", thread.id)),
+                    reply.body.clone(),
+                ))
+        }))
+        // A conversation invites the next word: under an open thread with
+        // answers the box is already there - a quiet stand-in until a click
+        // makes it the real textarea.
+        .when(!thread.replies.is_empty(), |card| {
+            card.child(match &thread.answer_input {
+                Some(input) => v_flex()
+                    .gap_0p5()
+                    .child(Textarea::new(input))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(format!("{submit_hint} sends · esc closes")),
+                    )
+                    .into_any_element(),
+                None => {
+                    let (owner, id) = (owner.clone(), thread.id.clone());
+                    h_flex()
+                        .id(SharedString::from(format!("answer-open-{}", thread.id)))
+                        .h(px(24.))
+                        .w_full()
+                        .px_2()
+                        .items_center()
+                        .border_1()
+                        .border_color(quiet_border)
+                        .rounded(px(4.))
+                        .text_size(px(12.))
+                        .text_color(muted)
+                        .cursor_pointer()
+                        .on_click(move |_, window, cx| {
+                            let _ = owner.update(cx, |this, cx| this.start_answer(&id, window, cx));
+                        })
+                        .child("Respond…")
+                        .into_any_element()
+                }
+            })
+        })
+        .when(!thread.other_revision, |card| {
+            card.child(
+                // A sliver of air so the last answer does not sit on the
+                // action buttons.
+                div()
+                    .w_full()
+                    .when(!thread.replies.is_empty(), |actions| actions.mt(px(2.)))
+                    .child(actions),
+            )
+        });
 
     div().w_full().px_2().py_1().child(card).into_any_element()
 }
@@ -3714,7 +4137,7 @@ impl Render for ReviewApp {
         }
         v_flex()
             .id("review")
-            .key_context(if self.draft.is_some() {
+            .key_context(if self.draft.is_some() || self.answer.is_some() {
                 "Review"
             } else {
                 "Review Reading"
@@ -3971,8 +4394,24 @@ fn load(
         }
     }
 
+    // Open comments overrule a reviewed tick in New for me: their files keep
+    // their diff so the comments stay visible and judgeable.
+    let commented: Vec<String> = reviews
+        .threads()
+        .iter()
+        .filter(|thread| !thread.resolved())
+        .map(|thread| thread.comment.path.clone())
+        .collect();
     let mut patch = backend
-        .patch(&resolved, scope, &reviews.mine.reviewed, ignore_whitespace)
+        .patch(
+            &resolved,
+            scope,
+            ReviewInput {
+                reviewed: &reviews.mine.reviewed,
+                commented: &commented,
+            },
+            ignore_whitespace,
+        )
         .map_err(text)?;
     let mut files = DiffFile::parse(&patch.text).map_err(|error| {
         format!(
@@ -4074,6 +4513,7 @@ fn place_all(
         .map(|file| file.path.as_str())
         .collect();
     let mut blames: HashMap<String, Vec<BlameLine>> = HashMap::new();
+    let mut regions: HashMap<(Oid, String), Option<Vec<ChangedRegion>>> = HashMap::new();
     let mut placed = Vec::new();
     for thread in reviews.threads() {
         let comment = thread.comment;
@@ -4086,9 +4526,27 @@ fn place_all(
                     blames.insert(comment.path.clone(), backend.blame(rev, &comment.path)?);
                 }
                 match place(comment, in_scope, &blames[&comment.path]) {
-                    Placement::InScope { line } => Some((line, false)),
-                    Placement::OtherRevision { line } => Some((line, true)),
-                    Placement::NotInView => None,
+                    Placement::InScope { line } => Some((line, false, false)),
+                    Placement::OtherRevision { line } => Some((line, true, false)),
+                    // Blame lost the line: the commented code was rewritten.
+                    // Follow it through the diff since its commit so the
+                    // comment sits beside the fix instead of vanishing. A
+                    // commit git no longer has (a rebase dropped it) cannot
+                    // be followed; the comment stays unplaced, no guessing.
+                    Placement::NotInView => {
+                        let key = (comment.commit.clone(), comment.path.clone());
+                        let regions = match regions.entry(key) {
+                            Entry::Occupied(entry) => entry.into_mut(),
+                            Entry::Vacant(entry) => entry.insert(backend.changed_regions(
+                                &comment.commit,
+                                rev,
+                                &comment.path,
+                            )?),
+                        };
+                        regions
+                            .as_deref()
+                            .map(|regions| (map_line(comment.line, regions).line(), false, true))
+                    }
                 }
             }
             // No blame for removed lines or for a combined tree: show the
@@ -4096,11 +4554,13 @@ fn place_all(
             // uncommitted review has no in-scope commits, but its working
             // tree is the revision under review, so its comments stay
             // current instead of dropping out or dimming to other-revision.
-            _ => {
-                (uncommitted || in_scope.contains(&comment.commit)).then_some((comment.line, false))
-            }
+            _ => (uncommitted || in_scope.contains(&comment.commit)).then_some((
+                comment.line,
+                false,
+                false,
+            )),
         };
-        if let Some((line, other_revision)) = hit {
+        if let Some((line, other_revision, changed_since)) = hit {
             placed.push(Placed {
                 id: comment.id.clone(),
                 path: comment.path.clone(),
@@ -4109,6 +4569,7 @@ fn place_all(
                 lines: comment.lines,
                 selection: comment.selection.is_some(),
                 other_revision,
+                changed_since,
             });
         }
     }
