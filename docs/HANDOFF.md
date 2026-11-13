@@ -38,6 +38,7 @@ Be exact about this when you report further work.
 | Everything else interactive: swap, expand all, next and previous file or change, other-revisions toggle with real data, copy as prompt, delete, Escape, scope keys, sidebar toggle, colleagues' files | Not exercised |
 | A real GPU, a real window manager, high-DPI | Not run |
 | Windows | Not built, not run |
+| `--pr` against a real pull request | Window not run. The argument parsing and the pinned-revision resolve are unit-tested; the gh call's output shape and the merged-PR commit range were confirmed read-only against a real merged PR (srp6-rs #41: `baseRefOid..headRefOid` lists exactly the PR's 64 commits, the merge commit's first parent does not) |
 | Performance on large branches | Not measured |
 | 2026-11-11, macOS, real repository (16-commit branch): themed window renders with bundled fonts; tree, scope bar, segmented controls, progress bar, hint bar; split view with decorated added and removed rows, signs, word emphasis; a comment card and the header controls (counts, touched-by, Reviewed) | Verified by screenshot |
 | Same session: commit picker internals (search, Space, shift-click, Show more), theme menu, comment box and Escape focus return, reactions, light and Midnight themes, narrow-window fallback, resizable panel drag | Compiled, not seen on screen |
@@ -58,6 +59,15 @@ first into the second; `--every-difference` widens the comparison). A
 revision that does not resolve fails before the window
 opens; a branch that exactly one remote has is taken from there (`o/x`
 stands in for `x`), several candidates are listed and refused.
+`diffie --pr <number|url>` reviews a GitHub pull request: gh (which must
+be on PATH) describes it, and the review pins the PR's exact commits -
+the head commit as source, and as target the base branch's
+remote-tracking ref while the PR is open or the PR's recorded base
+commit once merged - never a same-named local branch, so the review
+matches what the PR holds. The title and the review file keep the branch
+names. A commit that is not here is refused with the `git fetch` to run
+(the head branch while open, `refs/pull/<n>/head` once merged or closed,
+the fork named for a cross-repository head) - diffie never fetches.
 `diffie --prompt [<review>]` opens no window: it prints the open review
 comments the way "Copy all as prompt" does (no name works only for a sole
 review, several are listed and refused; `--all` includes resolved ones,
@@ -84,6 +94,8 @@ crates/core/src/
   backend.rs                  ReviewBackend trait, BackendError
   git_cli.rs                  GitCli: the cheap backend (shells out to git)
   review.rs                   review file: comments, reactions, ticks, ReviewSet
+  pr.rs                       --pr: a pull request's state, branches and
+                              exact commits via the gh CLI
   time.rs                     RFC 3339 without a date-time crate
 crates/core/tests/git_cli.rs  backend tests against a throwaway repository
 crates/app/src/
@@ -147,6 +159,14 @@ can only expand context that the patch supplies.
 their own file, reactions point at comment ids, `ReviewSet` overlays
 colleagues' files read-only, `place()` positions a comment from a blame, and
 `as_prompt()` renders comments for an AI agent. The TOML format is version 1.
+
+`pr.rs` is command-line plumbing, not part of `ReviewBackend`: it parses the
+`--pr` value (a number, or a pull-request URL kept verbatim so gh keeps the
+host and repository) and shells out to `gh pr view` for the PR's state,
+branch names and exact commits. `main.rs` turns that into a comparison whose
+`source_rev`/`target_rev` pin the PR's commits while `source`/`target` keep
+the branch names for the title and the review file; `GitCli::resolve`
+resolves the pinned revision when one is set.
 
 ## GPUI Kit: what to know
 

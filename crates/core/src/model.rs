@@ -32,12 +32,20 @@ impl std::fmt::Display for Oid {
 
 /// What the reviewer compares, phrased the way the UI phrases it:
 /// "changes in `source` going into `target`".
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Comparison {
     /// The branch (or any revision) whose changes are reviewed.
     pub source: String,
     /// The branch the changes are going into.
     pub target: String,
+    /// Resolve this revision instead of `source`, which then only names the
+    /// review in the UI and on disk. A pull-request review pins the PR's
+    /// exact head commit here so a stale same-named branch can never show
+    /// other content, while the title and the review file keep the branch
+    /// name.
+    pub source_rev: Option<String>,
+    /// Resolve this revision instead of `target`; see `source_rev`.
+    pub target_rev: Option<String>,
     pub mode: CompareMode,
     /// Review the working tree's uncommitted changes instead of resolving
     /// `source`, which then only names the review in the UI and on disk.

@@ -113,17 +113,24 @@ impl GitCli {
             .is_some())
     }
 
+    /// The configured remotes, as `git remote` lists them. Lets the command
+    /// line name a remote in fetch hints without guessing.
+    pub fn remotes(&self) -> Result<Vec<String>> {
+        Ok(self
+            .read(&["remote"])?
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
     /// The configured remotes whose fetched refs carry `branch`. Lets the
     /// command line stand `o/x` in for `x` when exactly one remote knows the
     /// branch, and name the candidates when several do.
     pub fn remotes_with_branch(&self, branch: &str) -> Result<Vec<String>> {
-        let remotes = self.read(&["remote"])?;
         let mut found = Vec::new();
-        for remote in remotes
-            .lines()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-        {
+        for remote in self.remotes()? {
             // The constant `refs/remotes/` prefix keeps the ref from being
             // read as an option; `--verify` demands this exact ref.
             let reference = format!("refs/remotes/{remote}/{branch}");
@@ -584,9 +591,19 @@ impl ReviewBackend for GitCli {
         let head = if comparison.uncommitted {
             self.commit_id("HEAD")?
         } else {
-            self.commit_id(&comparison.source)?
+            self.commit_id(
+                comparison
+                    .source_rev
+                    .as_deref()
+                    .unwrap_or(&comparison.source),
+            )?
         };
-        let target_head = self.commit_id(&comparison.target)?;
+        let target_head = self.commit_id(
+            comparison
+                .target_rev
+                .as_deref()
+                .unwrap_or(&comparison.target),
+        )?;
         let base = match comparison.mode {
             CompareMode::EveryDifference => target_head.clone(),
             CompareMode::BranchAdds => self

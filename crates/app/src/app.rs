@@ -1043,6 +1043,12 @@ impl ReviewApp {
 
     fn swap_direction(&mut self, cx: &mut Context<Self>) {
         std::mem::swap(&mut self.comparison.source, &mut self.comparison.target);
+        // A pinned revision (--pr) belongs to its display name; keep the
+        // pairs together.
+        std::mem::swap(
+            &mut self.comparison.source_rev,
+            &mut self.comparison.target_rev,
+        );
         self.picked.clear();
         self.picked_uncommitted = true;
         self.scope = ScopeKind::NewForMe;

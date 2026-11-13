@@ -148,6 +148,27 @@ Decided:
 - The comment walk stops at the ends instead of circling (owner,
   2026-11-13): wrapping made it impossible to feel where the list ends.
   `p`, not `shift-n`, steps back.
+- `--pr <number|url>` reviews a GitHub pull request (owner, 2026-11-13).
+  The GitHub CLI (gh) describes the PR, so authentication and GitHub
+  Enterprise hosts stay gh's concern; a URL pins host and repository, a
+  bare number resolves against the checkout's remotes. The review pins
+  the PR's exact commits, never branch names: the source is the PR's head
+  commit (a stale same-named branch can never show other content), and
+  the target is the base branch's remote-tracking ref while the PR is
+  open, or the PR's recorded base commit (gh's `baseRefOid`) once it is
+  merged - the live base already contains a merged PR, and the recorded
+  base reproduces the PR page's own comparison even when the base branch
+  was rebuilt underneath, where the merge commit's first parent drags
+  foreign commits in. The title and the review file keep the PR's branch
+  names; the pinned commits ride along on the comparison
+  (`Comparison::source_rev`/`target_rev`). The app never fetches: a
+  commit that is not here is an error with the copy-pasteable `git fetch`
+  to run - the head branch while the PR is open, `refs/pull/<n>/head`
+  once it is merged or closed (the head branch is usually deleted; that
+  ref always exists on GitHub and also reaches the real commits of a
+  squash- or rebase-merged PR, which never land on the base branch).
+  Sending comments back to the pull request is intended later, and only
+  from a PR entry point.
 
 Assumed:
 

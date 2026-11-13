@@ -1013,6 +1013,7 @@ mod tests {
                 target: "main".into(),
                 mode: CompareMode::BranchAdds,
                 uncommitted: false,
+                ..Default::default()
             },
             head: Oid::new("h".repeat(40)),
             target_head: Oid::new("t".repeat(40)),

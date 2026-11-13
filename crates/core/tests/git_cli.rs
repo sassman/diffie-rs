@@ -89,6 +89,7 @@ impl Fixture {
             target: "main".into(),
             mode: CompareMode::BranchAdds,
             uncommitted: false,
+            ..Default::default()
         }
     }
 
@@ -169,8 +170,10 @@ fn finds_revisions_locally_and_on_remotes() {
     assert!(!backend.revision_exists("nope").unwrap());
 
     // Where a remote points is irrelevant; only its fetched refs matter.
+    assert!(backend.remotes().unwrap().is_empty());
     git(root, &["remote", "add", "o", "."]);
     git(root, &["remote", "add", "fork", "."]);
+    assert_eq!(backend.remotes().unwrap(), ["fork", "o"]);
     git(root, &["update-ref", "refs/remotes/o/topic", "HEAD"]);
     git(root, &["update-ref", "refs/remotes/o/solo", "HEAD"]);
     git(root, &["update-ref", "refs/remotes/fork/topic", "HEAD"]);
@@ -178,6 +181,26 @@ fn finds_revisions_locally_and_on_remotes() {
     // `git remote` lists alphabetically; the order carries into the answer.
     assert_eq!(backend.remotes_with_branch("topic").unwrap(), ["fork", "o"]);
     assert!(backend.remotes_with_branch("nope").unwrap().is_empty());
+}
+
+#[test]
+fn pinned_revisions_outrank_the_display_names() {
+    // A --pr review resolves the PR's exact commits; source and target are
+    // then only names for the title and the review file, and need not exist.
+    let fixture = Fixture::new();
+    let backend = fixture.backend();
+    let comparison = Comparison {
+        source: "feat/typed-groups".into(),
+        target: "refactor/base".into(),
+        source_rev: Some(fixture.commits[4].to_string()),
+        target_rev: Some("main".into()),
+        mode: CompareMode::BranchAdds,
+        uncommitted: false,
+    };
+    let resolved = backend.resolve(&comparison).unwrap();
+    assert_eq!(resolved.head, fixture.commits[4]);
+    assert_eq!(resolved.base, resolved.target_head);
+    assert_eq!(backend.commits(&resolved).unwrap().len(), 5);
 }
 
 #[test]
@@ -584,6 +607,7 @@ fn reviews_the_uncommitted_working_tree() {
         target: "feat".into(),
         mode: CompareMode::BranchAdds,
         uncommitted: true,
+        ..Default::default()
     };
     let resolved = backend.resolve(&comparison).unwrap();
     assert_eq!(resolved.base, resolved.head);
@@ -632,6 +656,7 @@ fn the_uncommitted_layer_is_pickable() {
         target: "main".into(),
         mode: CompareMode::BranchAdds,
         uncommitted: true,
+        ..Default::default()
     };
     let resolved = backend.resolve(&comparison).unwrap();
     assert_eq!(backend.uncommitted_paths(&resolved).unwrap(), ["a.txt"]);
@@ -702,6 +727,7 @@ fn the_uncommitted_layer_combines_with_skipped_commits() {
         target: "main".into(),
         mode: CompareMode::BranchAdds,
         uncommitted: true,
+        ..Default::default()
     };
     let resolved = backend.resolve(&comparison).unwrap();
 
@@ -742,6 +768,7 @@ fn an_uncombinable_uncommitted_layer_is_reported() {
         target: "main".into(),
         mode: CompareMode::BranchAdds,
         uncommitted: true,
+        ..Default::default()
     };
     let resolved = backend.resolve(&comparison).unwrap();
 
@@ -783,6 +810,7 @@ fn an_uncommitted_tick_holds_the_content_on_disk() {
         target: "feat".into(),
         mode: CompareMode::BranchAdds,
         uncommitted: true,
+        ..Default::default()
     };
     let resolved = backend.resolve(&comparison).unwrap();
 

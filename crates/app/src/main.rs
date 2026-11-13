@@ -8,6 +8,7 @@ use gpui_kit::{AppContext as _, WindowBounds, WindowOptions, component::TitleBar
 
 const USAGE: &str = "\
 Usage: diffie [-C <path>] [<revision> [<revision>]] [--every-difference]
+       diffie [-C <path>] --pr <pull-request> [--every-difference]
        diffie [-C <path>] --prompt [<review>] [--all]
        diffie [-C <path>] --reply <id> <answer> [--session <id>]
 
@@ -18,6 +19,13 @@ reviews the first going into the second: `diffie topic main` is topic's
 changes going into main. A revision only a remote has is taken from there
 when exactly one remote knows it. -C runs as if started in <path> (default:
 the current directory). Requires git on PATH.
+
+--pr reviews a GitHub pull request. Give its number, or its URL (which
+pins host and repository, GitHub Enterprise included). The GitHub CLI
+(gh) describes the PR, and the review pins the PR's exact commits -
+never a same-named local branch, whose tip can differ; the title keeps
+the branch names. A commit that is not fetched here is refused with the
+`git fetch` to run - diffie never fetches. Requires gh on PATH.
 
 --prompt opens no window: it prints the open review comments the way the
 app's \"Copy all as prompt\" button does, and exits. Without a review name
@@ -53,6 +61,7 @@ fn main() {
     let mut include_resolved = false;
     let mut reply: Option<(String, String)> = None;
     let mut session: Option<String> = None;
+    let mut pr: Option<String> = None;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         let text = argument.to_string_lossy().into_owned();
@@ -77,6 +86,12 @@ fn main() {
                     exit_usage("--session needs the agent conversation's id.");
                 };
                 session = Some(value.to_string_lossy().into_owned());
+            }
+            "--pr" => {
+                let Some(value) = arguments.next() else {
+                    exit_usage("--pr needs a pull-request number or URL.");
+                };
+                pr = Some(value.to_string_lossy().into_owned());
             }
             "-C" => {
                 let Some(value) = arguments.next() else {
@@ -129,6 +144,15 @@ fn main() {
     }
     if session.is_some() && reply.is_none() {
         exit_usage("--session only applies to --reply.");
+    }
+    if pr.is_some() && !revisions.is_empty() {
+        exit_usage("--pr names the branches itself; drop the revisions.");
+    }
+    if pr.is_some() && prompt_mode {
+        exit_usage("--pr opens a review; it does not combine with --prompt.");
+    }
+    if pr.is_some() && reply.is_some() {
+        exit_usage("--pr opens a review; it does not combine with --reply.");
     }
 
     let path = repository.unwrap_or_else(|| PathBuf::from("."));
@@ -188,9 +212,121 @@ fn main() {
             }
         }
     }
+    let pr_comparison = pr.map(|value| {
+        let argument = match diffie_core::pr::parse(&value) {
+            Ok(argument) => argument,
+            Err(message) => exit_usage(&message),
+        };
+        let pull = match diffie_core::pr::resolve(&path, &argument) {
+            Ok(pull) => pull,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        };
+        use diffie_core::pr::PrState;
+        let exists = |revision: &str| -> bool {
+            backend.revision_exists(revision).unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(1);
+            })
+        };
+        // For fetch hints only; with several remotes the user knows better
+        // than a guess.
+        let remote_hint = match backend.remotes().unwrap_or_default().as_slice() {
+            [only] => only.clone(),
+            _ => "<remote>".to_string(),
+        };
+        // The PR's exact head commit, never a branch lookup: a stale
+        // same-named branch must not silently show other content.
+        if !exists(&pull.source_commit) {
+            match pull.state {
+                PrState::Open if pull.cross_repository => eprintln!(
+                    "the pull request's head commit is not here: it comes from {owner}'s \
+                     fork. Add that fork as a remote, run `git fetch <fork> {branch}`, \
+                     then retry - diffie never fetches.",
+                    owner = pull.head_owner,
+                    branch = pull.source_branch,
+                ),
+                PrState::Open => eprintln!(
+                    "the pull request's head commit is not here; run \
+                     `git fetch {remote_hint} {branch}` and retry - diffie never fetches.",
+                    branch = pull.source_branch,
+                ),
+                // Merged or closed, the head branch is usually deleted, but
+                // GitHub keeps the commit reachable under refs/pull - also
+                // after a squash or rebase merge, which puts different
+                // commits on the base branch.
+                PrState::Merged | PrState::Closed => eprintln!(
+                    "the pull request's head commit is not here; run \
+                     `git fetch {remote_hint} refs/pull/{number}/head` and retry - \
+                     diffie never fetches.",
+                    number = pull.number,
+                ),
+            }
+            std::process::exit(1);
+        }
+        let target_rev = match pull.state {
+            // The base as the PR was compared against it: the live base
+            // already contains a merged PR, which would collapse the diff
+            // to nothing. gh's baseRefOid, not the merge commit's first
+            // parent - a base rebuilt under the PR moves that parent off
+            // the PR's own comparison and drags foreign commits in.
+            PrState::Merged => {
+                if !exists(&pull.target_commit) {
+                    eprintln!(
+                        "the pull request's base commit is not here; run \
+                         `git fetch {remote_hint}` and retry - diffie never fetches."
+                    );
+                    std::process::exit(1);
+                }
+                pull.target_commit.clone()
+            }
+            // Open (or closed unmerged), the base moves on, so follow its
+            // remote-tracking ref - never a same-named local branch, which
+            // can lag.
+            PrState::Open | PrState::Closed => {
+                let branch = &pull.target_branch;
+                let remotes = backend.remotes_with_branch(branch).unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                });
+                match remotes.as_slice() {
+                    [remote] => format!("{remote}/{branch}"),
+                    [] => {
+                        eprintln!(
+                            "`{branch}` is not fetched here; run \
+                             `git fetch {remote_hint} {branch}` and retry - \
+                             diffie never fetches."
+                        );
+                        std::process::exit(1);
+                    }
+                    _ => {
+                        eprintln!(
+                            "`{branch}` is on more than one remote ({}); say which, e.g. `{}/{branch}`.",
+                            remotes.join(", "),
+                            remotes[0]
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+        };
+        // Sending comments back to the pull request needs the number;
+        // nothing stores it yet.
+        let _pr_number = pull.number;
+        Comparison {
+            source: pull.source_branch,
+            target: pull.target_branch,
+            source_rev: Some(pull.source_commit),
+            target_rev: Some(target_rev),
+            mode,
+            uncommitted: false,
+        }
+    });
     let branch = backend.current_branch().ok().flatten();
     let working_tree = backend.has_working_tree().unwrap_or(false);
-    let comparison = match revisions.as_slice() {
+    let comparison = pr_comparison.unwrap_or_else(|| match revisions.as_slice() {
         // `diffie A B` and `diffie A..B` read in the merge direction: A's
         // changes going into B. (`git diff` spells it the other way round;
         // that reading kept surprising the owner.)
@@ -199,6 +335,7 @@ fn main() {
             target: into.clone(),
             mode,
             uncommitted: false,
+            ..Default::default()
         },
         // `diffie REV` reads like `git diff REV`: the working tree against
         // it. On the checked-out branch that is just the uncommitted work.
@@ -211,6 +348,7 @@ fn main() {
             target: into.clone(),
             mode,
             uncommitted: true,
+            ..Default::default()
         },
         [into] => exit_usage(&format!(
             "no working tree to diff against `{into}`; give two revisions."
@@ -225,19 +363,21 @@ fn main() {
                     target: into,
                     mode,
                     uncommitted: true,
+                    ..Default::default()
                 }
             } else {
                 Comparison {
                     // Name the review after the branch, not the literal HEAD.
-                    source: branch.unwrap_or_else(|| "HEAD".to_string()),
+                    source: branch.clone().unwrap_or_else(|| "HEAD".to_string()),
                     target: "main".to_string(),
                     mode,
                     uncommitted: false,
+                    ..Default::default()
                 }
             }
         }
         _ => unreachable!("the length was checked above"),
-    };
+    });
     // A mistyped revision fails here, not inside an empty window. A branch
     // only the remotes know is accepted when exactly one remote has it, and
     // the review then names that remote's ref; several candidates are a
@@ -273,13 +413,19 @@ fn main() {
         }
     };
     let comparison = Comparison {
-        // The uncommitted pseudo-source names the working tree, not a ref.
-        source: if comparison.uncommitted {
+        // The uncommitted pseudo-source names the working tree, not a ref,
+        // and a pinned rev (--pr) was already validated against its exact
+        // commit, so its display name resolves to nothing on purpose.
+        source: if comparison.uncommitted || comparison.source_rev.is_some() {
             comparison.source
         } else {
             resolve(&comparison.source)
         },
-        target: resolve(&comparison.target),
+        target: if comparison.target_rev.is_some() {
+            comparison.target
+        } else {
+            resolve(&comparison.target)
+        },
         ..comparison
     };
     // The project keeps its name in every worktree; the worktree shows
