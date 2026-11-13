@@ -79,6 +79,35 @@ mod commands {
             Quit
         ]
     );
+
+    // Menu-only stand-ins for the shortcut actions above. A menu item shows
+    // its action's keymap binding, and on macOS a single keystroke becomes
+    // the NSMenuItem key equivalent - a bare letter there is matched by the
+    // menu before the responder chain, so it would fire while the reviewer
+    // types a comment. These actions stay unbound: their items show no
+    // shortcut hint, and the root view routes them to the same methods.
+    gpui_kit::actions!(
+        menu,
+        [
+            MenuAbout,
+            MenuSplitUnified,
+            MenuWrap,
+            MenuHideWhitespace,
+            MenuCollapseAll,
+            MenuExpandAll,
+            MenuFileList,
+            MenuEarlierComments,
+            MenuNextChange,
+            MenuPreviousChange,
+            MenuNextFile,
+            MenuPreviousFile,
+            MenuNextComment,
+            MenuPreviousComment,
+            MenuScopeNewForMe,
+            MenuScopeWholeBranch,
+            MenuScopeCustom
+        ]
+    );
 }
 use commands::*;
 
@@ -159,6 +188,106 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(refresh, Refresh, REVIEW),
         KeyBinding::new(quit, Quit, REVIEW),
     ]);
+
+    // After bind_keys: the menu reads the keymap once, at set time, to put
+    // chords like Cmd+Q on the items. Only macOS draws the bar; Linux and
+    // Windows just store the declaration, so the call needs no cfg.
+    install_menus(cx);
+}
+
+fn install_menus(cx: &mut App) {
+    use gpui_kit::component::input;
+    use gpui_kit::{Menu, MenuItem, OsAction, SystemMenuType};
+
+    cx.set_menus([
+        // The app menu. macOS titles it with the process name, so the name
+        // here never shows.
+        Menu::new("diffie").items([
+            MenuItem::action("About diffie", MenuAbout),
+            MenuItem::separator(),
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Quit diffie", Quit),
+        ]),
+        // The OS actions carry the native selectors, so the items act on the
+        // focused text field; the Kit input's own actions back them.
+        Menu::new("Edit").items([
+            MenuItem::os_action("Undo", input::Undo, OsAction::Undo),
+            MenuItem::os_action("Redo", input::Redo, OsAction::Redo),
+            MenuItem::separator(),
+            MenuItem::os_action("Cut", input::Cut, OsAction::Cut),
+            MenuItem::os_action("Copy", input::Copy, OsAction::Copy),
+            MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
+            MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
+        ]),
+        Menu::new("View").items([
+            MenuItem::action("Split | Unified", MenuSplitUnified),
+            MenuItem::action("Wrap long lines", MenuWrap),
+            MenuItem::action("Hide whitespace-only changes", MenuHideWhitespace),
+            MenuItem::separator(),
+            MenuItem::action("Collapse all files", MenuCollapseAll),
+            MenuItem::action("Expand all files", MenuExpandAll),
+            MenuItem::separator(),
+            MenuItem::action("File list", MenuFileList),
+            MenuItem::action("Earlier comments", MenuEarlierComments),
+        ]),
+        Menu::new("Go").items([
+            MenuItem::action("Next change", MenuNextChange),
+            MenuItem::action("Previous change", MenuPreviousChange),
+            MenuItem::action("Next file", MenuNextFile),
+            MenuItem::action("Previous file", MenuPreviousFile),
+            MenuItem::action("Next comment", MenuNextComment),
+            MenuItem::action("Previous comment", MenuPreviousComment),
+            MenuItem::separator(),
+            MenuItem::action("New for me", MenuScopeNewForMe),
+            MenuItem::action("Whole branch", MenuScopeWholeBranch),
+            MenuItem::action("Custom", MenuScopeCustom),
+        ]),
+        // Exactly "Window": macOS recognises the name and fills the menu
+        // with the standard window items.
+        Menu::new("Window"),
+    ]);
+}
+
+/// The standard About panel, with the name and version the dev binary has no
+/// bundle to carry. Only macOS draws the menu bar today, so elsewhere the
+/// action that reaches this is a no-op.
+fn show_about() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2::runtime::AnyObject;
+        use objc2_app_kit::{
+            NSAboutPanelOptionApplicationIcon, NSAboutPanelOptionApplicationName,
+            NSAboutPanelOptionApplicationVersion, NSApplication,
+        };
+        use objc2_foundation::{NSDictionary, NSString};
+
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        let name = NSString::from_str("diffie");
+        let version = NSString::from_str(env!("CARGO_PKG_VERSION"));
+        // The panel resolves its icon through the bundle, not through the
+        // Dock image set at startup, so without this it draws a generic one.
+        let icon = app.applicationIconImage();
+        // Safety: the extern option keys exist whenever AppKit is linked,
+        // and the values are the types the panel documents.
+        unsafe {
+            let mut keys = vec![
+                NSAboutPanelOptionApplicationName,
+                NSAboutPanelOptionApplicationVersion,
+            ];
+            let mut values: Vec<&AnyObject> = vec![&name, &version];
+            if let Some(icon) = icon.as_deref() {
+                keys.push(NSAboutPanelOptionApplicationIcon);
+                values.push(icon);
+            }
+            let options = NSDictionary::from_slices(&keys, &values);
+            app.orderFrontStandardAboutPanelWithOptions(&options);
+        }
+    }
 }
 
 /// The orange that marks everything comment-related. It rides on the
@@ -4283,6 +4412,54 @@ impl Render for ReviewApp {
             }))
             .on_action(cx.listener(|this, _: &Refresh, _, cx| this.reload(cx)))
             .on_action(|_: &Quit, _, cx| cx.quit())
+            // The menu stand-ins (see `commands`) reuse the shortcut
+            // handlers' methods; the toggle bodies mirror their buttons.
+            .on_action(|_: &MenuAbout, _, _| show_about())
+            .on_action(cx.listener(|this, _: &MenuSplitUnified, _, cx| this.toggle_mode(cx)))
+            .on_action(cx.listener(|this, _: &MenuWrap, _, cx| {
+                this.wrap = !this.wrap;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &MenuHideWhitespace, _, cx| {
+                this.ignore_whitespace = !this.ignore_whitespace;
+                // The patch itself changes, not just the rendering.
+                this.reload(cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &MenuCollapseAll, _, cx| this.set_all_collapsed(true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &MenuExpandAll, _, cx| this.set_all_collapsed(false, cx)),
+            )
+            .on_action(cx.listener(|this, _: &MenuFileList, _, cx| {
+                this.sidebar_visible = !this.sidebar_visible;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &MenuEarlierComments, _, cx| {
+                this.show_other_revisions = !this.show_other_revisions;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &MenuNextChange, _, cx| {
+                this.diff.update(cx, |state, cx| state.next_change(cx))
+            }))
+            .on_action(cx.listener(|this, _: &MenuPreviousChange, _, cx| {
+                this.diff.update(cx, |state, cx| state.previous_change(cx))
+            }))
+            .on_action(cx.listener(|this, _: &MenuNextFile, _, cx| this.move_file(1, cx)))
+            .on_action(cx.listener(|this, _: &MenuPreviousFile, _, cx| this.move_file(-1, cx)))
+            .on_action(cx.listener(|this, _: &MenuNextComment, _, cx| this.jump_comment(true, cx)))
+            .on_action(
+                cx.listener(|this, _: &MenuPreviousComment, _, cx| this.jump_comment(false, cx)),
+            )
+            .on_action(cx.listener(|this, _: &MenuScopeNewForMe, _, cx| {
+                this.set_scope(ScopeKind::NewForMe, cx)
+            }))
+            .on_action(cx.listener(|this, _: &MenuScopeWholeBranch, _, cx| {
+                this.set_scope(ScopeKind::WholeBranch, cx)
+            }))
+            .on_action(cx.listener(|this, _: &MenuScopeCustom, _, cx| {
+                this.set_scope(ScopeKind::Custom, cx)
+            }))
             .child(self.render_title(cx))
             .child(self.render_scope_bar(cx))
             .when(self.search_open, |root| {

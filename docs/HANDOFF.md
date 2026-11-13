@@ -42,6 +42,11 @@ Be exact about this when you report further work.
 | Performance on large branches | Not measured |
 | 2026-11-11, macOS, real repository (16-commit branch): themed window renders with bundled fonts; tree, scope bar, segmented controls, progress bar, hint bar; split view with decorated added and removed rows, signs, word emphasis; a comment card and the header controls (counts, touched-by, Reviewed) | Verified by screenshot |
 | Same session: commit picker internals (search, Space, shift-click, Show more), theme menu, comment box and Escape focus return, reactions, light and Midnight themes, narrow-window fallback, resizable panel drag | Compiled, not seen on screen |
+| X11 window icon (embedded brand PNG decoded into `WindowOptions::icon`) | Compiled on macOS; not seen - no X11 session on this machine |
+| macOS Dock icon (runtime `setApplicationIconImage:` from the embedded 1024 px PNG) | Verified on macOS by screenshot: the mark sits in the Dock at launch |
+| Application menu bar | Verified on macOS by screenshot: the bar reads diffie, Edit, View, Go, Window; the app menu shows About diffie, Services and Quit diffie with Cmd+Q; View and Go hold the declared items with no shortcut hints; About opens the standard panel with the brand mark and Version 0.1.0; "Collapse all files" from the menu collapsed every file (driven by System Events clicks) |
+| Menu items while typing in a comment box | Not exercised interactively. No menu item carries a bare-letter key equivalent (the wrapper actions are unbound), so the NSMenu has no letter to match, but typing with the box open was not driven |
+| Edit menu's native Undo/Cut/Copy/Paste on a focused input, Linux and Windows (bar stores but draws nothing) | Not exercised |
 
 ## Build, run, test
 
@@ -101,6 +106,7 @@ crates/core/tests/git_cli.rs  backend tests against a throwaway repository
 crates/app/src/
   main.rs                     arguments, window
   app.rs                      ReviewApp: all state, loading, rendering
+assets/                       brand mark (logo.svg) and app icon (icon.svg)
 docs/
   design-decisions.md         product behaviour, with Decided/Assumed/Open
   mockup/main-screen.html     visual reference
@@ -355,6 +361,24 @@ actually exercised):
 - Shortcuts: `]` `[` `}` `{` `s` `o` `t` `n` `p` `1` `2` `3` `zM` `zR` `c`
   `r`, Escape, Cmd/Ctrl+Enter, Cmd/Ctrl+R, Cmd/Ctrl+Q, Space in the commit
   list.
+- Application menu bar (`install_menus` in `app.rs`, set at init so it sees
+  the keymap): app menu with About diffie (the standard AppKit panel with
+  name and version, since the dev binary has no bundle), Services and Quit;
+  Edit with Undo through Select All as OS actions driving the native
+  selectors on the focused input; View and Go mirroring the toggles,
+  navigation and scopes; an empty "Window" menu macOS fills with the
+  standard items. Only macOS draws the bar - Linux and Windows store the
+  declaration and show nothing. Every single-letter shortcut sits behind a
+  menu-only unbound action (`MenuCollapseAll`, ...) handled by the root:
+  a bare-letter NSMenuItem key equivalent would swallow the key while the
+  reviewer types a comment, so those items show no shortcut hint.
+- Window icon: on X11 the brand mark (`assets/icon-256.png`, embedded and
+  decoded at startup) goes into `WindowOptions::icon`, which only that
+  backend reads (`_NET_WM_ICON`). Wayland takes its icon from a .desktop
+  entry matched by the `diff-review` app id (no such entry ships yet). On
+  macOS the dev binary sets the Dock icon at runtime
+  (`setApplicationIconImage:` with the embedded `assets/icon-1024.png`),
+  since GPUI never touches it and there is no bundle to carry an .icns.
 
 Not implemented or not possible, against the mockup and the design document:
 
