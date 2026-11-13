@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" width="160" alt="diffie logo: an eagle's eye">
+</p>
+
 # diffie 
 
 A native desktop app for reviewing git changes across several commits or a
