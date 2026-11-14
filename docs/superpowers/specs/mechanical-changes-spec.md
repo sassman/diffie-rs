@@ -347,7 +347,8 @@ Core tests, each on fixed old and new texts:
    includes comments).
 9. Function moved and rewritten (similarity below 0.6): plain delete and add.
 10. Three identical `fn default()` bodies removed, three added: no pairing by
-    hash alone; paired only where impl type and trait match.
+    hash alone; paired only where impl type and trait match. The added third
+    body may additionally be classed Copied of a surviving twin.
 11. File reformatted, tokens equal: Formatting for the whole file.
 12. File reformatted and one token changed: only the items with equal tokens
     are Formatting; the changed item is meaningful.
