@@ -390,8 +390,25 @@ actually exercised):
   `Reading > Diff`; `MenuToggleMechanical` for the View menu) cycles
   folded / shown / only mechanical - the third folds the *meaningful*
   runs behind "n lines to read" instead; the scope bar carries the same
-  three-state toggle plus "n lines to read · m mechanical · k
-  comment-only" from the summary sums. `%` jumps between a moved range
+  three-state toggle but no counts text (the bar overflowed; its
+  explanation truncates with an ellipsis when space runs out). Counts
+  live on the Guided roots and the progress line instead. The file panel
+  opens with a tight Files/Guided tab strip (Kit `TabBar`, underline,
+  `xsmall`, session-only choice) in place of the old "FILES · n" header;
+  Files is the unchanged tree with the mechanical bottom group, Guided
+  shows one collapsible root per class present - "only moved · n files ·
+  m lines", then renamed, comments, formatting, generated - each root the
+  same tree (same rows, selection, ticks) reduced to the files carrying
+  that class via the classified ranges; empty roots are hidden, a file
+  can sit under several roots, and while classification runs the tab
+  shows a one-line hint. Pressing a root makes it the active filter:
+  the diff re-feeds `set_files` with only that root's files (the full
+  parsed set is kept on the view; the standard collapsed set and the
+  folds are re-applied, so a manual expand does not survive, like a
+  reload). The active root is highlighted, pressing it again or
+  choosing the Files tab restores the full view, and the root's
+  chevron is a separate click target that only folds the subtree. `%`
+  jumps between a moved range
   and its counterpart (gutter selection first, hovered line as fallback),
   revealing folds on the way. Fully mechanical files start collapsed with
   the proof in their header, leave the tree for a muted bottom group

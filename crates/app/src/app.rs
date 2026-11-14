@@ -5,7 +5,7 @@
 //! from the render path.
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
@@ -46,6 +46,7 @@ use gpui_kit::component::{
     resizable::{ResizableState, h_resizable, resizable_panel},
     scroll::ScrollableElement as _,
     spinner::Spinner,
+    tab::{Tab, TabBar},
     text::TextView,
     tooltip::Tooltip,
     v_flex,
@@ -480,6 +481,25 @@ fn class_word(class: Class) -> &'static str {
         Class::Generated => "generated",
         Class::CommentOnly => "comments",
         Class::Copied => "copied",
+    }
+}
+
+/// The Guided tab's tree roots, in reading order. Each key is also the
+/// word after "only" in the root's label.
+const GUIDED_ROOTS: [&str; 5] = ["moved", "renamed", "comments", "formatting", "generated"];
+
+/// The Guided root a classified range files under. Every class lands in
+/// exactly one root; a file can still sit under several roots through its
+/// ranges.
+fn guided_root(class: Class) -> &'static str {
+    match class {
+        Class::Moved | Class::MovedAndEdited | Class::MovedContextChanged | Class::Copied => {
+            "moved"
+        }
+        Class::RenamedFile => "renamed",
+        Class::CommentOnly => "comments",
+        Class::Formatting => "formatting",
+        Class::Generated => "generated",
     }
 }
 
@@ -1155,6 +1175,15 @@ pub struct ReviewApp {
     _whole_patch: Task<()>,
     /// Folders the reviewer closed in the file panel, by full path.
     collapsed_folders: HashSet<String>,
+    /// Whether the file panel shows the Guided tab. Session-only.
+    guided_tab: bool,
+    /// Guided roots the reviewer shut, by root key.
+    collapsed_guided: HashSet<&'static str>,
+    /// The Guided root acting as the diff's file filter, if any.
+    active_guided: Option<&'static str>,
+    /// The full parsed file set, kept so a Guided filter can re-feed the
+    /// diff a subset and the full view can come back.
+    diff_files: Vec<DiffFile>,
     runs: Vec<ChangedRun>,
     /// What the classification task settled for the current load; `None`
     /// while it runs or after it was outrun by a reload.
@@ -1297,6 +1326,10 @@ impl ReviewApp {
             pending_comment_jump: false,
             _whole_patch: Task::ready(()),
             collapsed_folders: HashSet::new(),
+            guided_tab: false,
+            collapsed_guided: HashSet::new(),
+            active_guided: None,
+            diff_files: Vec::new(),
             runs: Vec::new(),
             classes: None,
             mechanical_view: MechanicalView::default(),
@@ -1445,6 +1478,10 @@ impl ReviewApp {
                     .filter(|file| file.status == FileStatus::Deleted)
                     .map(|file| file.path.clone())
                     .collect();
+                // A new load is a new view; a Guided filter from the old
+                // one would silently hide fresh files.
+                self.active_guided = None;
+                self.diff_files = loaded.files.clone();
                 self.diff.update(cx, |state, cx| {
                     state.set_files(loaded.files, cx);
                     // One rebuild; collapsing one by one froze a review
@@ -1534,6 +1571,8 @@ impl ReviewApp {
             }
             Err(error) => {
                 self.diff.update(cx, |state, cx| state.set_files([], cx));
+                self.diff_files = Vec::new();
+                self.active_guided = None;
                 self.files = Arc::default();
                 self.classes = None;
                 self.placed.clear();
@@ -1629,6 +1668,94 @@ impl ReviewApp {
         }
         self.apply_mechanical_folds(cx);
         cx.notify();
+    }
+
+    /// Files under each Guided root and the root's line total, from the
+    /// classified ranges. Indices follow the diff's file order.
+    fn guided_roots(&self) -> HashMap<&'static str, (BTreeSet<usize>, usize)> {
+        let Some(classes) = &self.classes else {
+            return HashMap::new();
+        };
+        let index_of: HashMap<&str, usize> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.path.as_str(), index))
+            .collect();
+        let mut roots: HashMap<&'static str, (BTreeSet<usize>, usize)> = HashMap::new();
+        for range in &classes.ranges {
+            let Some(&index) = index_of.get(range.path.as_str()) else {
+                continue;
+            };
+            let (members, lines) = roots.entry(guided_root(range.class)).or_default();
+            members.insert(index);
+            *lines += range.last_line - range.first_line + 1;
+        }
+        roots
+    }
+
+    /// Make one Guided root the diff's file filter, or clear it with
+    /// `None`. Presentation only: the scope, the loaded data, the counts
+    /// and the reviewed ticks are untouched.
+    fn set_guided_filter(&mut self, root: Option<&'static str>, cx: &mut Context<Self>) {
+        if self.active_guided == root {
+            return;
+        }
+        self.active_guided = root;
+        self.rebuild_diff_files(cx);
+        cx.notify();
+    }
+
+    /// Feed the diff its current file set: every file, or only the active
+    /// Guided root's. `set_files` drops per-file state, so the standard
+    /// collapsed set and the classifier's folds are re-applied; a manual
+    /// expand does not survive the switch, the same as a reload.
+    fn rebuild_diff_files(&mut self, cx: &mut Context<Self>) {
+        let member: Option<HashSet<String>> = self.active_guided.map(|root| {
+            self.guided_roots()
+                .remove(root)
+                .map(|(members, _)| {
+                    members
+                        .into_iter()
+                        .map(|index| self.files[index].path.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        let files: Vec<DiffFile> = self
+            .diff_files
+            .iter()
+            .filter(|file| {
+                member
+                    .as_ref()
+                    .is_none_or(|member| member.contains(file.path().as_ref()))
+            })
+            .cloned()
+            .collect();
+        let collapsed: Vec<SharedString> = self
+            .files
+            .iter()
+            .filter(|file| {
+                (file.state != FileState::KeptForComments
+                    && (file.state == FileState::UnchangedSinceReview
+                        || self.review_state(&file.path) == ReviewState::Reviewed))
+                    || is_generated(&file.path)
+                    || file.status == FileStatus::Deleted
+                    || self.folder_shut(&file.path)
+                    || self.classes.as_ref().is_some_and(|classes| {
+                        classes
+                            .summaries
+                            .get(&file.path)
+                            .is_some_and(|summary| summary.fully_mechanical.is_some())
+                    })
+            })
+            .map(|file| SharedString::from(file.path.clone()))
+            .collect();
+        self.diff.update(cx, |state, cx| {
+            state.set_files(files, cx);
+            state.set_files_collapsed(collapsed, true, cx);
+        });
+        self.apply_mechanical_folds(cx);
     }
 
     /// True when a placed comment touches the given lines; such a range is
@@ -4200,20 +4327,17 @@ impl ReviewApp {
                     })),
             )
             .child(self.render_commit_picker(cx))
-            .child(div().text_color(muted).child(explanation))
-            .when_some(self.classes.as_ref(), |bar, classes| {
-                let mut read = 0;
-                let mut mechanical = 0;
-                let mut comment_only = 0;
-                for summary in classes.summaries.values() {
-                    read += summary.meaningful_added + summary.meaningful_removed;
-                    mechanical += summary.mechanical_lines;
-                    comment_only += summary.comment_only_lines;
-                }
-                bar.child(div().text_color(muted).child(format!(
-                    "{read} lines to read · {mechanical} mechanical · {comment_only} comment-only"
-                )))
-                .child(
+            // Truncates before anything else in the bar gives way; the line
+            // counts live on the Guided roots and the progress line.
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(muted)
+                    .child(explanation),
+            )
+            .when(self.classes.is_some(), |bar| {
+                bar.child(
                     ToggleGroup::new("mechanical-view")
                         .outline()
                         .segmented()
@@ -4463,7 +4587,7 @@ impl ReviewApp {
             .any(|(at, _)| self.collapsed_folders.contains(&path[..at]))
     }
 
-    fn render_sidebar(&self, reviewed: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         // Folder rows over indented files, in the diff's order — which the
         // load sorts into the classic tree (see `tree_order`), so panel and
@@ -4490,75 +4614,132 @@ impl ReviewApp {
                 index: usize,
                 word: &'static str,
             },
+            /// A Guided class root, "only moved · 4 files · 230 lines".
+            GuidedRoot {
+                key: &'static str,
+                label: SharedString,
+                collapsed: bool,
+            },
         }
-        // Fully mechanical files leave the tree for one muted group at the
-        // bottom: they are not where the reading happens.
-        let mechanical_class: HashMap<&str, Class> = self
-            .classes
-            .as_ref()
-            .map(|classes| {
-                classes
-                    .summaries
-                    .values()
-                    .filter_map(|summary| {
-                        summary
-                            .fully_mechanical
-                            .map(|class| (summary.path.as_str(), class))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut rows = Vec::new();
-        let mut previous: Vec<String> = Vec::new();
-        for (index, file) in self.files.iter().enumerate() {
-            if mechanical_class.contains_key(file.path.as_str()) {
-                continue;
-            }
-            let mut folders: Vec<String> = file.path.split('/').map(String::from).collect();
-            folders.pop();
-            let common = previous
-                .iter()
-                .zip(&folders)
-                .take_while(|(kept, part)| kept == part)
-                .count();
-            // The first collapsed ancestor hides everything beneath it; its
-            // own row stays, showing the closed folder.
-            let shut = (0..folders.len()).find(|depth| {
-                self.collapsed_folders
-                    .contains(folders[..=*depth].join("/").as_str())
-            });
-            for (depth, part) in folders.iter().enumerate().skip(common) {
-                if shut.is_some_and(|shut| depth > shut) {
-                    break;
-                }
-                rows.push(TreeRow::Folder {
-                    label: format!("{part} /").into(),
-                    path: folders[..=depth].join("/").into(),
-                    depth,
-                    collapsed: shut == Some(depth),
+        // The folder tree over the given files, as rows. `base` indents the
+        // whole run, so the same tree nests under a Guided root.
+        let tree_rows = |indices: &[usize], base: usize| {
+            let mut rows = Vec::new();
+            let mut previous: Vec<String> = Vec::new();
+            for &index in indices {
+                let file = &self.files[index];
+                let mut folders: Vec<String> = file.path.split('/').map(String::from).collect();
+                folders.pop();
+                let common = previous
+                    .iter()
+                    .zip(&folders)
+                    .take_while(|(kept, part)| kept == part)
+                    .count();
+                // The first collapsed ancestor hides everything beneath it;
+                // its own row stays, showing the closed folder.
+                let shut = (0..folders.len()).find(|depth| {
+                    self.collapsed_folders
+                        .contains(folders[..=*depth].join("/").as_str())
                 });
-            }
-            if shut.is_none() {
-                rows.push(TreeRow::File {
-                    index,
-                    depth: folders.len(),
-                });
-            }
-            previous = folders;
-        }
-        if !mechanical_class.is_empty() {
-            rows.push(TreeRow::MechanicalHeader {
-                count: mechanical_class.len(),
-            });
-            for (index, file) in self.files.iter().enumerate() {
-                if let Some(class) = mechanical_class.get(file.path.as_str()) {
-                    rows.push(TreeRow::Mechanical {
-                        index,
-                        word: class_word(*class),
+                for (depth, part) in folders.iter().enumerate().skip(common) {
+                    if shut.is_some_and(|shut| depth > shut) {
+                        break;
+                    }
+                    rows.push(TreeRow::Folder {
+                        label: format!("{part} /").into(),
+                        path: folders[..=depth].join("/").into(),
+                        depth: depth + base,
+                        collapsed: shut == Some(depth),
                     });
                 }
+                if shut.is_none() {
+                    rows.push(TreeRow::File {
+                        index,
+                        depth: folders.len() + base,
+                    });
+                }
+                previous = folders;
             }
-        }
+            rows
+        };
+        let rows = if self.guided_tab {
+            // One root per class present, each the same tree filtered to the
+            // files carrying that class. A file can sit under several roots.
+            let mut rows = Vec::new();
+            if self.classes.is_some() {
+                let mut roots = self.guided_roots();
+                for root in GUIDED_ROOTS {
+                    let Some((members, lines)) = roots.remove(root) else {
+                        continue;
+                    };
+                    let collapsed = self.collapsed_guided.contains(root);
+                    let files = members.len();
+                    rows.push(TreeRow::GuidedRoot {
+                        key: root,
+                        label: format!(
+                            "only {root} · {files} file{} · {lines} line{}",
+                            if files == 1 { "" } else { "s" },
+                            if lines == 1 { "" } else { "s" },
+                        )
+                        .into(),
+                        collapsed,
+                    });
+                    if !collapsed {
+                        let indices: Vec<usize> = members.into_iter().collect();
+                        rows.extend(tree_rows(&indices, 1));
+                    }
+                }
+            }
+            rows
+        } else {
+            // Fully mechanical files leave the tree for one muted group at
+            // the bottom: they are not where the reading happens.
+            let mechanical_class: HashMap<&str, Class> = self
+                .classes
+                .as_ref()
+                .map(|classes| {
+                    classes
+                        .summaries
+                        .values()
+                        .filter_map(|summary| {
+                            summary
+                                .fully_mechanical
+                                .map(|class| (summary.path.as_str(), class))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let indices: Vec<usize> = self
+                .files
+                .iter()
+                .enumerate()
+                .filter(|(_, file)| !mechanical_class.contains_key(file.path.as_str()))
+                .map(|(index, _)| index)
+                .collect();
+            let mut rows = tree_rows(&indices, 0);
+            if !mechanical_class.is_empty() {
+                rows.push(TreeRow::MechanicalHeader {
+                    count: mechanical_class.len(),
+                });
+                for (index, file) in self.files.iter().enumerate() {
+                    if let Some(class) = mechanical_class.get(file.path.as_str()) {
+                        rows.push(TreeRow::Mechanical {
+                            index,
+                            word: class_word(*class),
+                        });
+                    }
+                }
+            }
+            rows
+        };
+        // The Guided tab explains an empty list instead of showing nothing.
+        let guided_hint = (self.guided_tab && rows.is_empty()).then(|| {
+            if self.classes.is_none() {
+                "Classification has not finished for this scope"
+            } else {
+                "No mechanical changes in this scope"
+            }
+        });
         let rows = Rc::new(rows);
 
         v_flex()
@@ -4572,19 +4753,28 @@ impl ReviewApp {
             .border_color(cx.theme().border)
             .bg(cx.theme().sidebar)
             .child(
+                // The reviewed-of-total counts live on the progress line;
+                // the header row is the Files/Guided tab strip.
                 h_flex()
-                    .h(px(22.))
+                    .h(px(24.))
                     .px(px(4.))
                     .justify_between()
                     .child(
-                        div()
-                            .text_size(px(10.5))
-                            .font_semibold()
-                            .text_color(muted)
-                            .child(format!(
-                                "FILES · {} · {reviewed} REVIEWED",
-                                self.files.len()
-                            )),
+                        TabBar::new("file-panel-tab")
+                            .underline()
+                            .xsmall()
+                            .selected_index(if self.guided_tab { 1 } else { 0 })
+                            .on_click(cx.listener(|this, index: &usize, _, cx| {
+                                this.guided_tab = *index == 1;
+                                if !this.guided_tab {
+                                    // Files shows everything; a Guided
+                                    // filter must not hide files there.
+                                    this.set_guided_filter(None, cx);
+                                }
+                                cx.notify();
+                            }))
+                            .child(Tab::new().label("Files"))
+                            .child(Tab::new().label("Guided")),
                     )
                     .child(
                         Button::new("hide-files")
@@ -4594,7 +4784,15 @@ impl ReviewApp {
                             .on_click(cx.listener(|this, _, _, cx| this.set_sidebar(false, cx))),
                     ),
             )
-            .child(
+            .child(if let Some(hint) = guided_hint {
+                div()
+                    .px(px(6.))
+                    .py(px(4.))
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .child(hint)
+                    .into_any_element()
+            } else {
                 // Virtualized: with thousands of changed files, an element
                 // per row each frame froze the window.
                 gpui_kit::uniform_list(
@@ -4674,6 +4872,63 @@ impl ReviewApp {
                                 TreeRow::Mechanical { index, word } => {
                                     this.render_file_row(*index, 0, Some(word), cx)
                                 }
+                                TreeRow::GuidedRoot {
+                                    key,
+                                    label,
+                                    collapsed,
+                                } => {
+                                    let key = *key;
+                                    let collapsed = *collapsed;
+                                    let active = this.active_guided == Some(key);
+                                    h_flex()
+                                        .id(SharedString::from(format!("guided-{key}")))
+                                        .h(px(22.))
+                                        .gap(px(4.))
+                                        .pl(px(4.))
+                                        .rounded(px(4.))
+                                        .cursor_pointer()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .when(active, |row| row.bg(cx.theme().accent))
+                                        .hover(|row| row.bg(cx.theme().list_hover))
+                                        .child(
+                                            // Its own target: the chevron
+                                            // folds the subtree without
+                                            // touching the filter.
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "guided-fold-{key}"
+                                                )))
+                                                .flex_none()
+                                                .child(
+                                                    Icon::new(if collapsed {
+                                                        Lucide::ChevronRight
+                                                    } else {
+                                                        Lucide::ChevronDown
+                                                    })
+                                                    .xsmall(),
+                                                )
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    if !this.collapsed_guided.remove(key) {
+                                                        this.collapsed_guided.insert(key);
+                                                    }
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(label.clone())
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            // The row is the filter switch;
+                                            // the active root pressed again
+                                            // restores the full view.
+                                            let next = if this.active_guided == Some(key) {
+                                                None
+                                            } else {
+                                                Some(key)
+                                            };
+                                            this.set_guided_filter(next, cx);
+                                        }))
+                                        .into_any_element()
+                                }
                             })
                             .collect::<Vec<_>>()
                     }),
@@ -4682,8 +4937,9 @@ impl ReviewApp {
                 // main navigation and earns the extra legibility.
                 .text_size(px(12.5))
                 .flex_1()
-                .min_h_0(),
-            )
+                .min_h_0()
+                .into_any_element()
+            })
     }
 
     fn render_diff(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -6220,7 +6476,7 @@ impl Render for ReviewApp {
                                     resizable_panel()
                                         .size(px(240.))
                                         .size_range(px(160.)..px(420.))
-                                        .child(self.render_sidebar(reviewed, cx)),
+                                        .child(self.render_sidebar(cx)),
                                 )
                                 .child(resizable_panel().child(diff_column)),
                         )
