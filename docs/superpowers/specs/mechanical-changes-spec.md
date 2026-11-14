@@ -223,33 +223,37 @@ Target for a warm cache: under 100 ms for 300 changed files. Cold: under 2 s.
 
 ## 6. Presentation
 
-**Scope bar.** After the commit range: "412 lines to read · 1,930 mechanical
-· 56 comment-only", and a toggle with three states: folded, shown, only
-mechanical. **Decided:** folded is the default. Key: `m` cycles (free today;
-the menu entry needs an unbound `Menu*` wrapper action like the other
-single-letter bindings). The choice is remembered - session-only until
-settings persistence exists (section 7). The toggle is the standalone form;
-the focus lenses below absorb it once they land.
+**Scope bar.** After the commit range: a toggle with three states: folded,
+shown, only mechanical - no counts text in the bar; counts live on the
+Guided roots and the progress line. **Decided:** folded is the default.
+Key: `m` cycles (free today; the menu entry needs an unbound `Menu*`
+wrapper action like the other single-letter bindings). The choice is
+remembered - session-only until settings persistence exists (section 7).
 
-**Focus lenses (Decided; an integration phase, after systematic-edits
-lands).** The review guide panel from the systematic-edits feature gains
-one entry per class group, each with its line count: "Important changes"
-(meaningful only - the default lens, the same view as the folded default),
-"Moved code", "Renamed files", "Formatting", "Comment changes",
-"Generated". Selecting an entry filters the main panel, so the reviewer
-jumps between prefiltered focus areas.
+**Guided tab (Decided, owner, 2026-11-15).** The file panel has two tight
+tabs on the panel itself, "Files" and "Guided" - a tab strip, not a toggle
+button; file-header height, `xsmall`. "Files" is today's tree, including
+the mechanical bottom group. "Guided" shows one tree root per class
+present in the diff - "only moved", "only renamed", "only comments",
+"only formatting", "only generated" - each root a filter context: under
+it, the same file tree reduced to the files carrying that class, the root
+showing its file and line counts. A root with nothing under it is hidden.
+Selecting a file there behaves exactly like selecting it in Files; the
+root is only an entry point into the same tree, filtered. Pressing a
+root makes it the active filter: the diff panel shows only that root's
+files until the root is pressed again or the Files tab is chosen. The
+active root is highlighted; its chevron is a separate target that folds
+the subtree without touching the filter. The scope bar
+carries no counts text - counts live on the roots and the progress line.
+The review-guide content from systematic-edits can join this tab later;
+the guided view no longer waits for that branch.
 
-- Files and guide share one side panel, switched by a tight tab strip on
-  the panel itself, not a toggle button. The tabs follow the density rules
-  (file-header height, `xsmall`).
-- A lens is not a scope. It filters the presentation of the current scope's
-  diff; the active lens is shown in the panel and echoed in the scope bar,
-  never silently. Reviewed ticks stay per file, per content id,
-  lens-independent.
-- Fold, never remove, read per lens: out-of-lens content folds or mutes,
-  never vanishes, and a commented range stays reachable in every lens.
-- Once lenses exist, `m` cycles them and the comment-only filter is simply
-  the "Comment changes" lens.
+- A filter is not a scope. It narrows the presentation of the current
+  scope's diff, shown by the active tab, never silently. Reviewed ticks
+  stay per file, per content id, filter-independent.
+- Fold, never remove: a commented range stays reachable from every root.
+- `m` keeps cycling the diff toggle (folded, shown, only mechanical) in
+  the scope bar.
 
 **File panel.** Fully mechanical files move to a group at the bottom,
 "Mechanical · 7", muted, each with a one-word class (moved, renamed,
@@ -281,8 +285,8 @@ proof and a jump, through the Kit's header slots
   for example "moved from `impl Cache` to `impl Index`: `Self` now means a
   different type".
 - Comment-only: tint and the label "comment text only". Never folded by
-  default; the "Comment changes" lens folds those ranges as a group (a
-  plain menu entry stands in until phase 4).
+  default; the Guided "only comments" root narrows the tree to those files
+  (a plain menu entry folds the ranges until phase 4).
 
 **Navigation.** `]` and `[` skip folded ranges already: the Kit computes
 `change_rows` after folding. A new key jumps between a moved range and its
@@ -369,8 +373,8 @@ the next load, and the repository gains no objects; the `similarity index`
 of a rename is parsed.
 
 UI checks, by hand: folded by default, `m` cycles, jump works in both
-directions, a commented range does not fold, counts in the scope bar equal
-the sum over files.
+directions, a commented range does not fold, counts on the Guided roots
+equal the sum over files.
 
 ## 10. Phases
 
@@ -382,8 +386,8 @@ Each phase is usable alone.
 2. **Pure moves, formatting, comment-only.** The parser, the cache, steps 1
    to 3, the tint, folding, the jump key. Retires `moved_blocks`.
 3. **Moved and edited, copies.** Steps 4 and 5 and the inner diff.
-4. **Focus lenses.** After systematic-edits lands: the guide-panel entries
-   per class, the files/guide tab strip, `m` cycles lenses.
+4. **Guided tab.** The Files/Guided tab strip and the class-filtered tree
+   roots.
 
 ## 11. Settled in review (owner, 2026-11-14)
 
@@ -401,9 +405,10 @@ Each phase is usable alone.
 7. The Kit question is answered in the code: the owner's fork folds changed
    rows (`DiffFold`, `set_folds`) and decorations override backgrounds. No
    fallback needed.
-8. Class filters surface as focus lenses in the review guide panel once
-   systematic-edits lands; files and guide are switched by a tight tab
-   strip on the panel, not a toggle button.
+8. Class filters surface as a Guided tab in the file panel: one tree root
+   per class, each filtering the same tree; files and guided are switched
+   by a tight tab strip on the panel, not a toggle button (owner,
+   2026-11-15).
 
 ## 12. Open questions
 
@@ -411,5 +416,6 @@ Each phase is usable alone.
    3-character non-trivial line. All guesses; tune on the owner's
    repositories.
 2. **Cache eviction**: `review/.cache/` grows per blob; when and how to
-   prune. (The comment-only filter question is gone: it is the "Comment
-   changes" lens. Until phase 4, a plain menu entry folds those ranges.)
+   prune. (The comment-only filter question is gone: it is the Guided
+   "only comments" root. Until phase 4, a plain menu entry folds those
+   ranges.)
