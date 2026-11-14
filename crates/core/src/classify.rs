@@ -4,9 +4,9 @@
 //! and its step 0: the file rules that need no parser - Generated, Renamed
 //! file, and whitespace-only Formatting. A file settled by
 //! [`classify_file_rules`] skips every later step. The parser-based steps -
-//! item lists, formatting and comment-only in place, pure moves - live in
-//! the submodules and run behind [`classify`], the one entry point that
-//! sees all changed files at once.
+//! item lists, formatting and comment-only in place, moves, moved-and-edited
+//! pairs and copies - live in the submodules and run behind [`classify`],
+//! the one entry point that sees all changed files at once.
 //!
 //! Everything here is a pure function of texts, changed regions and
 //! caller-resolved facts (rename similarity, `.gitattributes`, blob ids
@@ -14,6 +14,7 @@
 //! repository.
 
 mod cache;
+mod histogram;
 mod items;
 mod pipeline;
 
