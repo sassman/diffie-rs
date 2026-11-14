@@ -44,6 +44,33 @@ fn exit_usage(message: &str) -> ! {
     std::process::exit(2);
 }
 
+/// A branch only the remotes know resolves when exactly one remote has it;
+/// several are a question the user must answer, not a guess. `missing` words
+/// the no-remote case, because the callers know different things: a PR base
+/// exists upstream but is not fetched, while an arbitrary revision may not
+/// exist anywhere.
+fn remote_ref(backend: &GitCli, branch: &str, missing: impl FnOnce() -> String) -> String {
+    let remotes = backend.remotes_with_branch(branch).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(1);
+    });
+    match remotes.as_slice() {
+        [remote] => format!("{remote}/{branch}"),
+        [] => {
+            eprintln!("{}", missing());
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!(
+                "`{branch}` is on more than one remote ({}); say which, e.g. `{}/{branch}`.",
+                remotes.join(", "),
+                remotes[0]
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     // RUST_LOG picks the filter (e.g. diffie=trace for the selection flow);
     // without it only warnings reach stderr.
@@ -287,34 +314,15 @@ fn main() {
             // can lag.
             PrState::Open | PrState::Closed => {
                 let branch = &pull.target_branch;
-                let remotes = backend.remotes_with_branch(branch).unwrap_or_else(|error| {
-                    eprintln!("{error}");
-                    std::process::exit(1);
-                });
-                match remotes.as_slice() {
-                    [remote] => format!("{remote}/{branch}"),
-                    [] => {
-                        eprintln!(
-                            "`{branch}` is not fetched here; run \
-                             `git fetch {remote_hint} {branch}` and retry - \
-                             diffie never fetches."
-                        );
-                        std::process::exit(1);
-                    }
-                    _ => {
-                        eprintln!(
-                            "`{branch}` is on more than one remote ({}); say which, e.g. `{}/{branch}`.",
-                            remotes.join(", "),
-                            remotes[0]
-                        );
-                        std::process::exit(1);
-                    }
-                }
+                remote_ref(&backend, branch, || {
+                    format!(
+                        "`{branch}` is not fetched here; run \
+                         `git fetch {remote_hint} {branch}` and retry - \
+                         diffie never fetches."
+                    )
+                })
             }
         };
-        // Sending comments back to the pull request needs the number;
-        // nothing stores it yet.
-        let _pr_number = pull.number;
         Comparison {
             source: pull.source_branch,
             target: pull.target_branch,
@@ -390,27 +398,9 @@ fn main() {
         if exists {
             return revision.to_string();
         }
-        let remotes = backend
-            .remotes_with_branch(revision)
-            .unwrap_or_else(|error| {
-                eprintln!("{error}");
-                std::process::exit(1);
-            });
-        match remotes.as_slice() {
-            [remote] => format!("{remote}/{revision}"),
-            [] => {
-                eprintln!("`{revision}` is not a revision here, and no remote has it.");
-                std::process::exit(1);
-            }
-            _ => {
-                eprintln!(
-                    "`{revision}` is on more than one remote ({}); say which, e.g. `{}/{revision}`.",
-                    remotes.join(", "),
-                    remotes[0]
-                );
-                std::process::exit(1);
-            }
-        }
+        remote_ref(&backend, revision, || {
+            format!("`{revision}` is not a revision here, and no remote has it.")
+        })
     };
     let comparison = Comparison {
         // The uncommitted pseudo-source names the working tree, not a ref,
@@ -515,7 +505,8 @@ fn main() {
                 }
             })
             .detach();
-            gpui_kit::open_window(options, cx, |window, cx| {
+            // Like every startup failure: say it and exit, never panic.
+            if let Err(error) = gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| {
                     app::ReviewApp::new(
                         backend,
@@ -526,8 +517,10 @@ fn main() {
                         cx,
                     )
                 })
-            })
-            .expect("failed to open the review window");
+            }) {
+                eprintln!("could not open the review window: {error}");
+                std::process::exit(1);
+            }
             cx.activate(true);
         });
 }

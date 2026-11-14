@@ -42,6 +42,7 @@ use gpui_kit::component::{
     scroll::ScrollableElement as _,
     spinner::Spinner,
     text::TextView,
+    tooltip::Tooltip,
     v_flex,
 };
 use gpui_kit::{
@@ -297,58 +298,66 @@ fn comment_accent(cx: &App) -> Hsla {
     cx.theme().chart_4
 }
 
-/// Added and removed line backgrounds for the diff.
-///
-/// The Diff's own tint is `success`/`danger` at a fixed 12% over the
-/// background, which can only produce washed-out pastels. The mockup wants
-/// dark saturated fills, so the app paints its own row decorations and keeps
-/// the tint off. The values are per theme; unknown themes fall back to the
-/// wash the tint would have given.
-fn diff_backgrounds(cx: &App) -> (Hsla, Hsla) {
-    let theme = cx.theme();
-    match theme.theme_name().as_ref() {
-        "Midnight" => (rgb(0x10291c).into(), rgb(0x33161a).into()),
-        "Gruvbox Dark" => (rgb(0x3d4220).into(), rgb(0x472322).into()),
-        "Light" | "Default Light" => (rgb(0xe6ffec).into(), rgb(0xffebe9).into()),
-        _ => {
-            let mix = |over: Hsla| {
-                let mut color = over;
-                color.a = 0.12;
-                color
-            };
-            (mix(theme.success), mix(theme.danger))
-        }
+/// The app's side enum mapped onto the Kit's. Both types are foreign, so
+/// `From` cannot bridge them here.
+fn diff_side(side: Side) -> DiffSide {
+    match side {
+        Side::Old => DiffSide::Original,
+        Side::New => DiffSide::Modified,
     }
 }
 
-/// The fill behind a line a search hit sits on.
-///
-/// Amber, the conventional search colour, so a hit stands apart from the
-/// green and red diff fills and the blue accent. A faint tint was rejected:
-/// it drowned in the added and removed fills. The values are picked per
-/// theme to sit clearly off the background while keeping the theme's
-/// foreground readable; unknown themes get a warning-coloured wash.
-fn search_background(cx: &App) -> Hsla {
-    let theme = cx.theme();
-    match theme.theme_name().as_ref() {
-        "Midnight" => rgb(0x4a3a10).into(),
-        "Gruvbox Dark" => rgb(0x6b5618).into(),
-        "Light" | "Default Light" => rgb(0xffd866).into(),
-        _ => theme.warning.opacity(0.35),
-    }
+/// Per-theme fills the Kit has no tokens for, in one table so adding a theme
+/// means extending one match.
+struct ThemePalette {
+    /// Added and removed row fills. The Diff's own tint is `success`/`danger`
+    /// at a fixed 12% over the background, which can only produce washed-out
+    /// pastels; the mockup wants dark saturated fills, so the app paints its
+    /// own row decorations and keeps the tint off.
+    added: Hsla,
+    removed: Hsla,
+    /// The fill behind a line a search hit sits on. Amber, the conventional
+    /// search colour, so a hit stands apart from the green and red diff
+    /// fills and the blue accent. A faint tint was rejected: it drowned in
+    /// the added and removed fills.
+    search_line: Hsla,
+    /// The matched characters inside a hit line: a saturated amber step
+    /// above `search_line`, so the eye lands on the match itself, with dark
+    /// text because light-on-amber reads poorly in every theme.
+    search_match: Hsla,
+    search_match_foreground: Hsla,
 }
 
-/// The fill and text color of the matched characters inside a search-hit
-/// line: a saturated amber step above [`search_background`], so the eye
-/// lands on the match itself, with dark text because light-on-amber reads
-/// poorly in every theme.
-fn search_match_colors(cx: &App) -> (Hsla, Hsla) {
+/// Unknown themes fall back to token washes: the tint the Diff would have
+/// given for rows, and warning-based search colors.
+fn palette(cx: &App) -> ThemePalette {
     let theme = cx.theme();
-    match theme.theme_name().as_ref() {
-        "Midnight" => (rgb(0xffc247).into(), rgb(0x241a02).into()),
-        "Gruvbox Dark" => (rgb(0xfabd2f).into(), rgb(0x282828).into()),
-        "Light" | "Default Light" => (rgb(0xf0940a).into(), rgb(0x231302).into()),
-        _ => (theme.warning, theme.background),
+    let (added, removed, search_line, search_match, search_match_foreground) =
+        match theme.theme_name().as_ref() {
+            "Midnight" => (0x10291c, 0x33161a, 0x4a3a10, 0xffc247, 0x241a02),
+            "Gruvbox Dark" => (0x3d4220, 0x472322, 0x6b5618, 0xfabd2f, 0x282828),
+            "Light" | "Default Light" => (0xe6ffec, 0xffebe9, 0xffd866, 0xf0940a, 0x231302),
+            _ => {
+                let wash = |over: Hsla| {
+                    let mut color = over;
+                    color.a = 0.12;
+                    color
+                };
+                return ThemePalette {
+                    added: wash(theme.success),
+                    removed: wash(theme.danger),
+                    search_line: theme.warning.opacity(0.35),
+                    search_match: theme.warning,
+                    search_match_foreground: theme.background,
+                };
+            }
+        };
+    ThemePalette {
+        added: rgb(added).into(),
+        removed: rgb(removed).into(),
+        search_line: rgb(search_line).into(),
+        search_match: rgb(search_match).into(),
+        search_match_foreground: rgb(search_match_foreground).into(),
     }
 }
 
@@ -558,6 +567,26 @@ enum ScopeKind {
     Custom,
 }
 
+/// One group of the commit picker: its heading row and the commits it lists.
+struct PickerSection {
+    title: &'static str,
+    range: std::ops::Range<usize>,
+    heading_color: Hsla,
+    bordered: bool,
+    expanded: bool,
+    with_uncommitted: bool,
+}
+
+/// What every picker section shares: the typed filter, which commits read as
+/// skipped, the comment count per commit, and one clock reading for the age
+/// column.
+struct PickerContext {
+    query: String,
+    skipped: HashSet<Oid>,
+    comment_counts: HashMap<Oid, usize>,
+    now: i64,
+}
+
 /// Where a comment sits in the current view.
 #[derive(Clone)]
 struct Placed {
@@ -686,6 +715,7 @@ struct Answer {
 
 struct FileView {
     state: ReviewState,
+    status: FileStatus,
     note: Option<SharedString>,
     additions: usize,
     deletions: usize,
@@ -696,6 +726,9 @@ struct FileView {
     in_scope: usize,
     /// The diff on screen carries uncommitted changes of this file.
     uncommitted: bool,
+    /// Short hash of the commit that deleted the file. `None` while the
+    /// deletion only exists in the working tree.
+    removed_at: Option<SharedString>,
     comments: usize,
     other_revision: usize,
     /// How many of the comments sit on code rewritten since they were made.
@@ -792,7 +825,24 @@ pub struct ReviewApp {
     sidebar_visible: bool,
     loading: bool,
     error: Option<SharedString>,
+    /// A failed side task (a save, the whole-branch patch, a blame), said in
+    /// the status bar without replacing a working diff. `error` stays
+    /// reserved for a failed load, which leaves nothing to show.
+    notice: Option<SharedString>,
     revision: usize,
+    /// Bumped on every change to the reviewer's own file. A finishing load
+    /// compares it with the value it started from, so a reload never rolls
+    /// back what the reviewer did while it ran.
+    review_generation: usize,
+    /// One background write at a time: parallel detached writes to the same
+    /// path can land out of order and leave stale content on disk. A save
+    /// during a save only marks pending; the follow-up write clones the file
+    /// at its newest.
+    save_pending: bool,
+    save_running: bool,
+    /// Discards finished searches a newer query has outrun.
+    search_generation: usize,
+    _search: Task<()>,
     _load: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -897,7 +947,13 @@ impl ReviewApp {
             sidebar_visible: true,
             loading: false,
             error: None,
+            notice: None,
             revision: 0,
+            review_generation: 0,
+            save_pending: false,
+            save_running: false,
+            search_generation: 0,
+            _search: Task::ready(()),
             _load: Task::ready(()),
             _subscriptions: subscriptions,
         };
@@ -923,11 +979,13 @@ impl ReviewApp {
         let revision = self.revision;
         self.loading = true;
         self.error = None;
+        self.notice = None;
         self.draft = None;
         let backend = self.backend.clone();
         let comparison = self.comparison.clone();
         let scope = self.core_scope();
         let mine = self.reviews.as_ref().map(|set| set.mine.clone());
+        let generation = self.review_generation;
         let ignore_whitespace = self.ignore_whitespace;
         tracing::debug!(revision, "reload requested");
         self._load = cx.spawn(async move |this, cx| {
@@ -938,12 +996,20 @@ impl ReviewApp {
                     result
                 })
                 .await;
-            let _ = this.update(cx, |this, cx| this.install(revision, result, cx));
+            let _ = this.update(cx, |this, cx| {
+                this.install(revision, generation, result, cx)
+            });
         });
         cx.notify();
     }
 
-    fn install(&mut self, revision: usize, result: Result<Loaded, String>, cx: &mut Context<Self>) {
+    fn install(
+        &mut self,
+        revision: usize,
+        generation: usize,
+        result: Result<Loaded, String>,
+        cx: &mut Context<Self>,
+    ) {
         // A newer request is on its way; this answer is stale.
         if self.revision != revision {
             return;
@@ -979,6 +1045,15 @@ impl ReviewApp {
                     .filter(|file| is_generated(&file.path))
                     .map(|file| file.path.clone())
                     .collect();
+                // A removed file's diff is all deletions; the header says so,
+                // and expanding it is opt-in like a generated file.
+                let removed: Vec<String> = loaded
+                    .patch
+                    .files
+                    .iter()
+                    .filter(|file| file.status == FileStatus::Deleted)
+                    .map(|file| file.path.clone())
+                    .collect();
                 self.diff.update(cx, |state, cx| {
                     state.set_files(loaded.files, cx);
                     // One rebuild; collapsing one by one froze a review
@@ -987,6 +1062,7 @@ impl ReviewApp {
                         reviewed
                             .iter()
                             .chain(&generated)
+                            .chain(&removed)
                             .map(|path| SharedString::from(path.clone())),
                         true,
                         cx,
@@ -1039,6 +1115,28 @@ impl ReviewApp {
                 self.uncommitted_paths = loaded.uncommitted_paths;
                 self.new_side = Some(loaded.patch.new_side);
                 self.blobs = loaded.blobs;
+                // The reviewer kept working while the load ran: the live
+                // review file is newer than the snapshot the load carried,
+                // and installing that snapshot would wipe those edits from
+                // memory - and from disk with the next save. Keep the live
+                // file; placements for comments the load never saw ride
+                // along from the old view and correct on the next reload.
+                if self.review_generation != generation {
+                    let known: HashSet<String> = loaded
+                        .reviews
+                        .threads()
+                        .iter()
+                        .map(|thread| thread.comment.id.clone())
+                        .collect();
+                    if let Some(live) = self.reviews.take() {
+                        loaded.reviews.mine = live.mine;
+                    }
+                    loaded.placed.extend(
+                        self.placed
+                            .drain(..)
+                            .filter(|placed| !known.contains(&placed.id)),
+                    );
+                }
                 self.reviews = Some(loaded.reviews);
                 self.review_path = loaded.review_path;
                 self.placed = loaded.placed;
@@ -1070,10 +1168,25 @@ impl ReviewApp {
     }
 
     /// Persist the reviewer's own file off the main thread.
+    ///
+    /// Every change to the file funnels through here, which makes this the
+    /// place the generation ticks (see `review_generation`).
     fn save_review(&mut self, cx: &mut Context<Self>) {
+        self.review_generation += 1;
+        self.save_pending = true;
+        self.write_review(cx);
+    }
+
+    fn write_review(&mut self, cx: &mut Context<Self>) {
+        if self.save_running || !self.save_pending {
+            return;
+        }
         let Some(mut file) = self.reviews.as_ref().map(|set| set.mine.clone()) else {
+            self.save_pending = false;
             return;
         };
+        self.save_pending = false;
+        self.save_running = true;
         let path = self.review_path.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -1081,12 +1194,19 @@ impl ReviewApp {
                     async move { file.save(&path).map_err(|error| error.to_string()) },
                 )
                 .await;
-            if let Err(error) = result {
-                let _ = this.update(cx, |this, cx| {
-                    this.error = Some(error.into());
-                    cx.notify();
-                });
-            }
+            let _ = this.update(cx, |this, cx| {
+                this.save_running = false;
+                match result {
+                    // A failed save must not replace a working diff; the
+                    // status bar carries the complaint instead.
+                    Err(error) => {
+                        this.notice = Some(format!("review not saved: {error}").into());
+                    }
+                    Ok(()) => this.notice = None,
+                }
+                this.write_review(cx);
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -1269,10 +1389,7 @@ impl ReviewApp {
         else {
             return;
         };
-        let side = match placed.side {
-            Side::Old => DiffSide::Original,
-            Side::New => DiffSide::Modified,
-        };
+        let side = diff_side(placed.side);
         let position = DiffLinePosition::new(placed.path.clone(), side, placed.line);
         self.diff
             .update(cx, |state, cx| state.scroll_to_line(position, cx));
@@ -1355,10 +1472,7 @@ impl ReviewApp {
             (None, false) => stops.len() - 1,
         };
         let (id, path, side, line) = stops[next].clone();
-        let side = match side {
-            Side::Old => DiffSide::Original,
-            Side::New => DiffSide::Modified,
-        };
+        let side = diff_side(side);
         self.comment_cursor = Some(id);
         let path = SharedString::from(path);
         self.diff.update(cx, |state, cx| {
@@ -1436,6 +1550,35 @@ impl ReviewApp {
             self.diff
                 .update(cx, |state, cx| state.set_mode(effective, cx));
         }
+    }
+
+    // One body per toggle: the title-bar button, the shortcut and the menu
+    // item must never drift apart.
+
+    fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
+        self.wrap = !self.wrap;
+        cx.notify();
+    }
+
+    fn toggle_whitespace(&mut self, cx: &mut Context<Self>) {
+        self.ignore_whitespace = !self.ignore_whitespace;
+        // The patch itself changes, not just the rendering: a reload is
+        // required.
+        self.reload(cx);
+    }
+
+    fn toggle_other_revisions(&mut self, cx: &mut Context<Self>) {
+        self.show_other_revisions = !self.show_other_revisions;
+        cx.notify();
+    }
+
+    fn set_sidebar(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.sidebar_visible = visible;
+        cx.notify();
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.set_sidebar(!self.sidebar_visible, cx);
     }
 
     // ---- comments --------------------------------------------------------
@@ -1519,6 +1662,7 @@ impl ReviewApp {
         let path = range.path().to_string();
         let line = range.end();
         let on_new_side = range.end_side() == DiffSide::Modified;
+        let revision = self.revision;
         cx.spawn(async move |this, cx| {
             let origin = cx
                 .background_spawn(async move {
@@ -1531,9 +1675,16 @@ impl ReviewApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // A stale answer must not label the wrong box: a reload
+                // changed what the lines mean, and a draft cancelled and
+                // reopened elsewhere is a different question.
+                if this.revision != revision {
+                    return;
+                }
                 let commit = origin.map_or(fallback, |origin| origin.commit);
                 if let Some(draft) = this.draft.as_mut()
                     && draft.editing.is_none()
+                    && draft.range == range
                 {
                     draft.commit = Some(commit.short().to_string().into());
                     cx.notify();
@@ -1559,10 +1710,7 @@ impl ReviewApp {
         let Some(placed) = self.placed.iter().find(|placed| placed.id == id) else {
             return;
         };
-        let side = match placed.side {
-            Side::Old => DiffSide::Original,
-            Side::New => DiffSide::Modified,
-        };
+        let side = diff_side(placed.side);
         let range = DiffLineRange::new(placed.path.clone(), side, placed.line, placed.line);
         self.start_comment(range, None, window, cx);
         if let Some(draft) = self.draft.as_mut() {
@@ -1670,13 +1818,43 @@ impl ReviewApp {
     fn run_search(&mut self, cx: &mut Context<Self>) {
         let needle = self.search_query.read(cx).value().trim().to_string();
         self.search_cursor = None;
-        self.search_hits = search_patch(&self.patch_text, &needle);
-        self.search_all_hits = match &self.whole_patch {
+        self.search_generation += 1;
+        let generation = self.search_generation;
+        if needle.is_empty() {
+            // Nothing to scan; the bump above also outruns a scan in flight.
+            self.search_hits = Vec::new();
+            self.search_all_hits = Vec::new();
+            cx.notify();
+            return;
+        }
+        // The scan walks the whole patch text - tens of MB on a big branch -
+        // so it leaves the UI thread; the generation discards outrun results.
+        let patch = self.patch_text.clone();
+        let whole = match &self.whole_patch {
             Some((revision, text)) if self.search_all && *revision == self.revision => {
-                search_patch(text, &needle)
+                Some(text.clone())
             }
-            _ => Vec::new(),
+            _ => None,
         };
+        self._search = cx.spawn(async move |this, cx| {
+            let (hits, all_hits) = cx
+                .background_spawn(async move {
+                    let hits = search_patch(&patch, &needle);
+                    let all_hits = whole
+                        .map(|text| search_patch(&text, &needle))
+                        .unwrap_or_default();
+                    (hits, all_hits)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.search_generation != generation {
+                    return;
+                }
+                this.search_hits = hits;
+                this.search_all_hits = all_hits;
+                cx.notify();
+            });
+        });
         cx.notify();
     }
 
@@ -1713,10 +1891,15 @@ impl ReviewApp {
                 match result {
                     Ok(patch) => {
                         this.whole_patch = Some((revision, Arc::new(patch.text)));
+                        this.notice = None;
                         this.run_search(cx);
                     }
+                    // The scoped view on screen is still good; only the
+                    // extended search lost its data, so the status bar
+                    // says it instead of replacing the diff.
                     Err(error) => {
-                        this.error = Some(error.to_string().into());
+                        this.notice =
+                            Some(format!("search across all commits failed: {error}").into());
                         cx.notify();
                     }
                 }
@@ -1758,10 +1941,7 @@ impl ReviewApp {
     }
 
     fn show_hit(&mut self, path: &str, side: Side, line: usize, cx: &mut Context<Self>) {
-        let side = match side {
-            Side::Old => DiffSide::Original,
-            Side::New => DiffSide::Modified,
-        };
+        let side = diff_side(side);
         let path = SharedString::from(path.to_string());
         self.diff.update(cx, |state, cx| {
             state.set_file_collapsed(&path, false, cx);
@@ -1844,6 +2024,7 @@ impl ReviewApp {
             .map_or(resolved.head.clone(), |commit| commit.id.clone());
         let backend = self.backend.clone();
         let blame_path = path.clone();
+        let revision = self.revision;
 
         cx.spawn(async move |this, cx| {
             let origin = cx
@@ -1859,8 +2040,11 @@ impl ReviewApp {
             let _ = this.update(cx, |this, cx| {
                 let origin = match origin {
                     Ok(origin) => origin,
+                    // A failed blame costs this comment; the diff on screen
+                    // is still good, so the status bar says it instead of
+                    // replacing the view.
                     Err(error) => {
-                        this.error = Some(error.into());
+                        this.notice = Some(format!("comment not saved: {error}").into());
                         cx.notify();
                         return;
                     }
@@ -1886,16 +2070,22 @@ impl ReviewApp {
                     body,
                     suggestion: None,
                 });
-                this.placed.push(Placed {
-                    id,
-                    path,
-                    side,
-                    line,
-                    lines,
-                    selection: from_selection,
-                    other_revision,
-                    changed_since: false,
-                });
+                // The comment is kept even when a reload outran the blame -
+                // dropping it would lose what the reviewer wrote - but the
+                // placement below belongs to the view the draft was typed
+                // in; on a stale revision the next reload places it instead.
+                if this.revision == revision {
+                    this.placed.push(Placed {
+                        id,
+                        path,
+                        side,
+                        line,
+                        lines,
+                        selection: from_selection,
+                        other_revision,
+                        changed_since: false,
+                    });
+                }
                 this.save_review(cx);
                 cx.notify();
             });
@@ -1949,8 +2139,9 @@ impl ReviewApp {
     fn snapshot(&self) -> Snapshot {
         let mut threads = Vec::new();
         if let Some(set) = &self.reviews {
-            let show_author = set.threads().iter().any(|thread| !thread.mine);
-            for thread in set.threads() {
+            let set_threads = set.threads();
+            let show_author = set_threads.iter().any(|thread| !thread.mine);
+            for thread in set_threads {
                 let Some(placed) = self
                     .placed
                     .iter()
@@ -2036,10 +2227,26 @@ impl ReviewApp {
         let in_scope_set = self.in_scope();
         let shows_uncommitted = self.comparison.uncommitted
             && (self.scope != ScopeKind::Custom || self.picked_uncommitted);
+        // One walk over the placements instead of one per file and count.
+        #[derive(Default)]
+        struct Tally {
+            comments: usize,
+            other_revision: usize,
+            changed_since: usize,
+        }
+        let mut tallies: HashMap<&str, Tally> = HashMap::new();
+        for placed in &self.placed {
+            let tally = tallies.entry(placed.path.as_str()).or_default();
+            tally.comments += 1;
+            tally.other_revision += usize::from(placed.other_revision);
+            tally.changed_since += usize::from(placed.changed_since);
+        }
         let files = self
             .files
             .iter()
             .map(|file| {
+                let state = self.review_state(&file.path);
+                let generated = is_generated(&file.path);
                 let note = match &file.state {
                     FileState::CouldNotCombine { commit } => Some(
                         format!(
@@ -2054,14 +2261,12 @@ impl ReviewApp {
                     _ if file.state == FileState::UnchangedSinceReview => {
                         Some("no changes since your review".into())
                     }
-                    _ if is_generated(&file.path) => {
-                        Some("generated file · collapsed by default".into())
-                    }
+                    _ if generated => Some("generated file · collapsed by default".into()),
                     _ if file.state == FileState::UncommittedNotCombined => Some(
                         "uncommitted changes left out: a skipped commit touches the same lines"
                             .into(),
                     ),
-                    _ if self.review_state(&file.path) == ReviewState::ChangedSince => {
+                    _ if state == ReviewState::ChangedSince => {
                         Some("changed since your review".into())
                     }
                     _ => None,
@@ -2072,38 +2277,40 @@ impl ReviewApp {
                         .filter(|id| in_scope_set.contains(id))
                         .count()
                 });
-                let comments = self
-                    .placed
-                    .iter()
-                    .filter(|placed| placed.path == file.path)
-                    .count();
-                let other_revision = self
-                    .placed
-                    .iter()
-                    .filter(|placed| placed.path == file.path && placed.other_revision)
-                    .count();
-                let changed_code_comments = self
-                    .placed
-                    .iter()
-                    .filter(|placed| placed.path == file.path && placed.changed_since)
-                    .count();
+                let tally = tallies.get(file.path.as_str());
+                let uncommitted = shows_uncommitted
+                    && file.state != FileState::UncommittedNotCombined
+                    && self.uncommitted_paths.contains(&file.path);
+                // The newest in-scope commit that touched a deleted path is
+                // the one that deleted it: nothing can touch the path after.
+                // A deletion carried by the uncommitted layer sits in no
+                // commit, so it names none and the tooltip falls back.
+                let removed_at = (file.status == FileStatus::Deleted && !uncommitted)
+                    .then(|| {
+                        self.touched
+                            .get(&file.path)?
+                            .iter()
+                            .find(|id| in_scope_set.contains(id))
+                            .map(|id| SharedString::from(id.short().to_string()))
+                    })
+                    .flatten();
                 (
                     SharedString::from(file.path.clone()),
                     FileView {
-                        state: self.review_state(&file.path),
+                        state,
+                        status: file.status,
                         note,
                         additions: file.additions,
                         deletions: file.deletions,
                         binary: file.binary,
-                        generated: is_generated(&file.path),
+                        generated,
                         touched,
                         in_scope: in_scope_set.len(),
-                        uncommitted: shows_uncommitted
-                            && file.state != FileState::UncommittedNotCombined
-                            && self.uncommitted_paths.contains(&file.path),
-                        comments,
-                        other_revision,
-                        changed_code_comments,
+                        uncommitted,
+                        removed_at,
+                        comments: tally.map_or(0, |tally| tally.comments),
+                        other_revision: tally.map_or(0, |tally| tally.other_revision),
+                        changed_code_comments: tally.map_or(0, |tally| tally.changed_since),
                     },
                 )
             })
@@ -2140,10 +2347,7 @@ impl ReviewApp {
             .iter()
             .filter_map(|thread| {
                 let placed = self.placed.iter().find(|placed| placed.id == thread.id)?;
-                let side = match placed.side {
-                    Side::Old => DiffSide::Original,
-                    Side::New => DiffSide::Modified,
-                };
+                let side = diff_side(placed.side);
                 Some(DiffAnnotation::line(
                     thread.element.clone(),
                     DiffLinePosition::new(placed.path.clone(), side, placed.line),
@@ -2298,10 +2502,7 @@ impl ReviewApp {
                                 .icon(Icon::new(Lucide::TextWrap))
                                 .selected(self.wrap)
                                 .tooltip("Wrap long lines")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.wrap = !this.wrap;
-                                    cx.notify();
-                                })),
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_wrap(cx))),
                         )
                         .child(
                             Button::new("ignore-whitespace")
@@ -2312,12 +2513,7 @@ impl ReviewApp {
                                 .icon(Icon::new(Lucide::Pilcrow))
                                 .selected(self.ignore_whitespace)
                                 .tooltip("Hide whitespace-only changes")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.ignore_whitespace = !this.ignore_whitespace;
-                                    // The patch itself changes, not just the
-                                    // rendering: a reload is required.
-                                    this.reload(cx);
-                                })),
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_whitespace(cx))),
                         )
                         .child(
                             h_flex()
@@ -2369,10 +2565,9 @@ impl ReviewApp {
                                 .icon(Icon::new(Lucide::MessageSquareDashed))
                                 .selected(revisions_on)
                                 .tooltip("Earlier comments - from other revisions")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_other_revisions = !this.show_other_revisions;
-                                    cx.notify();
-                                })),
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.toggle_other_revisions(cx)),
+                                ),
                         )
                         .child(
                             Button::new("copy-prompt")
@@ -2408,6 +2603,7 @@ impl ReviewApp {
         head: bool,
         skipped: bool,
         comments: usize,
+        now: i64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = commit.id.clone();
@@ -2416,9 +2612,6 @@ impl ReviewApp {
         let muted = cx.theme().muted_foreground;
         let accent = comment_accent(cx);
         let mono = cx.theme().mono_font_family.clone();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| since.as_secs() as i64);
         let mut meta = h_flex()
             .gap_1()
             .text_size(px(11.))
@@ -2541,7 +2734,144 @@ impl ReviewApp {
             .into_any_element()
     }
 
-    fn render_scope_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The heading row of one picker group: a check-all box, the title and
+    /// the checked count.
+    fn render_picker_group(
+        &self,
+        section: &PickerSection,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let muted = cx.theme().muted_foreground;
+        let ids: Vec<Oid> = self.commits[section.range.clone()]
+            .iter()
+            .map(|commit| commit.id.clone())
+            .collect();
+        // Outside the custom scope every commit counts as checked.
+        let mut checked = if self.scope == ScopeKind::Custom {
+            ids.iter().filter(|id| self.picked.contains(id)).count()
+        } else {
+            ids.len()
+        };
+        // The uncommitted row counts like a commit in its group.
+        let mut len = ids.len();
+        if section.with_uncommitted {
+            len += 1;
+            checked += usize::from(self.picked_uncommitted || self.scope != ScopeKind::Custom);
+        }
+        let all = checked == len && len > 0;
+        let with_uncommitted = section.with_uncommitted;
+        h_flex()
+            .w_full()
+            .h(px(24.))
+            .gap_2()
+            .px_1()
+            .when(section.bordered, |row| {
+                row.mt(px(2.)).border_t_1().border_color(cx.theme().border)
+            })
+            .child(
+                Checkbox::new(section.title)
+                    .xsmall()
+                    .checked(all)
+                    .on_change(cx.listener(move |this, checked: &bool, _, cx| {
+                        if with_uncommitted {
+                            // enter_custom first: it would otherwise reset
+                            // the layer to checked when leaving another
+                            // scope, overriding this very click.
+                            this.enter_custom();
+                            this.picked_uncommitted = *checked;
+                        }
+                        this.pick_many(ids.clone(), *checked, cx)
+                    })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .font_semibold()
+                    .text_color(section.heading_color)
+                    .child(section.title),
+            )
+            .child(
+                div()
+                    .font_normal()
+                    .text_color(muted)
+                    .child(format!("{checked} of {len}")),
+            )
+    }
+
+    /// One picker section: the group heading, then its rows, shortened
+    /// behind a show-more button until expanded.
+    fn render_picker_section(
+        &self,
+        list: gpui_kit::Div,
+        section: PickerSection,
+        context: &PickerContext,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let mut list = list;
+        if section.range.is_empty() && !section.with_uncommitted {
+            return list;
+        }
+        list = list.child(self.render_picker_group(&section, cx));
+        let query = context.query.as_str();
+        if section.with_uncommitted && (query.is_empty() || "uncommitted changes".contains(query)) {
+            list = list.child(self.render_uncommitted_row(cx));
+        }
+        let matches = |commit: &Commit| {
+            query.is_empty()
+                || commit.subject.to_lowercase().contains(query)
+                || commit.author.to_lowercase().contains(query)
+                || commit.id.short().to_lowercase().starts_with(query)
+        };
+        let rows: Vec<&Commit> = self.commits[section.range.clone()]
+            .iter()
+            .filter(|commit| matches(commit))
+            .collect();
+        let shown = if section.expanded || rows.len() <= 8 {
+            rows.len()
+        } else {
+            6
+        };
+        for commit in &rows[..shown] {
+            let head = self
+                .commits
+                .first()
+                .is_some_and(|first| first.id == commit.id);
+            let skipped = context.skipped.contains(&commit.id);
+            let comments = context.comment_counts.get(&commit.id).copied().unwrap_or(0);
+            list = list.child(self.render_commit_row(
+                commit,
+                head,
+                skipped,
+                comments,
+                context.now,
+                cx,
+            ));
+        }
+        if shown < rows.len() {
+            let remaining = rows.len() - shown;
+            let toggle = section.title;
+            list = list.child(
+                Button::new(SharedString::from(format!("more-{}", section.title)))
+                    .ghost()
+                    .xsmall()
+                    .label(format!("Show {remaining} more"))
+                    .text_color(cx.theme().muted_foreground)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if toggle == "New since your review" {
+                            this.show_all_new = true;
+                        } else {
+                            this.show_all_reviewed = true;
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        list
+    }
+
+    /// The dropdown with the commit range on its trigger and the grouped,
+    /// searchable commit list inside.
+    fn render_commit_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let total = self.commits.len();
         let muted = cx.theme().muted_foreground;
         let accent = comment_accent(cx);
@@ -2594,177 +2924,45 @@ impl ReviewApp {
                 counts
             });
 
-        let query = self.picker_query.read(cx).value().trim().to_lowercase();
-        let matches = |commit: &Commit| {
-            query.is_empty()
-                || commit.subject.to_lowercase().contains(&query)
-                || commit.author.to_lowercase().contains(&query)
-                || commit.id.short().to_lowercase().starts_with(&query)
+        let context = PickerContext {
+            query: self.picker_query.read(cx).value().trim().to_lowercase(),
+            skipped: skipped_set,
+            comment_counts,
+            now: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs() as i64),
         };
 
         // The uncommitted layer only earns a row when it has changes to show.
         let uncommitted_entry = self.comparison.uncommitted && !self.uncommitted_paths.is_empty();
         let split_at = self.reviewed_from().unwrap_or(total);
-        let group = |title: &'static str,
-                     range: std::ops::Range<usize>,
-                     heading_color: Hsla,
-                     bordered: bool,
-                     with_uncommitted: bool,
-                     cx: &mut Context<Self>| {
-            let ids: Vec<Oid> = self.commits[range.clone()]
-                .iter()
-                .map(|commit| commit.id.clone())
-                .collect();
-            // Outside the custom scope every commit counts as checked.
-            let mut checked = if self.scope == ScopeKind::Custom {
-                ids.iter().filter(|id| self.picked.contains(id)).count()
-            } else {
-                ids.len()
-            };
-            // The uncommitted row counts like a commit in its group.
-            let mut len = ids.len();
-            if with_uncommitted {
-                len += 1;
-                checked += usize::from(self.picked_uncommitted || self.scope != ScopeKind::Custom);
-            }
-            let all = checked == len && len > 0;
-            h_flex()
-                .w_full()
-                .h(px(24.))
-                .gap_2()
-                .px_1()
-                .when(bordered, |row| {
-                    row.mt(px(2.)).border_t_1().border_color(cx.theme().border)
-                })
-                .child(
-                    Checkbox::new(title)
-                        .xsmall()
-                        .checked(all)
-                        .on_change(cx.listener(move |this, checked: &bool, _, cx| {
-                            if with_uncommitted {
-                                // enter_custom first: it would otherwise reset
-                                // the layer to checked when leaving another
-                                // scope, overriding this very click.
-                                this.enter_custom();
-                                this.picked_uncommitted = *checked;
-                            }
-                            this.pick_many(ids.clone(), *checked, cx)
-                        })),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .font_semibold()
-                        .text_color(heading_color)
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .font_normal()
-                        .text_color(muted)
-                        .child(format!("{checked} of {len}")),
-                )
-        };
-
         let mut list = v_flex().w_full().gap_0p5();
-        let section = |list: gpui_kit::Div,
-                       title: &'static str,
-                       range: std::ops::Range<usize>,
-                       heading_color: Hsla,
-                       bordered: bool,
-                       expanded: bool,
-                       with_uncommitted: bool,
-                       cx: &mut Context<Self>| {
-            let mut list = list;
-            if range.is_empty() && !with_uncommitted {
-                return list;
-            }
-            list = list.child(group(
-                title,
-                range.clone(),
-                heading_color,
-                bordered,
-                with_uncommitted,
-                cx,
-            ));
-            if with_uncommitted && (query.is_empty() || "uncommitted changes".contains(&query)) {
-                list = list.child(self.render_uncommitted_row(cx));
-            }
-            let rows: Vec<&Commit> = self.commits[range.clone()]
-                .iter()
-                .filter(|commit| matches(commit))
-                .collect();
-            let shown = if expanded || rows.len() <= 8 {
-                rows.len()
-            } else {
-                6
-            };
-            for commit in &rows[..shown] {
-                let head = self
-                    .commits
-                    .first()
-                    .is_some_and(|first| first.id == commit.id);
-                let skipped = skipped_set.contains(&commit.id);
-                let comments = comment_counts.get(&commit.id).copied().unwrap_or(0);
-                list = list.child(self.render_commit_row(commit, head, skipped, comments, cx));
-            }
-            if shown < rows.len() {
-                let remaining = rows.len() - shown;
-                let toggle = title;
-                list = list.child(
-                    Button::new(SharedString::from(format!("more-{title}")))
-                        .ghost()
-                        .xsmall()
-                        .label(format!("Show {remaining} more"))
-                        .text_color(muted)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if toggle == "New since your review" {
-                                this.show_all_new = true;
-                            } else {
-                                this.show_all_reviewed = true;
-                            }
-                            cx.notify();
-                        })),
-                );
-            }
-            list
-        };
-        list = section(
+        list = self.render_picker_section(
             list,
-            "New since your review",
-            0..split_at,
-            blue_light,
-            false,
-            self.show_all_new,
-            uncommitted_entry,
+            PickerSection {
+                title: "New since your review",
+                range: 0..split_at,
+                heading_color: blue_light,
+                bordered: false,
+                expanded: self.show_all_new,
+                with_uncommitted: uncommitted_entry,
+            },
+            &context,
             cx,
         );
-        list = section(
+        list = self.render_picker_section(
             list,
-            "Already reviewed",
-            split_at..total,
-            muted,
-            split_at > 0,
-            self.show_all_reviewed,
-            false,
+            PickerSection {
+                title: "Already reviewed",
+                range: split_at..total,
+                heading_color: muted,
+                bordered: split_at > 0,
+                expanded: self.show_all_reviewed,
+                with_uncommitted: false,
+            },
+            &context,
             cx,
         );
-
-        let reviewed = self
-            .files
-            .iter()
-            .filter(|file| self.review_state(&file.path) == ReviewState::Reviewed)
-            .count();
-        let progress = if self.files.is_empty() {
-            0.
-        } else {
-            reviewed as f32 * 100. / self.files.len() as f32
-        };
-        let explanation = match self.scope {
-            ScopeKind::NewForMe => "Each file is compared with the version you last ticked",
-            ScopeKind::WholeBranch => "Everything the branch adds",
-            ScopeKind::Custom => "Combined diff of the checked commits",
-        };
 
         let mut range_button =
             h_flex()
@@ -2822,6 +3020,103 @@ impl ReviewApp {
                     ),
             );
 
+        Popover::new("commit-picker")
+            .anchor(Anchor::TopLeft)
+            .trigger(
+                ListItem::new("commit-range")
+                    .h(px(26.))
+                    .px_2()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(px(5.))
+                    .child(range_button),
+            )
+            .child(picker)
+    }
+
+    /// The right side of the scope bar: the open-comment count, which is
+    /// also the way into the next open comment, and the reviewed-files
+    /// progress.
+    fn render_review_progress(
+        &self,
+        bar: gpui_kit::Div,
+        reviewed: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let muted = cx.theme().muted_foreground;
+        let accent = comment_accent(cx);
+        let threads = self
+            .reviews
+            .as_ref()
+            .map(|set| set.threads())
+            .unwrap_or_default();
+        // "Am I done?" needs the open count in view; every comment counts
+        // here, even ones the other-revisions toggle hides.
+        let open = threads.iter().filter(|thread| !thread.resolved()).count();
+        let any = !threads.is_empty();
+        // Open comments no row can show - their file is not in this
+        // comparison. Named, so the count never promises more than the
+        // window can deliver.
+        let unplaced = threads
+            .iter()
+            .filter(|thread| {
+                !thread.resolved()
+                    && !self
+                        .placed
+                        .iter()
+                        .any(|placed| placed.id == thread.comment.id)
+            })
+            .count();
+        let bar = match (any, open) {
+            (false, _) => bar,
+            (true, 0) => bar.child(div().text_color(muted).child("comments handled")),
+            // The count is also the way in: clicking walks to the next open
+            // comment, clearing whatever hides it (the earlier-comments
+            // toggle, or a scope that leaves its file out) - the label
+            // alone left no path to them.
+            (true, open) => bar
+                .child(
+                    div()
+                        .id("open-comments")
+                        .text_color(accent)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.jump_comment(true, cx);
+                        }))
+                        .child(format!(
+                            "{open} open comment{}",
+                            if open == 1 { "" } else { "s" }
+                        )),
+                )
+                .when(unplaced > 0, |bar| {
+                    bar.child(
+                        div()
+                            .text_color(muted)
+                            .child(format!("{unplaced} not in this comparison")),
+                    )
+                }),
+        };
+        let progress = if self.files.is_empty() {
+            0.
+        } else {
+            reviewed as f32 * 100. / self.files.len() as f32
+        };
+        bar.child(format!("{reviewed} of {} files reviewed", self.files.len()))
+            .child(
+                Progress::new("files-reviewed")
+                    .value(progress)
+                    .xsmall()
+                    .w(px(90.)),
+            )
+    }
+
+    fn render_scope_bar(&self, reviewed: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let explanation = match self.scope {
+            ScopeKind::NewForMe => "Each file is compared with the version you last ticked",
+            ScopeKind::WholeBranch => "Everything the branch adds",
+            ScopeKind::Custom => "Combined diff of the checked commits",
+        };
         h_flex()
             .flex_none()
             .w_full()
@@ -2869,87 +3164,10 @@ impl ReviewApp {
                         this.set_scope(kind, cx);
                     })),
             )
-            .child(
-                Popover::new("commit-picker")
-                    .anchor(Anchor::TopLeft)
-                    .trigger(
-                        ListItem::new("commit-range")
-                            .h(px(26.))
-                            .px_2()
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .rounded(px(5.))
-                            .child(range_button),
-                    )
-                    .child(picker),
-            )
+            .child(self.render_commit_picker(cx))
             .child(div().text_color(muted).child(explanation))
             .child(div().flex_1())
-            .map(|bar| {
-                // "Am I done?" needs the open count in view; every comment
-                // counts here, even ones the other-revisions toggle hides.
-                let open = self.reviews.as_ref().map_or(0, |set| {
-                    set.threads()
-                        .iter()
-                        .filter(|thread| !thread.resolved())
-                        .count()
-                });
-                let any = self
-                    .reviews
-                    .as_ref()
-                    .is_some_and(|set| !set.threads().is_empty());
-                // Open comments no row can show - their file is not in this
-                // comparison. Named, so the count never promises more than
-                // the window can deliver.
-                let unplaced = self.reviews.as_ref().map_or(0, |set| {
-                    set.threads()
-                        .iter()
-                        .filter(|thread| {
-                            !thread.resolved()
-                                && !self
-                                    .placed
-                                    .iter()
-                                    .any(|placed| placed.id == thread.comment.id)
-                        })
-                        .count()
-                });
-                match (any, open) {
-                    (false, _) => bar,
-                    (true, 0) => bar.child(div().text_color(muted).child("comments handled")),
-                    // The count is also the way in: clicking walks to the
-                    // next open comment, clearing whatever hides it (the
-                    // earlier-comments toggle, or a scope that leaves its
-                    // file out) - the label alone left no path to them.
-                    (true, open) => bar
-                        .child(
-                            div()
-                                .id("open-comments")
-                                .text_color(accent)
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.jump_comment(true, cx);
-                                }))
-                                .child(format!(
-                                    "{open} open comment{}",
-                                    if open == 1 { "" } else { "s" }
-                                )),
-                        )
-                        .when(unplaced > 0, |bar| {
-                            bar.child(
-                                div()
-                                    .text_color(muted)
-                                    .child(format!("{unplaced} not in this comparison")),
-                            )
-                        }),
-                }
-            })
-            .child(format!("{reviewed} of {} files reviewed", self.files.len()))
-            .child(
-                Progress::new("files-reviewed")
-                    .value(progress)
-                    .xsmall()
-                    .w(px(90.)),
-            )
+            .map(|bar| self.render_review_progress(bar, reviewed, cx))
     }
 
     fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3132,7 +3350,7 @@ impl ReviewApp {
             .any(|(at, _)| self.collapsed_folders.contains(&path[..at]))
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(&self, reviewed: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         // Folder rows over indented files, in the diff's order — which the
         // load sorts into the classic tree (see `tree_order`), so panel and
@@ -3188,11 +3406,6 @@ impl ReviewApp {
         }
         let rows = Rc::new(rows);
 
-        let reviewed = self
-            .files
-            .iter()
-            .filter(|file| self.review_state(&file.path) == ReviewState::Reviewed)
-            .count();
         v_flex()
             .w_full()
             .h_full()
@@ -3223,10 +3436,7 @@ impl ReviewApp {
                             .ghost()
                             .xsmall()
                             .label("Hide")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.sidebar_visible = false;
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(|this, _, _, cx| this.set_sidebar(false, cx))),
                     ),
             )
             .child(
@@ -3343,7 +3553,13 @@ impl ReviewApp {
         let for_header = (snapshot.clone(), owner.clone());
         let for_hover = owner.clone();
 
-        let (added, removed) = diff_backgrounds(cx);
+        let ThemePalette {
+            added,
+            removed,
+            search_line,
+            search_match,
+            search_match_foreground,
+        } = palette(cx);
         // The Kit decorates whole lines only, so a selection comment keeps an
         // accent tint on its lines; the exact character span cannot be marked
         // without an upstream change. Supplied last, the tint wins over the
@@ -3354,10 +3570,7 @@ impl ReviewApp {
             .iter()
             .filter(|placed| placed.selection)
             .map(|placed| {
-                let side = match placed.side {
-                    Side::Old => DiffSide::Original,
-                    Side::New => DiffSide::Modified,
-                };
+                let side = diff_side(placed.side);
                 let start = placed.line.saturating_sub(placed.lines.saturating_sub(1));
                 DiffDecoration::new(DiffLineRange::new(
                     SharedString::from(placed.path.clone()),
@@ -3374,44 +3587,36 @@ impl ReviewApp {
             .map(|draft| DiffDecoration::new(draft.range.clone()).with_background(span_tint));
         // Search hits fill their whole line: the Kit decorates lines, not
         // character spans, and the last fill supplied wins on overlap.
-        let search_tint = search_background(cx);
         let search_spans = self
             .search_open
             .then(|| self.search_hits.iter())
             .into_iter()
             .flatten()
             .map(move |hit| {
-                let side = match hit.side {
-                    Side::Old => DiffSide::Original,
-                    Side::New => DiffSide::Modified,
-                };
+                let side = diff_side(hit.side);
                 DiffDecoration::new(DiffLineRange::new(
                     SharedString::from(hit.path.clone()),
                     side,
                     hit.line,
                     hit.line,
                 ))
-                .with_background(search_tint)
+                .with_background(search_line)
             });
         // The matched characters themselves get a louder fill over the line
         // wash, so a long hit line still shows where the needle sits.
-        let (match_background, match_foreground) = search_match_colors(cx);
         let span_highlights: Vec<DiffSpanHighlight> = self
             .search_open
             .then(|| self.search_hits.iter())
             .into_iter()
             .flatten()
             .flat_map(|hit| {
-                let side = match hit.side {
-                    Side::Old => DiffSide::Original,
-                    Side::New => DiffSide::Modified,
-                };
+                let side = diff_side(hit.side);
                 let position =
                     DiffLinePosition::new(SharedString::from(hit.path.clone()), side, hit.line);
                 hit.spans.iter().map(move |span| {
                     DiffSpanHighlight::new(position.clone(), span.clone())
-                        .with_background(match_background)
-                        .with_foreground(match_foreground)
+                        .with_background(search_match)
+                        .with_foreground(search_match_foreground)
                 })
             })
             .collect();
@@ -3504,7 +3709,10 @@ impl ReviewApp {
                 // A file that changed under an existing tick is the one note
                 // worth interrupting for; the rest stay quiet metadata.
                 let alert = view.is_some_and(|view| view.state == ReviewState::ChangedSince);
+                let removed = view.is_some_and(|view| view.status == FileStatus::Deleted);
+                let removed_at = view.and_then(|view| view.removed_at.clone());
                 let warning = cx.theme().warning;
+                let danger = cx.theme().danger;
                 let muted = cx.theme().muted_foreground;
                 let mono = cx.theme().mono_font_family.clone();
                 let quiet = view.is_some_and(|view| view.generated) || reviewed;
@@ -3560,6 +3768,31 @@ impl ReviewApp {
                             .flex_1()
                             .min_w_0()
                             .gap_1()
+                            // The tree's status letter rides along so a
+                            // collapsed removed file reads as removed without
+                            // the sidebar open.
+                            .when(removed, |row| {
+                                // The commit behind the D is hover detail,
+                                // not header text; a worktree deletion has
+                                // no commit to name.
+                                let tip: SharedString = match &removed_at {
+                                    Some(rev) => format!("This file got removed at {rev}").into(),
+                                    None => "This file got removed".into(),
+                                };
+                                row.child(
+                                    div()
+                                        .id(SharedString::from(format!("removed-{path}")))
+                                        .flex_none()
+                                        .font_family(mono.clone())
+                                        .text_size(px(12.))
+                                        .font_medium()
+                                        .text_color(danger)
+                                        .child("D")
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(tip.clone()).build(window, cx)
+                                        }),
+                                )
+                            })
                             .child(
                                 div()
                                     .min_w_0()
@@ -3567,7 +3800,12 @@ impl ReviewApp {
                                     .font_family(mono.clone())
                                     .text_size(px(12.))
                                     .font_medium()
-                                    .when(quiet, |path| path.text_color(muted))
+                                    // The name itself carries the removal (a
+                                    // trailing label read as noise), and it
+                                    // outranks the quiet mute: a ticked
+                                    // removal still reads as removed.
+                                    .when(quiet && !removed, |name| name.text_color(muted))
+                                    .when(removed, |name| name.text_color(danger))
                                     .child(path.clone()),
                             )
                             .child(
@@ -3599,13 +3837,23 @@ impl ReviewApp {
                             counts(view.deletions, '−', cx.theme().danger)
                         }
                     }))
-                    // The warning colour, plain weight: noticeable beside the
-                    // muted touched-by text without shouting like an alert.
+                    // The warning colour, plain weight: noticeable without
+                    // shouting like an alert.
                     .when(view.is_some_and(|view| view.uncommitted), |row| {
                         row.child(div().flex_none().text_color(warning).child("uncommitted"))
                     })
+                    // Quiet metadata: the count message only matters when the
+                    // reviewer asks, so it hides behind the icon's hover.
                     .when_some(touched, |row, touched| {
-                        row.child(div().flex_none().text_color(muted).child(touched))
+                        row.child(
+                            Button::new(SharedString::from(format!("touched-{path}")))
+                                .ghost()
+                                .xsmall()
+                                .w(px(18.))
+                                .h(px(18.))
+                                .icon(Icon::new(Lucide::Info))
+                                .tooltip(touched),
+                        )
                     })
                     .when_some(comments, |row, comments| {
                         let path = path.clone();
@@ -3746,10 +3994,7 @@ impl ReviewApp {
                     .xsmall()
                     .label("Files")
                     .tooltip("Show the file list")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar_visible = true;
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|this, _, _, cx| this.set_sidebar(true, cx))),
             );
         }
         for (keys, label) in hints {
@@ -3768,6 +4013,16 @@ impl ReviewApp {
         }
         if self.loading {
             bar = bar.child("Loading…");
+        }
+        if let Some(notice) = &self.notice {
+            bar = bar.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(cx.theme().danger)
+                    .child(notice.clone()),
+            );
         }
         let position = self.current_file.as_ref().and_then(|current| {
             let files = self.diff.read(cx).files();
@@ -4270,6 +4525,12 @@ impl Render for ReviewApp {
             self.text_lines = None;
             self.pending_comment = None;
         }
+        // The scope bar and the sidebar both show it; counted once per frame.
+        let reviewed = self
+            .files
+            .iter()
+            .filter(|file| self.review_state(&file.path) == ReviewState::Reviewed)
+            .count();
         v_flex()
             .id("review")
             .key_context(if self.draft.is_some() || self.answer.is_some() {
@@ -4360,13 +4621,9 @@ impl Render for ReviewApp {
             .on_action(cx.listener(|this, _: &PreviousFile, _, cx| this.move_file(-1, cx)))
             .on_action(cx.listener(|this, _: &ToggleMode, _, cx| this.toggle_mode(cx)))
             .on_action(cx.listener(|this, _: &ToggleOtherRevisions, _, cx| {
-                this.show_other_revisions = !this.show_other_revisions;
-                cx.notify();
+                this.toggle_other_revisions(cx)
             }))
-            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                this.sidebar_visible = !this.sidebar_visible;
-                cx.notify();
-            }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(
                 cx.listener(|this, _: &ScopeNewForMe, _, cx| {
                     this.set_scope(ScopeKind::NewForMe, cx)
@@ -4391,7 +4648,12 @@ impl Render for ReviewApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &PickerToggle, _, cx| {
-                if let Some(id) = this.hovered_commit.clone() {
+                // Hover is never cleared on leave (leave events lag), so a
+                // reload can strand it on a commit the new list no longer
+                // has; Space must not toggle a ghost into the picked set.
+                if let Some(id) = this.hovered_commit.clone()
+                    && this.commits.iter().any(|commit| commit.id == id)
+                {
                     this.picker_click(&id, false, cx);
                 }
             }))
@@ -4413,31 +4675,22 @@ impl Render for ReviewApp {
             .on_action(cx.listener(|this, _: &Refresh, _, cx| this.reload(cx)))
             .on_action(|_: &Quit, _, cx| cx.quit())
             // The menu stand-ins (see `commands`) reuse the shortcut
-            // handlers' methods; the toggle bodies mirror their buttons.
+            // handlers' methods.
             .on_action(|_: &MenuAbout, _, _| show_about())
             .on_action(cx.listener(|this, _: &MenuSplitUnified, _, cx| this.toggle_mode(cx)))
-            .on_action(cx.listener(|this, _: &MenuWrap, _, cx| {
-                this.wrap = !this.wrap;
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &MenuHideWhitespace, _, cx| {
-                this.ignore_whitespace = !this.ignore_whitespace;
-                // The patch itself changes, not just the rendering.
-                this.reload(cx);
-            }))
+            .on_action(cx.listener(|this, _: &MenuWrap, _, cx| this.toggle_wrap(cx)))
+            .on_action(
+                cx.listener(|this, _: &MenuHideWhitespace, _, cx| this.toggle_whitespace(cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &MenuCollapseAll, _, cx| this.set_all_collapsed(true, cx)),
             )
             .on_action(
                 cx.listener(|this, _: &MenuExpandAll, _, cx| this.set_all_collapsed(false, cx)),
             )
-            .on_action(cx.listener(|this, _: &MenuFileList, _, cx| {
-                this.sidebar_visible = !this.sidebar_visible;
-                cx.notify();
-            }))
+            .on_action(cx.listener(|this, _: &MenuFileList, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &MenuEarlierComments, _, cx| {
-                this.show_other_revisions = !this.show_other_revisions;
-                cx.notify();
+                this.toggle_other_revisions(cx)
             }))
             .on_action(cx.listener(|this, _: &MenuNextChange, _, cx| {
                 this.diff.update(cx, |state, cx| state.next_change(cx))
@@ -4461,7 +4714,7 @@ impl Render for ReviewApp {
                 this.set_scope(ScopeKind::Custom, cx)
             }))
             .child(self.render_title(cx))
-            .child(self.render_scope_bar(cx))
+            .child(self.render_scope_bar(reviewed, cx))
             .when(self.search_open, |root| {
                 root.child(self.render_search_bar(cx))
             })
@@ -4522,7 +4775,7 @@ impl Render for ReviewApp {
                                     resizable_panel()
                                         .size(px(240.))
                                         .size_range(px(160.)..px(420.))
-                                        .child(self.render_sidebar(cx)),
+                                        .child(self.render_sidebar(reviewed, cx)),
                                 )
                                 .child(resizable_panel().child(diff_column)),
                         )

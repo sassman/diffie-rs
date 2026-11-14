@@ -1,6 +1,6 @@
 # Handoff
 
-State of the project on 2026-11-11, written for whoever continues it in a
+State of the project on 2026-11-14, written for whoever continues it in a
 coding session. Read `AGENTS.md` first for the rules, and
 `docs/design-decisions.md` for product behaviour.
 
@@ -17,12 +17,17 @@ first code: a working core and a first UI scaffold wired to it.
 - **Core** (`crates/core`): done for the scaffold's needs and tested. Besides
   the scaffold APIs it now has `changed_paths` and `commits_touching` on the
   trait, and `ReviewFile::verify_completed` for stale completion markers.
+  A review cleanup on 2026-11-14 hardened the git invocations and pulled
+  the scratch-git and unified-diff plumbing into one place each
+  (`ScratchGit`, `patch.rs`); see "The core in one page".
 - **UI** (`crates/app`): restyled to the mockup on 2026-11-11: bundled Inter
   and JetBrains Mono, three themes (Gruvbox Dark is the default, Midnight is
   the mockup's palette, Light), segmented controls, file tree with a
   resizable panel, commit picker with search, skipped markers and badges,
   comment cards, the comment box with its attach-commit label, and the hint
-  bar. See "What the UI does and does not do".
+  bar. See "What the UI does and does not do". The same cleanup fixed a
+  lost-update race around the review file, moved search scans off the UI
+  thread and added a status-bar notice for side-task failures.
 
 ## Verification status
 
@@ -30,9 +35,9 @@ Be exact about this when you report further work.
 
 | Claim | Status |
 | --- | --- |
-| `cargo test -p diffie-core`: 24 tests pass | Verified on Linux, git 2.43 |
-| `cargo clippy --workspace --all-targets` is clean | Verified |
-| `cargo check -p diffie` compiles with no warnings | Verified on Linux, Rust 1.97, gpui-kit 0.9.1 |
+| `cargo test -p diffie-core` passes | Verified on macOS on 2026-11-14, after the cleanup; earlier on Linux, git 2.43 |
+| `cargo clippy --workspace --all-targets` is clean with `-D warnings` | Verified on macOS on 2026-11-14 |
+| `cargo check -p diffie` compiles with no warnings | Verified on Linux, Rust 1.97, gpui-kit 0.9.1; again on macOS on 2026-11-14 |
 | The window opens and renders | Verified on Linux under Xvfb with a software Vulkan driver (lavapipe). Screenshots in `docs/screenshots/` |
 | Driven with simulated clicks and keys (xdotool), on a 6-commit demo repository: commit picker opens; unchecking a commit gives a combined diff with "1 skipped"; line selection; `c` opens the comment box; typing; Cmd/Ctrl+Enter saves; the comment is anchored by blame and reappears after a restart; reaction picker and chips; "Reviewed" by checkbox and by `r`, and after a restart the ticked file leaves the "New for me" diff; `s`; Whole branch; collapse all; light theme | Verified once each, by screenshot and by reading the review file |
 | Everything else interactive: swap, expand all, next and previous file or change, other-revisions toggle with real data, copy as prompt, delete, Escape, scope keys, sidebar toggle, colleagues' files | Not exercised |
@@ -47,6 +52,8 @@ Be exact about this when you report further work.
 | Application menu bar | Verified on macOS by screenshot: the bar reads diffie, Edit, View, Go, Window; the app menu shows About diffie, Services and Quit diffie with Cmd+Q; View and Go hold the declared items with no shortcut hints; About opens the standard panel with the brand mark and Version 0.1.0; "Collapse all files" from the menu collapsed every file (driven by System Events clicks) |
 | Menu items while typing in a comment box | Not exercised interactively. No menu item carries a bare-letter key equivalent (the wrapper actions are unbound), so the NSMenu has no letter to match, but typing with the box open was not driven |
 | Edit menu's native Undo/Cut/Copy/Paste on a focused input, Linux and Windows (bar stores but draws nothing) | Not exercised |
+| 2026-11-14 cleanup on screen: the review-save ordering and reload grafting, the stale-blame guard on a draft's attach commit, the status-bar notice, the split scope-bar rendering | Compiled, clippy-clean, core tests pass; not seen on screen - the window was not run |
+| Removed-file header: danger-coloured name, D badge tooltip with the deleting commit (newest in-scope commit touching the path; plain fallback for a worktree deletion) | Compiled, clippy-clean, core tests pass; not seen on screen - the window was not run |
 
 ## Build, run, test
 
@@ -63,7 +70,9 @@ the checked-out branch; one: the working tree into it; two or `A..B`: the
 first into the second; `--every-difference` widens the comparison). A
 revision that does not resolve fails before the window
 opens; a branch that exactly one remote has is taken from there (`o/x`
-stands in for `x`), several candidates are listed and refused.
+stands in for `x`, `remote_ref` in `main.rs`), several candidates are
+listed and refused. A window that cannot open prints the error and exits
+instead of panicking.
 `diffie --pr <number|url>` reviews a GitHub pull request: gh (which must
 be on PATH) describes it, and the review pins the PR's exact commits -
 the head commit as source, and as target the base branch's
@@ -98,6 +107,10 @@ crates/core/src/
   model.rs                    Comparison, Scope, ScopedPatch, FileSummary, ...
   backend.rs                  ReviewBackend trait, BackendError
   git_cli.rs                  GitCli: the cheap backend (shells out to git)
+  patch.rs                    crate-private unified-diff walker; search,
+                              moved and region parsing all ride on it
+  search.rs                   smartcase search over patch text
+  moved.rs                    pairs verbatim-moved runs for the diff folds
   review.rs                   review file: comments, reactions, ticks, ReviewSet
   pr.rs                       --pr: a pull request's state, branches and
                               exact commits via the gh CLI
@@ -156,7 +169,17 @@ How `GitCli` produces each scope:
 - **New for me**: per file. Ticked and unchanged: listed, no diff. Ticked and
   changed: `git diff <ticked blob> <current blob>`, relabelled with the path.
   Otherwise the file's whole-branch diff. A blobless tick on a still-deleted
-  file counts as unchanged.
+  file counts as unchanged, and so does a ticked file whose only change is
+  whitespace while hide-whitespace is on - it collapses instead of
+  surfacing an empty Changed entry.
+
+Two invariants are centralized in `git_cli.rs`. Revisions pass behind
+`--end-of-options` everywhere, except `git blame`, which acts on
+option-shaped revisions even behind it (probed on git 2.54) - `blame_with`
+refuses any revision starting with `-` instead. And all scratch state (the
+temporary index, object directory and alternates that keep the reviewed
+repository untouched) lives in `ScratchGit`, shared by `worktree_run` and
+`combine`.
 
 Patches carry 400 lines of context (`CONTEXT_LINES`), because the Diff view
 can only expand context that the patch supplies.
@@ -250,7 +273,7 @@ Things that cost time and are easy to hit again:
   The first paint of the diff list needs one more event again. It looks like
   macOS App Nap / a lost wake in the GPUI dispatcher while occluded, so a
   focused app behaves perfectly. Diagnosed with `/usr/bin/sample`; not fixed
-  here — worth raising against the Kit or working around with a periodic
+  here - worth raising against the Kit or working around with a periodic
   foreground timer while a load is in flight.
 
 Other Kit facts used here:
@@ -260,7 +283,7 @@ Other Kit facts used here:
   catalogue is `gpui_kit::assets::IconName`, used through `Icon::new(..)`.
 - `Diff`'s key context is `"Diff"`, and the input's is `"Input"`.
 - Themes: three files under `crates/app/themes/` are embedded and loaded in
-  `app::init` — `gruvbox-dark.json` (the default dark), `midnight.json` (the
+  `app::init` - `gruvbox-dark.json` (the default dark), `midnight.json` (the
   mockup's palette) and `light.json` (Kit default colors plus the fonts).
   The palette button opens a menu; `apply_theme` runs
   `Theme::update(.. apply_config ..)`. The comment orange rides on the
@@ -308,7 +331,9 @@ actually exercised):
   and judgeable; resolving them lets it collapse again.
 - Search: `/` opens a bar under the scope bar, seeded from the text
   selection; smartcase matches over the scoped patch text
-  (`diffie_core::search::search_patch`), enter/shift-enter walk them,
+  (`diffie_core::search::search_patch`, scanned on the background executor
+  with a stale-result guard, not per keystroke on the UI thread),
+  enter/shift-enter walk them,
   matched lines carry an amber fill and the matched characters a louder
   saturated-amber emphasis with dark text (the Kit fork's
   `Diff::span_highlights`; hits carry their byte spans). Hits land on
@@ -327,9 +352,12 @@ actually exercised):
   shut folder.
 - Diff: per-theme added and removed row fills (decorations), signs, a
   take-over header (path with a copy button, coloured counts, touched-by
-  text, comment summary that jumps to the first comment,
-  state notes, Reviewed), the current-file bar above, generated and
-  unchanged-reviewed files as collapsed headers, `Simple` hunk bands,
+  behind an info icon's hover, comment summary that jumps to the first
+  comment, state notes, Reviewed; a removed file leads with the tree's D
+  and shows its name in the danger colour - the D's hover names the
+  deleting commit's short hash, or says only "This file got removed" for
+  a worktree deletion), the current-file bar above,
+  generated, unchanged-reviewed and removed files as collapsed headers, `Simple` hunk bands,
   auto-unified when the window is too narrow with the manual choice kept.
 - Comments: cards in the mockup's style with hash and line label, reaction
   chips and the smile-plus picker, Edit, per-comment Copy as prompt, Delete;
@@ -350,7 +378,8 @@ actually exercised):
   comment answered by someone else wears an "answered" tag in the success
   tint unless "code changed" already covers it. The add-comment + sits in the
   gutter-marker lane. The comment box names the commit it will attach to
-  before saving, and Comment/Suggest change (disabled)/Cancel carry their
+  before saving - the blame that names it is dropped when the draft or
+  comparison changed underneath it (`resolve_draft_commit`) - and Comment/Suggest change (disabled)/Cancel carry their
   shortcut hints. Right-clicking in the diff opens a context menu with Copy
   and Comment acting on the text selection (both disabled without one); the
   items use the payload snapshotted at menu-open, because picking an item
@@ -358,6 +387,10 @@ actually exercised):
   selection-comment entry points; there is no floating button.
 - Ticking Reviewed (or `r`) collapses the file and moves the current-file
   marker to the next one without scrolling; the collapse pulls it up.
+- Status bar: side-task failures (saving the review, the search's
+  whole-branch fetch, blame for a comment) surface as a `notice` there and
+  clear on the next success; the full-screen `error` page is reserved for
+  load failures.
 - Shortcuts: `]` `[` `}` `{` `s` `o` `t` `n` `p` `1` `2` `3` `zM` `zR` `c`
   `r`, Escape, Cmd/Ctrl+Enter, Cmd/Ctrl+R, Cmd/Ctrl+Q, Space in the commit
   list.
@@ -403,7 +436,8 @@ In this order, each one small enough to show the owner:
 1. **Exercise what the restyle has not shown on screen yet**: the commit
    picker internals, theme menu, comment box and Escape focus return,
    reactions, the Light and Midnight themes, the narrow-window fallback,
-   panel resizing.
+   panel resizing - and the cleanup's unseen pieces: the status-bar notice
+   and the save ordering under rapid edits.
 2. **Chase the slow load** on a real branch (see the trap list): likely the
    row building and highlighting of 400-context-line patches.
 3. **Ask the owner the open questions** in section 16 of the design document,
@@ -450,3 +484,9 @@ In this order, each one small enough to show the owner:
   review file is named after the branch. A detached HEAD stays `HEAD`.
 - **Review file identity is the author's `user.name`.** Two reviewers with
   the same name collide.
+- **The review file has one writer.** `save_review` is a dirty flag drained
+  by a single writer task, so writes land in mutation order, and
+  `review_generation` stamps the reviewer's own file: when a mutation raced
+  a background reload, `install` grafts the live `mine` (and carries
+  `placed` forward) instead of letting the stale reload clobber it. Do not
+  add a second path that writes the file.
