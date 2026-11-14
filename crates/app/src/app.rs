@@ -29,8 +29,9 @@ use gpui_kit::component::{
     },
     checkbox::Checkbox,
     diff::{
-        Diff, DiffAnnotation, DiffDecoration, DiffEvent, DiffFile, DiffFold, DiffHunkSeparator,
-        DiffLinePosition, DiffLineRange, DiffMode, DiffSide, DiffSpanHighlight, DiffState,
+        Diff, DiffAnnotation, DiffChangeIndicator, DiffDecoration, DiffEvent, DiffFile, DiffFold,
+        DiffHunkSeparator, DiffLinePosition, DiffLineRange, DiffMode, DiffSide, DiffSpanHighlight,
+        DiffState,
     },
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
@@ -189,6 +190,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(refresh, Refresh, REVIEW),
         KeyBinding::new(quit, Quit, REVIEW),
     ]);
+
+    // Quit must work whatever holds focus. The root view handles it too,
+    // but that ride depends on the window's dispatch path; this global
+    // fallback fires when no element on that path claimed the action.
+    cx.on_action(|_: &Quit, cx| cx.quit());
 
     // After bind_keys: the menu reads the keymap once, at set time, to put
     // chords like Cmd+Q on the items. Only macOS draws the bar; Linux and
@@ -2660,6 +2666,7 @@ impl ReviewApp {
             .child(
                 Checkbox::new(SharedString::from(format!("pick-box-{}", commit.id)))
                     .xsmall()
+                    .mt(px(3.))
                     .checked(checked),
             )
             .child(
@@ -2703,6 +2710,7 @@ impl ReviewApp {
             .child(
                 Checkbox::new("pick-box-uncommitted")
                     .xsmall()
+                    .mt(px(2.))
                     .checked(checked),
             )
             .child(
@@ -2760,6 +2768,7 @@ impl ReviewApp {
         }
         let all = checked == len && len > 0;
         let with_uncommitted = section.with_uncommitted;
+        let title_ids = ids.clone();
         h_flex()
             .w_full()
             .h(px(24.))
@@ -2784,10 +2793,24 @@ impl ReviewApp {
                     })),
             )
             .child(
+                // Commit rows toggle on a title click; the heading follows.
                 div()
+                    .id(SharedString::from(format!("pick-group-{}", section.title)))
                     .flex_1()
                     .font_semibold()
                     .text_color(section.heading_color)
+                    .cursor_pointer()
+                    .on_click(
+                        cx.listener(move |this, _: &gpui_kit::ClickEvent, window, cx| {
+                            window.focus(&this.picker_focus, cx);
+                            let checked = !all;
+                            if with_uncommitted {
+                                this.enter_custom();
+                                this.picked_uncommitted = checked;
+                            }
+                            this.pick_many(title_ids.clone(), checked, cx)
+                        }),
+                    )
                     .child(section.title),
             )
             .child(
@@ -3643,6 +3666,7 @@ impl ReviewApp {
             // The decorations below paint richer added and removed fills than
             // the component's own washed-out tint.
             .change_background(false)
+            .change_indicator(DiffChangeIndicator::Bars)
             .decorations(decorations)
             .span_highlights(span_highlights)
             .hunk_separator(DiffHunkSeparator::Simple)
