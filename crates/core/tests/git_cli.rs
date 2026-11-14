@@ -866,6 +866,155 @@ fn an_uncommitted_tick_holds_the_content_on_disk() {
 }
 
 #[test]
+fn an_option_shaped_revision_fails_as_a_revision_not_as_an_option() {
+    let fixture = Fixture::new();
+    let backend = fixture.backend();
+    // A commit id read from a colleague's review file reaches git as a
+    // revision; a value shaped like an option must be refused as a bad
+    // revision, never acted on.
+    let outfile = fixture.directory.path().join("hijacked");
+    let evil = Oid::new(format!("--output={}", outfile.display()));
+    assert_eq!(
+        backend
+            .changed_regions(&evil, &fixture.commits[4], "a.txt")
+            .unwrap(),
+        None
+    );
+    assert!(!outfile.exists(), "git obeyed the value as an option");
+    // Blame answers "cannot say" instead of handing the value to git, which
+    // would obey it as an option even behind --end-of-options.
+    assert_eq!(backend.line_origin(&evil, "a.txt", 1).unwrap(), None);
+    assert!(backend.blame(&evil, "a.txt").unwrap().is_empty());
+    assert!(!outfile.exists(), "git obeyed the value as an option");
+}
+
+#[test]
+fn a_whitespace_only_change_since_the_tick_stays_collapsed() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("w.txt"), "hello\nworld\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "feat"]);
+    std::fs::write(root.join("w.txt"), "hello!\nworld\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "real edit"]);
+    let ticked_at = Oid::new(git(root, &["rev-parse", "HEAD"]));
+    std::fs::write(root.join("w.txt"), "  hello!\nworld\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "reindent"]);
+
+    let backend = GitCli::open(root).unwrap();
+    let resolved = backend.resolve(&Fixture::comparison()).unwrap();
+    let reviewed = [ReviewedFile {
+        path: "w.txt".into(),
+        blob: backend.blob_id(&ticked_at, "w.txt").unwrap(),
+        commit: ticked_at,
+        at: "2026-11-11T00:00:00Z".into(),
+    }];
+    let patch = backend
+        .patch(
+            &resolved,
+            &Scope::NewForMe,
+            ReviewInput {
+                reviewed: &reviewed,
+                commented: &[],
+            },
+            true,
+        )
+        .unwrap();
+    // Hiding whitespace empties the since-tick diff; the file must collapse
+    // like an unchanged one, not resurface with the branch's diff counts.
+    let w = patch
+        .files
+        .iter()
+        .find(|file| file.path == "w.txt")
+        .unwrap();
+    assert_eq!(w.state, FileState::UnchangedSinceReview);
+    assert!(!patch.text.contains("w.txt"));
+}
+
+#[test]
+fn every_difference_diffs_from_the_target_tip() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    // Newer work on the target after the branch point.
+    git(root, &["checkout", "-q", "main"]);
+    std::fs::write(root.join("main-only.txt"), "mainline\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "m1 mainline file"]);
+    git(root, &["checkout", "-q", "feat"]);
+
+    let backend = fixture.backend();
+    let mut comparison = Fixture::comparison();
+    comparison.mode = CompareMode::EveryDifference;
+    let resolved = backend.resolve(&comparison).unwrap();
+    assert_eq!(resolved.base, resolved.target_head);
+    let patch = backend
+        .patch(&resolved, &Scope::WholeBranch, ReviewInput::EMPTY, false)
+        .unwrap();
+    // Both tips differ in main's new file too: it reads as a deletion.
+    let main_only = patch
+        .files
+        .iter()
+        .find(|file| file.path == "main-only.txt")
+        .unwrap();
+    assert_eq!(main_only.status, FileStatus::Deleted);
+    assert!(patch.text.contains("-mainline"));
+
+    // The default mode ignores the target's newer work.
+    let adds = backend.resolve(&Fixture::comparison()).unwrap();
+    assert_ne!(adds.base, adds.target_head);
+    let patch = backend
+        .patch(&adds, &Scope::WholeBranch, ReviewInput::EMPTY, false)
+        .unwrap();
+    assert!(!patch.text.contains("main-only"));
+}
+
+#[test]
+fn unrelated_histories_report_no_merge_base() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    // A second root commit: no history shared with feat.
+    git(root, &["checkout", "-q", "--orphan", "isolated"]);
+    git(root, &["commit", "-q", "-m", "other root"]);
+    git(root, &["checkout", "-q", "feat"]);
+
+    let backend = fixture.backend();
+    let comparison = Comparison {
+        source: "feat".into(),
+        target: "isolated".into(),
+        mode: CompareMode::BranchAdds,
+        uncommitted: false,
+        ..Default::default()
+    };
+    match backend.resolve(&comparison) {
+        Err(BackendError::NoMergeBase { source_rev, target }) => {
+            assert_eq!((source_rev.as_str(), target.as_str()), ("feat", "isolated"));
+        }
+        other => panic!("expected NoMergeBase, got {other:?}"),
+    }
+}
+
+#[test]
+fn commits_touching_names_a_renamed_file_as_each_commit_did() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    git(root, &["mv", "b.txt", "renamed.txt"]);
+    git(root, &["commit", "-qm", "c6 rename b"]);
+    let rename = Oid::new(git(root, &["rev-parse", "HEAD"]));
+
+    let backend = fixture.backend();
+    let resolved = backend.resolve(&Fixture::comparison()).unwrap();
+    let touched = backend.commits_touching(&resolved).unwrap();
+    // The commit before the rename used the old name; the rename commit the
+    // new one, next to the name changed_paths reports.
+    assert_eq!(touched["b.txt"], [fixture.commits[1].clone()]);
+    assert_eq!(touched["renamed.txt"], [rename]);
+}
+
+#[test]
 fn open_comments_keep_a_ticked_file_in_new_for_me() {
     let fixture = Fixture::new();
     let backend = fixture.backend();

@@ -158,12 +158,12 @@ impl GitCli {
         command
     }
 
-    fn read(&self, args: &[&str]) -> Result<String> {
-        run(self.command().args(args), args, None)
+    fn read(&self, args: &[impl AsRef<str>]) -> Result<String> {
+        run(&mut self.command(), args, None)
     }
 
     /// `Ok(None)` when git exits non-zero, for lookups where "no" is an answer.
-    fn try_read(&self, args: &[&str]) -> Result<Option<String>> {
+    fn try_read(&self, args: &[impl AsRef<str>]) -> Result<Option<String>> {
         match self.read(args) {
             Ok(output) => Ok(Some(output)),
             Err(BackendError::Git { .. }) => Ok(None),
@@ -189,7 +189,13 @@ impl GitCli {
     fn parent_of(&self, commit: &Oid) -> Result<String> {
         let spec = format!("{commit}^");
         Ok(self
-            .try_read(&["rev-parse", "--verify", "--quiet", &spec])?
+            .try_read(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                &spec,
+            ])?
             .map(|output| output.trim().to_string())
             .unwrap_or_else(|| EMPTY_TREE.to_string()))
     }
@@ -230,6 +236,7 @@ impl GitCli {
             args.push("--name-only".to_string());
             args.push("-z".to_string());
         }
+        args.push("--end-of-options".to_string());
         args.push(base.to_string());
         args.push("--".to_string());
         self.worktree_run(base, &args)
@@ -246,6 +253,7 @@ impl GitCli {
             "--binary",
             "--full-index",
             "--no-renames",
+            "--end-of-options",
             base,
             "--",
         ]
@@ -259,26 +267,29 @@ impl GitCli {
     /// plus intent-to-add entries, so a diff lists untracked files too; the
     /// repository's real index stays untouched.
     fn worktree_run(&self, base: &str, args: &[String]) -> Result<String> {
+        let scratch = self.scratch_git()?;
+        scratch.read(self, &["read-tree", "--end-of-options", base], None)?;
+        // `:/` keeps the sweep repository-wide even when the backend was
+        // opened from a subdirectory.
+        scratch.read(self, &["add", "--intent-to-add", "--", ":/"], None)?;
+        scratch.read(self, args, None)
+    }
+
+    /// A scratch index and object directory for commands that must stage
+    /// entries or write objects. See [`ScratchGit`].
+    fn scratch_git(&self) -> Result<ScratchGit> {
         let scratch = Scratch::new()?;
         let objects = scratch.path.join("objects");
         std::fs::create_dir_all(&objects)?;
         let index = scratch.path.join("index");
         let real_objects =
             self.absolute(self.read(&["rev-parse", "--git-path", "objects"])?.trim());
-        let scratch_read = |args: &[&str]| -> Result<String> {
-            let mut command = self.command();
-            command
-                .env("GIT_INDEX_FILE", &index)
-                .env("GIT_OBJECT_DIRECTORY", &objects)
-                .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &real_objects);
-            run(command.args(args), args, None)
-        };
-        scratch_read(&["read-tree", "--end-of-options", base])?;
-        // `:/` keeps the sweep repository-wide even when the backend was
-        // opened from a subdirectory.
-        scratch_read(&["add", "--intent-to-add", "--", ":/"])?;
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        scratch_read(&args)
+        Ok(ScratchGit {
+            index,
+            objects,
+            real_objects,
+            _scratch: scratch,
+        })
     }
 
     fn diff(
@@ -289,11 +300,11 @@ impl GitCli {
         ignore_whitespace: bool,
     ) -> Result<String> {
         let mut args = Self::diff_args(ignore_whitespace);
+        args.push("--end-of-options".to_string());
         args.push(from.to_string());
         args.push(to.to_string());
         args.push("--".to_string());
         args.extend(paths.iter().map(|path| path.to_string()));
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
         self.read(&args)
     }
 
@@ -377,17 +388,32 @@ impl GitCli {
                     let since =
                         self.diff(old.as_str(), current.as_str(), &[], ignore_whitespace)?;
                     let since = relabel_blob_diff(&since, &summary.path);
-                    let counted = split_files(&since)
-                        .into_iter()
-                        .next()
-                        .map(|(counted, _)| counted)
-                        .unwrap_or_else(|| summary.clone());
-                    files.push(FileSummary {
-                        path: summary.path.clone(),
-                        status: FileStatus::Modified,
-                        ..counted
-                    });
-                    text.push_str(&since);
+                    match split_files(&since).into_iter().next() {
+                        Some((counted, _)) => {
+                            files.push(FileSummary {
+                                path: summary.path.clone(),
+                                status: FileStatus::Modified,
+                                ..counted
+                            });
+                            text.push_str(&since);
+                        }
+                        // Hiding whitespace can empty the since-tick diff;
+                        // publishing the branch summary instead would fake a
+                        // changed file, so collapse like a matching tick.
+                        None if review.commented.contains(&summary.path) => {
+                            files.push(FileSummary {
+                                state: FileState::KeptForComments,
+                                ..summary
+                            });
+                            text.push_str(section);
+                        }
+                        None => {
+                            files.push(FileSummary {
+                                state: FileState::UnchangedSinceReview,
+                                ..summary
+                            });
+                        }
+                    }
                 }
                 // Never ticked, deleted since, or the ticked content is gone
                 // (rebased away and collected): show the full diff.
@@ -405,7 +431,9 @@ impl GitCli {
     }
 
     fn object_exists(&self, id: &Oid) -> Result<bool> {
-        Ok(self.try_read(&["cat-file", "-e", id.as_str()])?.is_some())
+        Ok(self
+            .try_read(&["cat-file", "-e", "--end-of-options", id.as_str()])?
+            .is_some())
     }
 
     /// Replay only `picked` (oldest first) onto the parent of the first one,
@@ -419,27 +447,10 @@ impl GitCli {
         worktree_on: Option<Oid>,
         ignore_whitespace: bool,
     ) -> Result<ScopedPatch> {
-        let scratch = Scratch::new()?;
-        let objects = scratch.path.join("objects");
-        std::fs::create_dir_all(&objects)?;
-        let index = scratch.path.join("index");
-        let real_objects =
-            self.absolute(self.read(&["rev-parse", "--git-path", "objects"])?.trim());
-
-        let with_scratch = |command: &mut Command| {
-            command
-                .env("GIT_INDEX_FILE", &index)
-                .env("GIT_OBJECT_DIRECTORY", &objects)
-                .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &real_objects);
-        };
-        let scratch_read = |args: &[&str], stdin: Option<&[u8]>| -> Result<String> {
-            let mut command = self.command();
-            with_scratch(&mut command);
-            run(command.args(args), args, stdin)
-        };
+        let scratch = self.scratch_git()?;
 
         let base = self.parent_of(&picked[0])?;
-        scratch_read(&["read-tree", &base], None)?;
+        scratch.read(self, &["read-tree", "--end-of-options", &base], None)?;
 
         let mut failed: HashMap<String, Oid> = HashMap::new();
         for commit in picked {
@@ -451,6 +462,7 @@ impl GitCli {
                 "--no-renames",
                 "-r",
                 "-z",
+                "--end-of-options",
                 &parent,
                 commit.as_str(),
             ])?;
@@ -466,21 +478,23 @@ impl GitCli {
                     "--binary",
                     "--full-index",
                     "--no-renames",
+                    "--end-of-options",
                     &parent,
                     commit.as_str(),
                     "--",
                     path,
                 ])?;
                 // A failed three-way apply can leave conflict entries behind.
-                let saved = std::fs::read(&index)?;
-                let applied = scratch_read(
+                let saved = std::fs::read(&scratch.index)?;
+                let applied = scratch.read(
+                    self,
                     &["apply", "--cached", "--3way", "--whitespace=nowarn", "-"],
                     Some(patch.as_bytes()),
                 );
                 match applied {
                     Ok(_) => {}
                     Err(BackendError::Git { .. }) => {
-                        std::fs::write(&index, saved)?;
+                        std::fs::write(&scratch.index, saved)?;
                         failed.insert(path.to_string(), commit.clone());
                     }
                     Err(other) => return Err(other),
@@ -497,15 +511,16 @@ impl GitCli {
                 if failed.contains_key(&summary.path) {
                     continue;
                 }
-                let saved = std::fs::read(&index)?;
-                let applied = scratch_read(
+                let saved = std::fs::read(&scratch.index)?;
+                let applied = scratch.read(
+                    self,
                     &["apply", "--cached", "--3way", "--whitespace=nowarn", "-"],
                     Some(section.as_bytes()),
                 );
                 match applied {
                     Ok(_) => {}
                     Err(BackendError::Git { .. }) => {
-                        std::fs::write(&index, saved)?;
+                        std::fs::write(&scratch.index, saved)?;
                         uncommitted_failed.push(summary.path);
                     }
                     Err(other) => return Err(other),
@@ -513,12 +528,12 @@ impl GitCli {
             }
         }
 
-        let tree = scratch_read(&["write-tree"], None)?;
+        let tree = scratch.read(self, &["write-tree"], None)?;
         let mut args = Self::diff_args(ignore_whitespace);
+        args.push("--end-of-options".to_string());
         args.push(base);
         args.push(tree.trim().to_string());
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let text = scratch_read(&args, None)?;
+        let text = scratch.read(self, &args, None)?;
 
         let mut files: Vec<FileSummary> = split_files(&text)
             .into_iter()
@@ -566,6 +581,12 @@ impl GitCli {
         path: &str,
         range: Option<usize>,
     ) -> Result<Option<Vec<BlameLine>>> {
+        // `git blame` reads an option-shaped revision as an option even
+        // behind `--end-of-options` (which also breaks its `--` path
+        // separator), so such a value is refused here: not a commit.
+        if rev.as_str().starts_with('-') {
+            return Ok(None);
+        }
         let range = range.map(|line| format!("-L{line},{line}"));
         let mut args = vec!["blame", "--porcelain"];
         if let Some(range) = &range {
@@ -607,7 +628,12 @@ impl ReviewBackend for GitCli {
         let base = match comparison.mode {
             CompareMode::EveryDifference => target_head.clone(),
             CompareMode::BranchAdds => self
-                .try_read(&["merge-base", target_head.as_str(), head.as_str()])?
+                .try_read(&[
+                    "merge-base",
+                    "--end-of-options",
+                    target_head.as_str(),
+                    head.as_str(),
+                ])?
                 .map(|output| Oid::new(output.trim()))
                 .ok_or_else(|| BackendError::NoMergeBase {
                     source_rev: comparison.source.clone(),
@@ -665,6 +691,7 @@ impl ReviewBackend for GitCli {
             "--name-only",
             "--find-renames",
             "-z",
+            "--end-of-options",
             resolved.base.as_str(),
             resolved.head.as_str(),
             "--",
@@ -815,6 +842,7 @@ impl ReviewBackend for GitCli {
             "--histogram",
             "--indent-heuristic",
             "-U0",
+            "--end-of-options",
             from.as_str(),
             to.as_str(),
             "--",
@@ -828,7 +856,13 @@ impl ReviewBackend for GitCli {
     fn blob_id(&self, rev: &Oid, path: &str) -> Result<Option<Oid>> {
         let spec = format!("{rev}:{path}");
         Ok(self
-            .try_read(&["rev-parse", "--verify", "--quiet", &spec])?
+            .try_read(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                &spec,
+            ])?
             .map(|output| Oid::new(output.trim())))
     }
 
@@ -878,7 +912,7 @@ impl ReviewBackend for GitCli {
             .map(|path| format!("{}\n", top.join(path).display()))
             .collect();
         let args = ["hash-object", "--stdin-paths"];
-        let output = run(self.command().args(args), &args, Some(list.as_bytes()))?;
+        let output = run(&mut self.command(), &args, Some(list.as_bytes()))?;
         Ok(present
             .into_iter()
             .zip(output.lines())
@@ -903,8 +937,9 @@ impl ReviewBackend for GitCli {
     }
 }
 
-fn run(command: &mut Command, args: &[&str], stdin: Option<&[u8]>) -> Result<String> {
+fn run(command: &mut Command, args: &[impl AsRef<str>], stdin: Option<&[u8]>) -> Result<String> {
     command
+        .args(args.iter().map(|argument| argument.as_ref()))
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -916,7 +951,11 @@ fn run(command: &mut Command, args: &[&str], stdin: Option<&[u8]>) -> Result<Str
     if let Some(input) = stdin {
         // Feed stdin from a thread: a large patch would otherwise deadlock
         // against git filling its stdout pipe.
-        let mut pipe = child.stdin.take().expect("stdin was piped");
+        let Some(mut pipe) = child.stdin.take() else {
+            // Unreachable with the piped stdin above; refuse, never panic.
+            let _ = child.kill();
+            return Err(std::io::Error::other("git's stdin pipe was not opened").into());
+        };
         let input = input.to_vec();
         std::thread::spawn(move || {
             let _ = pipe.write_all(&input);
@@ -927,7 +966,10 @@ fn run(command: &mut Command, args: &[&str], stdin: Option<&[u8]>) -> Result<Str
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
         Err(BackendError::Git {
-            command: args.first().copied().unwrap_or_default().to_string(),
+            command: args
+                .first()
+                .map(|argument| argument.as_ref().to_string())
+                .unwrap_or_default(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         })
     }
@@ -1099,28 +1141,38 @@ fn parse_blame(porcelain: &str) -> Vec<BlameLine> {
 
 /// The `@@ -a,b +c,d @@` headers of a `-U0` diff, one region each.
 fn parse_regions(patch: &str) -> Vec<ChangedRegion> {
-    let span = |text: &str| -> Option<(usize, usize)> {
-        match text.split_once(',') {
-            Some((start, lines)) => Some((start.parse().ok()?, lines.parse().ok()?)),
-            None => Some((text.parse().ok()?, 1)),
-        }
-    };
     patch
         .lines()
-        .filter_map(|line| {
-            let rest = line.strip_prefix("@@ -")?;
-            let (old, rest) = rest.split_once(" +")?;
-            let (new, _) = rest.split_once(" @@")?;
-            let (old_start, old_lines) = span(old)?;
-            let (new_start, new_lines) = span(new)?;
-            Some(ChangedRegion {
-                old_start,
-                old_lines,
-                new_start,
-                new_lines,
-            })
-        })
+        .filter_map(crate::patch::hunk_header)
         .collect()
+}
+
+/// A scratch git environment: a private index and object directory, with
+/// the repository's objects readable as an alternate. Routing every command
+/// that stages entries or writes objects through here is what keeps the
+/// reviewed repository untouched, so the trio lives in one place.
+struct ScratchGit {
+    index: PathBuf,
+    objects: PathBuf,
+    real_objects: PathBuf,
+    /// Held for its drop: the directory the index and objects live in.
+    _scratch: Scratch,
+}
+
+impl ScratchGit {
+    fn read(
+        &self,
+        backend: &GitCli,
+        args: &[impl AsRef<str>],
+        stdin: Option<&[u8]>,
+    ) -> Result<String> {
+        let mut command = backend.command();
+        command
+            .env("GIT_INDEX_FILE", &self.index)
+            .env("GIT_OBJECT_DIRECTORY", &self.objects)
+            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &self.real_objects);
+        run(&mut command, args, stdin)
+    }
 }
 
 /// A temporary directory removed on drop.
