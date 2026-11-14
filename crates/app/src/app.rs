@@ -8,8 +8,12 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
+use diffie_core::classify::{
+    self, Class, ClassifiedRange, ClassifyInput, FileClassSummary, GeneratedRules, ParseCache,
+    RenameInfo,
+};
 use diffie_core::review::{
     ArchiveFile, NewComment, Placement, ReactionKind, ReviewFile, ReviewInput, ReviewSet,
     ReviewState, Side, as_prompt, map_line, place,
@@ -73,6 +77,8 @@ mod commands {
             ScopeCustom,
             CollapseAll,
             ExpandAll,
+            ToggleMechanical,
+            JumpCounterpart,
             StartComment,
             PickerToggle,
             CancelDraft,
@@ -100,6 +106,8 @@ mod commands {
             MenuHideWhitespace,
             MenuCollapseAll,
             MenuExpandAll,
+            MenuToggleMechanical,
+            MenuMarkMechanicalReviewed,
             MenuFileList,
             MenuEarlierComments,
             MenuNextChange,
@@ -190,6 +198,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("3", ScopeCustom, DIFF),
         KeyBinding::new("z shift-m", CollapseAll, DIFF),
         KeyBinding::new("z shift-r", ExpandAll, DIFF),
+        KeyBinding::new("m", ToggleMechanical, DIFF),
+        KeyBinding::new("%", JumpCounterpart, DIFF),
         KeyBinding::new("c", StartComment, DIFF),
         KeyBinding::new("r", MarkReviewed, DIFF),
         KeyBinding::new("n", NextComment, DIFF),
@@ -246,6 +256,11 @@ fn install_menus(cx: &mut App) {
             MenuItem::action("Split | Unified", MenuSplitUnified),
             MenuItem::action("Wrap long lines", MenuWrap),
             MenuItem::action("Hide whitespace-only changes", MenuHideWhitespace),
+            MenuItem::action("Cycle mechanical changes", MenuToggleMechanical),
+            MenuItem::action(
+                "Mark fully mechanical files as reviewed",
+                MenuMarkMechanicalReviewed,
+            ),
             MenuItem::separator(),
             MenuItem::action("Collapse all files", MenuCollapseAll),
             MenuItem::action("Expand all files", MenuExpandAll),
@@ -420,23 +435,303 @@ fn indent_guides(depth: usize, cx: &App) -> impl Iterator<Item = gpui_kit::Div> 
 }
 
 /// Lockfiles and similar machine-written files start collapsed and are
-/// listed quietly.
+/// listed quietly. The list lives in the core's classifier; this is the
+/// render-path shortcut over the same rules.
+static GENERATED_RULES: LazyLock<GeneratedRules> = LazyLock::new(GeneratedRules::default);
+
 fn is_generated(path: &str) -> bool {
-    let name = path.rsplit_once('/').map_or(path, |(_, name)| name);
-    matches!(
-        name,
-        "Cargo.lock"
-            | "package-lock.json"
-            | "yarn.lock"
-            | "pnpm-lock.yaml"
-            | "go.sum"
-            | "Gemfile.lock"
-            | "composer.lock"
-            | "flake.lock"
-            | "poetry.lock"
-            | "uv.lock"
-    ) || name.ends_with(".min.js")
-        || name.ends_with(".min.css")
+    GENERATED_RULES.matches(path)
+}
+
+/// Whether the diff hides, shows, or inverts the mechanical changes.
+/// Session-only until settings persistence exists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum MechanicalView {
+    /// Mechanical ranges fold behind their proof. The default.
+    #[default]
+    Folded,
+    /// No folds; the neutral tint stays.
+    Shown,
+    /// The meaningful ranges fold instead, so only the mechanical part is
+    /// open - for sweeping it in one pass.
+    OnlyMechanical,
+}
+
+/// What the background classification produced for the current load.
+struct ClassifySet {
+    ranges: Vec<ClassifiedRange>,
+    summaries: HashMap<String, FileClassSummary>,
+}
+
+/// The classify side mapped onto the Kit's.
+fn class_side(side: classify::Side) -> DiffSide {
+    match side {
+        classify::Side::Old => DiffSide::Original,
+        classify::Side::New => DiffSide::Modified,
+    }
+}
+
+/// The one-word tag the file panel's mechanical group shows.
+fn class_word(class: Class) -> &'static str {
+    match class {
+        Class::Moved | Class::MovedAndEdited | Class::MovedContextChanged => "moved",
+        Class::RenamedFile => "renamed",
+        Class::Formatting => "formatting",
+        Class::Generated => "generated",
+        Class::CommentOnly => "comments",
+        Class::Copied => "copied",
+    }
+}
+
+/// Lines a classified range deserves a tint for: proven mechanical, a
+/// comment-only edit, or an identical move whose context changed - the
+/// classes whose rows should not read as red and green work.
+fn tinted(class: Class) -> bool {
+    class.is_mechanical() || matches!(class, Class::CommentOnly | Class::MovedContextChanged)
+}
+
+/// The annotation id of a classified range, shared between the annotation
+/// list and the snapshot's note texts.
+fn class_note_id(range: &ClassifiedRange) -> ElementId {
+    let side = match range.side {
+        classify::Side::Old => "old",
+        classify::Side::New => "new",
+    };
+    ElementId::from(SharedString::from(format!(
+        "class-{}-{side}-{}",
+        range.path, range.first_line
+    )))
+}
+
+/// What the classifier needs per changed file, read off the patch text: the
+/// full blob ids of the `index` line (`None` for the all-zero id, which
+/// names no object) and the changed regions of each hunk, context excluded.
+#[derive(Default)]
+struct ClassFacts {
+    old_id: Option<String>,
+    new_id: Option<String>,
+    regions: Vec<ChangedRegion>,
+}
+
+/// Collects [`ClassFacts`] per file, keyed the way [`FileSummary::path`]
+/// keys: the new-side path, the old one for deletions.
+fn class_facts(patch: &str) -> HashMap<String, ClassFacts> {
+    let mut facts: HashMap<String, ClassFacts> = HashMap::new();
+    let mut current = ClassFacts::default();
+    let mut old_name: Option<String> = None;
+    let mut new_name: Option<String> = None;
+    let mut old_line = 0usize;
+    let mut new_line = 0usize;
+    let mut in_hunk = false;
+    // An open run of changed lines: (old_start, new_start, old_lines,
+    // new_lines). Closed by context, a header, or the end of the patch.
+    let mut block: Option<(usize, usize, usize, usize)> = None;
+
+    fn close_block(
+        block: &mut Option<(usize, usize, usize, usize)>,
+        regions: &mut Vec<ChangedRegion>,
+    ) {
+        if let Some((old_start, new_start, old_lines, new_lines)) = block.take() {
+            regions.push(ChangedRegion {
+                // A pure insertion names the line it comes after, a pure
+                // deletion the mirror (the unified-diff convention).
+                old_start: if old_lines == 0 {
+                    old_start.saturating_sub(1)
+                } else {
+                    old_start
+                },
+                old_lines,
+                new_start: if new_lines == 0 {
+                    new_start.saturating_sub(1)
+                } else {
+                    new_start
+                },
+                new_lines,
+            });
+        }
+    }
+
+    fn flush(
+        facts: &mut HashMap<String, ClassFacts>,
+        current: &mut ClassFacts,
+        old_name: &mut Option<String>,
+        new_name: &mut Option<String>,
+    ) {
+        let path = match (new_name.take(), old_name.take()) {
+            (Some(name), _) if name != "/dev/null" => Some(name),
+            (_, Some(name)) if name != "/dev/null" => Some(name),
+            _ => None,
+        };
+        if let Some(path) = path {
+            facts.insert(path, std::mem::take(current));
+        } else {
+            *current = ClassFacts::default();
+        }
+    }
+
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            close_block(&mut block, &mut current.regions);
+            flush(&mut facts, &mut current, &mut old_name, &mut new_name);
+            in_hunk = false;
+        } else if !in_hunk && let Some(rest) = line.strip_prefix("index ") {
+            let parse = |id: &str| {
+                let id: String = id.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+                (!id.is_empty() && !id.bytes().all(|b| b == b'0')).then_some(id)
+            };
+            if let Some((old, new)) = rest.split_once("..") {
+                current.old_id = parse(old);
+                current.new_id = parse(new);
+            }
+        } else if !in_hunk && let Some(rest) = line.strip_prefix("--- ") {
+            old_name = Some(rest.strip_prefix("a/").unwrap_or(rest).to_string());
+        } else if !in_hunk && let Some(rest) = line.strip_prefix("+++ ") {
+            new_name = Some(rest.strip_prefix("b/").unwrap_or(rest).to_string());
+        } else if let Some(header) = line.strip_prefix("@@ ") {
+            close_block(&mut block, &mut current.regions);
+            let span =
+                |text: &str| -> Option<usize> { text.split(',').next()?.parse::<usize>().ok() };
+            let mut parts = header.split(' ');
+            let old = parts.next().and_then(|part| span(part.strip_prefix('-')?));
+            let new = parts.next().and_then(|part| span(part.strip_prefix('+')?));
+            if let (Some(old), Some(new)) = (old, new) {
+                old_line = old;
+                new_line = new;
+                in_hunk = true;
+            } else {
+                in_hunk = false;
+            }
+        } else if in_hunk {
+            match line.as_bytes().first() {
+                Some(b'-') => {
+                    let (.., old_lines, _) = block.get_or_insert((old_line, new_line, 0, 0));
+                    *old_lines += 1;
+                    old_line += 1;
+                }
+                Some(b'+') => {
+                    let (.., new_lines) = block.get_or_insert((old_line, new_line, 0, 0));
+                    *new_lines += 1;
+                    new_line += 1;
+                }
+                Some(b' ') => {
+                    close_block(&mut block, &mut current.regions);
+                    old_line += 1;
+                    new_line += 1;
+                }
+                // `\ No newline at end of file` touches no counter.
+                Some(b'\\') => {}
+                _ => {
+                    close_block(&mut block, &mut current.regions);
+                    in_hunk = false;
+                }
+            }
+        }
+    }
+    close_block(&mut block, &mut current.regions);
+    flush(&mut facts, &mut current, &mut old_name, &mut new_name);
+    facts
+}
+
+/// One file's fetched contents, owned so [`ClassifyInput`] can borrow them.
+struct ClassFile {
+    path: String,
+    old_text: String,
+    new_text: String,
+    regions: Vec<ChangedRegion>,
+    renamed_from: Option<String>,
+    similarity: Option<u8>,
+    old_id: Option<String>,
+    new_id: Option<String>,
+}
+
+/// Runs on a background thread: fetches both sides of every changed file
+/// and classifies them. A binary file, or one whose content cannot be read
+/// as text, is skipped and stays meaningful.
+fn classify_files(backend: &dyn ReviewBackend, patch: &str, files: &[FileSummary]) -> ClassifySet {
+    let facts = class_facts(patch);
+    let mut fetched: Vec<ClassFile> = Vec::new();
+    for file in files {
+        if file.binary || file.state == FileState::UnchangedSinceReview {
+            continue;
+        }
+        let (old_id, new_id, regions) = match facts.get(&file.path) {
+            Some(facts) => (
+                facts.old_id.clone(),
+                facts.new_id.clone(),
+                facts.regions.clone(),
+            ),
+            // A 100% rename emits neither index line nor hunks; the rename
+            // header alone settles it, so empty texts suffice.
+            None if file.similarity == Some(100) && file.renamed_from.is_some() => {
+                (None, None, Vec::new())
+            }
+            None => continue,
+        };
+        let old_text = match &old_id {
+            Some(id) => match backend.blob_content(&Oid::new(id.clone())) {
+                Ok(Some(text)) => text,
+                _ => continue,
+            },
+            // The all-zero id: the file did not exist on the old side.
+            None => String::new(),
+        };
+        let new_text = if file.status == FileStatus::Deleted {
+            String::new()
+        } else {
+            match &new_id {
+                Some(id) => match backend.blob_content(&Oid::new(id.clone())) {
+                    Ok(Some(text)) => text,
+                    _ => continue,
+                },
+                // A zero id on the new side of a living file: the content
+                // is the working tree's, which no stored blob backs.
+                None => match backend.worktree_content(&file.path) {
+                    Ok(Some(text)) => text,
+                    _ => continue,
+                },
+            }
+        };
+        fetched.push(ClassFile {
+            path: file.path.clone(),
+            old_text,
+            new_text,
+            regions,
+            renamed_from: file.renamed_from.clone(),
+            similarity: file.similarity,
+            old_id,
+            new_id,
+        });
+    }
+    let cache = backend
+        .review_dir()
+        .ok()
+        .map(|dir| ParseCache::new(dir.join(".cache")));
+    let inputs: Vec<ClassifyInput<'_>> = fetched
+        .iter()
+        .map(|file| ClassifyInput {
+            path: &file.path,
+            old_text: &file.old_text,
+            new_text: &file.new_text,
+            regions: &file.regions,
+            rename: file.renamed_from.as_deref().map(|old_path| RenameInfo {
+                old_path,
+                similarity: file.similarity,
+            }),
+            // .gitattributes is not wired up yet; the glob list and the
+            // `@generated` marker carry the class alone.
+            linguist_generated: false,
+            old_blob: file.old_id.as_deref(),
+            new_blob: file.new_id.as_deref(),
+        })
+        .collect();
+    let results = classify::classify(&inputs, &GENERATED_RULES, cache.as_ref());
+    let mut ranges = Vec::new();
+    let mut summaries = HashMap::new();
+    for (file, result) in fetched.iter().zip(results) {
+        ranges.extend(result.ranges);
+        summaries.insert(file.path.clone(), result.summary);
+    }
+    ClassifySet { ranges, summaries }
 }
 
 /// One run of added or removed lines, parsed from the patch so the diff rows
@@ -672,8 +967,6 @@ struct Loaded {
     /// A stale `completed` marker was cleared and the file needs saving.
     completed_cleared: bool,
     placed: Vec<Placed>,
-    /// Blocks the patch moves verbatim; the diff folds them behind labels.
-    moved: Vec<diffie_core::moved::MovedBlock>,
 }
 
 /// What annotation and header callbacks may read. They receive an `App`, not
@@ -687,6 +980,9 @@ struct Snapshot {
     resolved_markers: Vec<ResolvedMarker>,
     /// The line under the pointer; its marker brightens.
     hovered_line: Option<DiffLinePosition>,
+    /// Proof texts of the classified ranges that render as annotations
+    /// (moved-and-edited, moved-context-changed), by annotation id.
+    class_notes: HashMap<ElementId, SharedString>,
 }
 
 /// A line's resolved threads, behind one gutter-lane marker.
@@ -782,6 +1078,12 @@ struct FileView {
     other_revision: usize,
     /// How many of the comments sit on code rewritten since they were made.
     changed_code_comments: usize,
+    /// The proof of a fully mechanical file, carried in the collapsed
+    /// header so expanding it is an informed choice.
+    mechanical: Option<SharedString>,
+    /// Mechanical plus comment-only lines of a mixed file; shown grey next
+    /// to the meaningful counts. Zero until classification arrives.
+    quiet_lines: usize,
 }
 
 pub struct ReviewApp {
@@ -854,6 +1156,11 @@ pub struct ReviewApp {
     /// Folders the reviewer closed in the file panel, by full path.
     collapsed_folders: HashSet<String>,
     runs: Vec<ChangedRun>,
+    /// What the classification task settled for the current load; `None`
+    /// while it runs or after it was outrun by a reload.
+    classes: Option<ClassifySet>,
+    mechanical_view: MechanicalView,
+    _classify: Task<()>,
     picker_query: Entity<InputState>,
     picker_focus: FocusHandle,
     layout: Entity<ResizableState>,
@@ -991,6 +1298,9 @@ impl ReviewApp {
             _whole_patch: Task::ready(()),
             collapsed_folders: HashSet::new(),
             runs: Vec::new(),
+            classes: None,
+            mechanical_view: MechanicalView::default(),
+            _classify: Task::ready(()),
             picker_query,
             picker_focus: cx.focus_handle(),
             layout: cx.new(|_| ResizableState::default()),
@@ -1148,44 +1458,9 @@ impl ReviewApp {
                         true,
                         cx,
                     );
-                    // Verbatim-moved blocks fold behind a label on both ends;
-                    // a click reveals them when the address change matters.
-                    state.set_folds(
-                        loaded.moved.iter().flat_map(|block| {
-                            let span = |start: usize, end: usize| {
-                                if start == end {
-                                    format!("{start}")
-                                } else {
-                                    format!("{start}-{end}")
-                                }
-                            };
-                            [
-                                DiffFold::new(
-                                    block.from_path.clone(),
-                                    DiffSide::Original,
-                                    block.from_start,
-                                    block.lines,
-                                    format!(
-                                        "moved to {}:{}",
-                                        block.to_path,
-                                        span(block.to_start, block.to_end())
-                                    ),
-                                ),
-                                DiffFold::new(
-                                    block.to_path.clone(),
-                                    DiffSide::Modified,
-                                    block.to_start,
-                                    block.lines,
-                                    format!(
-                                        "moved from {}:{}",
-                                        block.from_path,
-                                        span(block.from_start, block.from_end())
-                                    ),
-                                ),
-                            ]
-                        }),
-                        cx,
-                    );
+                    // Folds belong to the classification task, which has not
+                    // run for this load yet; stale ones must not survive.
+                    state.set_folds([], cx);
                 });
                 self.resolved = Some(loaded.resolved);
                 self.commits = Arc::new(loaded.commits);
@@ -1253,10 +1528,14 @@ impl ReviewApp {
                 if self.search_open {
                     self.run_search(cx);
                 }
+                // The diff is on screen; what is mechanical arrives when the
+                // second task finishes.
+                self.spawn_classify(cx);
             }
             Err(error) => {
                 self.diff.update(cx, |state, cx| state.set_files([], cx));
                 self.files = Arc::default();
+                self.classes = None;
                 self.placed.clear();
                 self.pending_jump = None;
                 self.pending_comment_jump = false;
@@ -1308,6 +1587,257 @@ impl ReviewApp {
             });
         })
         .detach();
+    }
+
+    // ---- mechanical changes --------------------------------------------
+
+    /// The second background task of a load: fetch both sides of every
+    /// changed file and classify them, never on the UI thread. Same
+    /// stale-discard pattern as the whole-branch search fetch.
+    fn spawn_classify(&mut self, cx: &mut Context<Self>) {
+        self.classes = None;
+        let backend = self.backend.clone();
+        let patch = self.patch_text.clone();
+        let files = self.files.clone();
+        let revision = self.revision;
+        self._classify = cx.spawn(async move |this, cx| {
+            let classes = cx
+                .background_spawn(async move { classify_files(&*backend, &patch, &files) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.revision != revision {
+                    return;
+                }
+                this.install_classes(classes, cx);
+            });
+        });
+    }
+
+    fn install_classes(&mut self, classes: ClassifySet, cx: &mut Context<Self>) {
+        let fully_mechanical: Vec<SharedString> = classes
+            .summaries
+            .values()
+            .filter(|summary| summary.fully_mechanical.is_some())
+            .map(|summary| SharedString::from(summary.path.clone()))
+            .collect();
+        self.classes = Some(classes);
+        if !fully_mechanical.is_empty() {
+            // Like generated files: present, collapsed, one click away.
+            self.diff.update(cx, |state, cx| {
+                state.set_files_collapsed(fully_mechanical, true, cx)
+            });
+        }
+        self.apply_mechanical_folds(cx);
+        cx.notify();
+    }
+
+    /// True when a placed comment touches the given lines; such a range is
+    /// never folded - the comment is the reviewer's business there.
+    fn commented(&self, path: &str, side: DiffSide, first: usize, last: usize) -> bool {
+        self.placed.iter().any(|placed| {
+            let start = placed.line.saturating_sub(placed.lines.saturating_sub(1));
+            placed.path == path
+                && diff_side(placed.side) == side
+                && start <= last
+                && placed.line >= first
+        })
+    }
+
+    /// The folds the current view state asks for. Recomputed whole on every
+    /// change: folds are owned by the classification, nothing else sets them.
+    fn mechanical_folds(&self) -> Vec<DiffFold> {
+        let Some(classes) = &self.classes else {
+            return Vec::new();
+        };
+        match self.mechanical_view {
+            MechanicalView::Shown => Vec::new(),
+            MechanicalView::Folded => classes
+                .ranges
+                .iter()
+                .filter(|range| range.class.is_mechanical())
+                .filter(|range| range.last_line + 1 - range.first_line >= 4)
+                .filter(|range| {
+                    !self.commented(
+                        &range.path,
+                        class_side(range.side),
+                        range.first_line,
+                        range.last_line,
+                    )
+                })
+                .map(|range| {
+                    let lines = range.last_line + 1 - range.first_line;
+                    // "48 lines moved to `src/b.rs:40`, identical tokens";
+                    // the other proofs do not read as a sentence, so they
+                    // get a separator.
+                    let label = match range.class {
+                        Class::Moved => format!("{lines} lines {}", range.proof),
+                        _ => format!("{lines} lines · {}", range.proof),
+                    };
+                    DiffFold::new(
+                        range.path.clone(),
+                        class_side(range.side),
+                        range.first_line,
+                        lines,
+                        label,
+                    )
+                })
+                .collect(),
+            MechanicalView::OnlyMechanical => {
+                // The inverse: every changed run keeps only what some class
+                // claimed; the remainder - the meaningful lines - folds.
+                let mut covered: HashMap<(&str, DiffSide), Vec<(usize, usize)>> = HashMap::new();
+                for range in &classes.ranges {
+                    covered
+                        .entry((range.path.as_str(), class_side(range.side)))
+                        .or_default()
+                        .push((range.first_line, range.last_line));
+                }
+                for placed in &self.placed {
+                    let start = placed.line.saturating_sub(placed.lines.saturating_sub(1));
+                    covered
+                        .entry((placed.path.as_str(), diff_side(placed.side)))
+                        .or_default()
+                        .push((start, placed.line));
+                }
+                let mut folds = Vec::new();
+                for run in &self.runs {
+                    let mut segments = vec![(run.start, run.end)];
+                    if let Some(intervals) = covered.get(&(run.path.as_ref(), run.side)) {
+                        for &(from, to) in intervals {
+                            segments = segments
+                                .into_iter()
+                                .flat_map(|(start, end)| {
+                                    if to < start || from > end {
+                                        return vec![(start, end)];
+                                    }
+                                    let mut kept = Vec::new();
+                                    if from > start {
+                                        kept.push((start, from - 1));
+                                    }
+                                    if to < end {
+                                        kept.push((to + 1, end));
+                                    }
+                                    kept
+                                })
+                                .collect();
+                        }
+                    }
+                    for (start, end) in segments {
+                        let lines = end + 1 - start;
+                        folds.push(DiffFold::new(
+                            run.path.clone(),
+                            run.side,
+                            start,
+                            lines,
+                            format!("{lines} line{} to read", if lines == 1 { "" } else { "s" }),
+                        ));
+                    }
+                }
+                folds
+            }
+        }
+    }
+
+    fn apply_mechanical_folds(&mut self, cx: &mut Context<Self>) {
+        let folds = self.mechanical_folds();
+        self.diff.update(cx, |state, cx| state.set_folds(folds, cx));
+    }
+
+    fn set_mechanical_view(&mut self, view: MechanicalView, cx: &mut Context<Self>) {
+        if self.mechanical_view == view {
+            return;
+        }
+        self.mechanical_view = view;
+        self.apply_mechanical_folds(cx);
+        cx.notify();
+    }
+
+    fn cycle_mechanical(&mut self, cx: &mut Context<Self>) {
+        let next = match self.mechanical_view {
+            MechanicalView::Folded => MechanicalView::Shown,
+            MechanicalView::Shown => MechanicalView::OnlyMechanical,
+            MechanicalView::OnlyMechanical => MechanicalView::Folded,
+        };
+        self.set_mechanical_view(next, cx);
+    }
+
+    /// Jumps from a moved range to its other end, revealing the fold there.
+    /// The reviewer's place is the gutter selection, or failing that the
+    /// line under the pointer.
+    fn jump_counterpart(&mut self, cx: &mut Context<Self>) {
+        let Some(classes) = &self.classes else {
+            return;
+        };
+        let position = self
+            .diff
+            .read(cx)
+            .selected_lines()
+            .map(|range| DiffLinePosition::new(range.path().clone(), range.end_side(), range.end()))
+            .or_else(|| self.hovered_line.clone());
+        let Some(position) = position else {
+            return;
+        };
+        let Some(range) = classes.ranges.iter().find(|range| {
+            range.counterpart.is_some()
+                && range.path.as_str() == position.path().as_ref()
+                && class_side(range.side) == position.side()
+                && (range.first_line..=range.last_line).contains(&position.line())
+        }) else {
+            return;
+        };
+        let Some(counterpart) = range.counterpart.clone() else {
+            return;
+        };
+        // The other end lives on the other side of the comparison.
+        let side = match range.side {
+            classify::Side::Old => Side::New,
+            classify::Side::New => Side::Old,
+        };
+        self.show_hit(&counterpart.path, side, counterpart.first_line, cx);
+        cx.notify();
+    }
+
+    /// The menu's bulk tick: the ordinary per-file reviewed action for every
+    /// fully mechanical file, in one save. Never run on its own.
+    fn mark_mechanical_reviewed(&mut self, cx: &mut Context<Self>) {
+        let Some(classes) = &self.classes else {
+            return;
+        };
+        let paths: Vec<String> = classes
+            .summaries
+            .values()
+            .filter(|summary| summary.fully_mechanical.is_some())
+            .map(|summary| summary.path.clone())
+            .filter(|path| self.review_state(path) != ReviewState::Reviewed)
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let blobs: Vec<(String, Option<Oid>)> = paths
+            .iter()
+            .map(|path| (path.clone(), self.blobs.get(path).cloned().flatten()))
+            .collect();
+        let (Some(set), Some(resolved)) = (self.reviews.as_mut(), self.resolved.as_ref()) else {
+            return;
+        };
+        for (path, blob) in blobs {
+            set.mine.mark_reviewed(&path, blob, resolved.head.clone());
+        }
+        set.mine.complete_if_all_reviewed(
+            self.branch
+                .iter()
+                .map(|(path, blob)| (path.as_str(), blob.as_ref())),
+            &resolved.head,
+        );
+        self.diff.update(cx, |state, cx| {
+            state.set_files_collapsed(
+                paths.iter().map(|path| SharedString::from(path.clone())),
+                true,
+                cx,
+            )
+        });
+        self.save_review(cx);
+        cx.notify();
     }
 
     // ---- scope and commits ---------------------------------------------
@@ -2340,6 +2870,8 @@ impl ReviewApp {
                         other_revision,
                         changed_since: false,
                     });
+                    // A commented range must not stay folded.
+                    this.apply_mechanical_folds(cx);
                 }
                 this.save_review(cx);
                 cx.notify();
@@ -2425,6 +2957,9 @@ impl ReviewApp {
             && set.mine.delete_comment(id)
         {
             self.placed.retain(|placed| placed.id != id);
+            // The lines may be mechanical again now that no comment holds
+            // them open.
+            self.apply_mechanical_folds(cx);
             self.save_review(cx);
             cx.notify();
         }
@@ -2639,12 +3174,40 @@ impl ReviewApp {
             tally.other_revision += usize::from(placed.other_revision);
             tally.changed_since += usize::from(placed.changed_since);
         }
+        // One proof per file is enough for a header; the first range's is
+        // as good as any, because a fully mechanical file has one class.
+        let mut class_proofs: HashMap<&str, SharedString> = HashMap::new();
+        if let Some(classes) = &self.classes {
+            for range in &classes.ranges {
+                class_proofs
+                    .entry(range.path.as_str())
+                    .or_insert_with(|| SharedString::from(range.proof.clone()));
+            }
+        }
         let files = self
             .files
             .iter()
             .map(|file| {
                 let state = self.review_state(&file.path);
                 let generated = is_generated(&file.path);
+                let summary = self
+                    .classes
+                    .as_ref()
+                    .and_then(|classes| classes.summaries.get(&file.path));
+                let mechanical = summary
+                    .filter(|summary| summary.fully_mechanical.is_some())
+                    .and_then(|_| class_proofs.get(file.path.as_str()).cloned());
+                // A classified mixed file counts what must be read; the
+                // mechanical rest goes grey. Unclassified files keep the
+                // patch's raw counts.
+                let (additions, deletions, quiet_lines) = match summary {
+                    Some(summary) if summary.fully_mechanical.is_none() => (
+                        summary.meaningful_added,
+                        summary.meaningful_removed,
+                        summary.mechanical_lines + summary.comment_only_lines,
+                    ),
+                    _ => (file.additions, file.deletions, 0),
+                };
                 let note = match &file.state {
                     FileState::CouldNotCombine { commit } => Some(
                         format!(
@@ -2698,8 +3261,8 @@ impl ReviewApp {
                         state,
                         status: file.status,
                         note,
-                        additions: file.additions,
-                        deletions: file.deletions,
+                        additions,
+                        deletions,
                         binary: file.binary,
                         generated,
                         touched,
@@ -2709,6 +3272,8 @@ impl ReviewApp {
                         comments: tally.map_or(0, |tally| tally.comments),
                         other_revision: tally.map_or(0, |tally| tally.other_revision),
                         changed_code_comments: tally.map_or(0, |tally| tally.changed_since),
+                        mechanical,
+                        quiet_lines,
                     },
                 )
             })
@@ -2732,12 +3297,35 @@ impl ReviewApp {
                 editing: draft.editing.is_some(),
             }
         });
+        let class_notes = self
+            .classes
+            .as_ref()
+            .map(|classes| {
+                classes
+                    .ranges
+                    .iter()
+                    .filter(|range| {
+                        matches!(
+                            range.class,
+                            Class::MovedAndEdited | Class::MovedContextChanged
+                        )
+                    })
+                    .map(|range| {
+                        (
+                            class_note_id(range),
+                            SharedString::from(range.proof.clone()),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Snapshot {
             threads,
             files,
             draft,
             resolved_markers,
             hovered_line: self.hovered_line.clone(),
+            class_notes,
         }
     }
 
@@ -2754,6 +3342,26 @@ impl ReviewApp {
                 ))
             })
             .collect();
+        // The classified ranges that carry help render it beneath their
+        // first line: where the code came from, or why an identical move
+        // still needs reading.
+        if let Some(classes) = &self.classes {
+            for range in classes.ranges.iter().filter(|range| {
+                matches!(
+                    range.class,
+                    Class::MovedAndEdited | Class::MovedContextChanged
+                )
+            }) {
+                annotations.push(DiffAnnotation::line(
+                    class_note_id(range),
+                    DiffLinePosition::new(
+                        SharedString::from(range.path.clone()),
+                        class_side(range.side),
+                        range.first_line,
+                    ),
+                ));
+            }
+        }
         if let Some(draft) = &self.draft {
             let range = &draft.range;
             annotations.push(DiffAnnotation::line(
@@ -3518,13 +4126,23 @@ impl ReviewApp {
         } else {
             reviewed as f32 * 100. / self.files.len() as f32
         };
-        bar.child(format!("{reviewed} of {} files reviewed", self.files.len()))
-            .child(
-                Progress::new("files-reviewed")
-                    .value(progress)
-                    .xsmall()
-                    .w(px(90.)),
-            )
+        let mechanical_files = self.classes.as_ref().map_or(0, |classes| {
+            classes
+                .summaries
+                .values()
+                .filter(|summary| summary.fully_mechanical.is_some())
+                .count()
+        });
+        let mut progress_text = format!("{reviewed} of {} files reviewed", self.files.len());
+        if mechanical_files > 0 {
+            progress_text.push_str(&format!(" · {mechanical_files} mechanical"));
+        }
+        bar.child(progress_text).child(
+            Progress::new("files-reviewed")
+                .value(progress)
+                .xsmall()
+                .w(px(90.)),
+        )
     }
 
     fn render_scope_bar(&self, reviewed: usize, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3583,6 +4201,53 @@ impl ReviewApp {
             )
             .child(self.render_commit_picker(cx))
             .child(div().text_color(muted).child(explanation))
+            .when_some(self.classes.as_ref(), |bar, classes| {
+                let mut read = 0;
+                let mut mechanical = 0;
+                let mut comment_only = 0;
+                for summary in classes.summaries.values() {
+                    read += summary.meaningful_added + summary.meaningful_removed;
+                    mechanical += summary.mechanical_lines;
+                    comment_only += summary.comment_only_lines;
+                }
+                bar.child(div().text_color(muted).child(format!(
+                    "{read} lines to read · {mechanical} mechanical · {comment_only} comment-only"
+                )))
+                .child(
+                    ToggleGroup::new("mechanical-view")
+                        .outline()
+                        .segmented()
+                        .single()
+                        .xsmall()
+                        .child(
+                            Toggle::new("mech-folded")
+                                .label("folded")
+                                .tooltip("Mechanical ranges fold behind their proof (m cycles)")
+                                .checked(self.mechanical_view == MechanicalView::Folded),
+                        )
+                        .child(
+                            Toggle::new("mech-shown")
+                                .label("shown")
+                                .tooltip("No folds; the tint stays")
+                                .checked(self.mechanical_view == MechanicalView::Shown),
+                        )
+                        .child(
+                            Toggle::new("mech-only")
+                                .label("only mechanical")
+                                .tooltip("The meaningful ranges fold instead")
+                                .checked(self.mechanical_view == MechanicalView::OnlyMechanical),
+                        )
+                        .on_click(cx.listener(|this, checks: &Vec<bool>, _, cx| {
+                            let view = match checks.iter().position(|checked| *checked) {
+                                Some(0) => MechanicalView::Folded,
+                                Some(1) => MechanicalView::Shown,
+                                Some(2) => MechanicalView::OnlyMechanical,
+                                _ => return,
+                            };
+                            this.set_mechanical_view(view, cx);
+                        })),
+                )
+            })
             .child(div().flex_1())
             .map(|bar| self.render_review_progress(bar, reviewed, cx))
     }
@@ -3668,7 +4333,15 @@ impl ReviewApp {
             )
     }
 
-    fn render_file_row(&self, index: usize, depth: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// One file row. `tag` is the one-word class of the mechanical group's
+    /// rows; `None` for the ordinary tree.
+    fn render_file_row(
+        &self,
+        index: usize,
+        depth: usize,
+        tag: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let file = &self.files[index];
         let muted = cx.theme().muted_foreground;
         let mono = cx.theme().mono_font_family.clone();
@@ -3690,7 +4363,24 @@ impl ReviewApp {
             .count();
         let state = self.review_state(&file.path);
         let unchanged = file.state == FileState::UnchangedSinceReview;
-        let quiet = state == ReviewState::Reviewed || unchanged || is_generated(&file.path);
+        let quiet = state == ReviewState::Reviewed
+            || unchanged
+            || is_generated(&file.path)
+            || tag.is_some();
+        let summary = self
+            .classes
+            .as_ref()
+            .and_then(|classes| classes.summaries.get(&file.path));
+        // Meaningful counts in colour, the mechanical and comment-only rest
+        // in grey; unclassified files keep the patch's raw counts.
+        let (additions, deletions, quiet_lines) = match summary {
+            Some(summary) if summary.fully_mechanical.is_none() => (
+                summary.meaningful_added,
+                summary.meaningful_removed,
+                summary.mechanical_lines + summary.comment_only_lines,
+            ),
+            _ => (file.additions, file.deletions, 0),
+        };
         let selected = self.current_file.as_ref() == Some(&path);
         let target = path.clone();
         let counts = |count: usize, sign: char, color: Hsla| {
@@ -3741,14 +4431,27 @@ impl ReviewApp {
             })
             // A changed-since triangle sat here and was rejected as noise:
             // the tree stays quiet, the file header's note carries it.
-            .when(is_generated(&file.path), |row| {
+            // The mechanical group's rows carry their one-word class; the
+            // generated tag would only repeat it there.
+            .when_some(tag, |row, tag| {
+                row.child(div().flex_none().text_size(px(10.5)).child(tag))
+            })
+            .when(tag.is_none() && is_generated(&file.path), |row| {
                 row.child(div().flex_none().text_size(px(10.5)).child("generated"))
             })
             .when(
-                !unchanged && !file.binary && !is_generated(&file.path),
+                tag.is_none() && !unchanged && !file.binary && !is_generated(&file.path),
                 |row| {
-                    row.children(counts(file.additions, '+', cx.theme().success))
-                        .children(counts(file.deletions, '−', cx.theme().danger))
+                    row.children(counts(additions, '+', cx.theme().success))
+                        .children(counts(deletions, '−', cx.theme().danger))
+                        .children((quiet_lines > 0).then(|| {
+                            div()
+                                .flex_none()
+                                .font_family(mono.clone())
+                                .text_size(px(10.5))
+                                .text_color(muted)
+                                .child(quiet_lines.to_string())
+                        }))
                 },
             )
             .into_any_element()
@@ -3778,10 +4481,39 @@ impl ReviewApp {
                 index: usize,
                 depth: usize,
             },
+            /// The muted bottom group's heading, "Mechanical · n".
+            MechanicalHeader {
+                count: usize,
+            },
+            /// A fully mechanical file, tagged with its one-word class.
+            Mechanical {
+                index: usize,
+                word: &'static str,
+            },
         }
+        // Fully mechanical files leave the tree for one muted group at the
+        // bottom: they are not where the reading happens.
+        let mechanical_class: HashMap<&str, Class> = self
+            .classes
+            .as_ref()
+            .map(|classes| {
+                classes
+                    .summaries
+                    .values()
+                    .filter_map(|summary| {
+                        summary
+                            .fully_mechanical
+                            .map(|class| (summary.path.as_str(), class))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut rows = Vec::new();
         let mut previous: Vec<String> = Vec::new();
         for (index, file) in self.files.iter().enumerate() {
+            if mechanical_class.contains_key(file.path.as_str()) {
+                continue;
+            }
             let mut folders: Vec<String> = file.path.split('/').map(String::from).collect();
             folders.pop();
             let common = previous
@@ -3813,6 +4545,19 @@ impl ReviewApp {
                 });
             }
             previous = folders;
+        }
+        if !mechanical_class.is_empty() {
+            rows.push(TreeRow::MechanicalHeader {
+                count: mechanical_class.len(),
+            });
+            for (index, file) in self.files.iter().enumerate() {
+                if let Some(class) = mechanical_class.get(file.path.as_str()) {
+                    rows.push(TreeRow::Mechanical {
+                        index,
+                        word: class_word(*class),
+                    });
+                }
+            }
         }
         let rows = Rc::new(rows);
 
@@ -3912,7 +4657,22 @@ impl ReviewApp {
                                         .into_any_element()
                                 }
                                 TreeRow::File { index, depth } => {
-                                    this.render_file_row(*index, *depth, cx)
+                                    this.render_file_row(*index, *depth, None, cx)
+                                }
+                                TreeRow::MechanicalHeader { count } => h_flex()
+                                    .h(px(22.))
+                                    .mt(px(2.))
+                                    .px(px(4.))
+                                    .items_center()
+                                    .border_t_1()
+                                    .border_color(cx.theme().border)
+                                    .text_size(px(10.5))
+                                    .font_semibold()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("MECHANICAL · {count}"))
+                                    .into_any_element(),
+                                TreeRow::Mechanical { index, word } => {
+                                    this.render_file_row(*index, 0, Some(word), cx)
                                 }
                             })
                             .collect::<Vec<_>>()
@@ -3975,6 +4735,30 @@ impl ReviewApp {
         // without an upstream change. Supplied last, the tint wins over the
         // added and removed fills on those lines.
         let span_tint = comment_accent(cx).opacity(0.16);
+        // Mechanical lines lose red and green: one neutral wash, chained
+        // after the app's fills so it wins on those lines, before selection
+        // and search so an explicit mark still outranks it.
+        let mechanical_tint = cx.theme().muted_foreground.opacity(0.08);
+        let mechanical_spans: Vec<DiffDecoration> = self
+            .classes
+            .as_ref()
+            .map(|classes| {
+                classes
+                    .ranges
+                    .iter()
+                    .filter(|range| tinted(range.class))
+                    .map(|range| {
+                        DiffDecoration::new(DiffLineRange::new(
+                            SharedString::from(range.path.clone()),
+                            class_side(range.side),
+                            range.first_line,
+                            range.last_line,
+                        ))
+                        .with_background(mechanical_tint)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let selection_spans = self
             .placed
             .iter()
@@ -4042,6 +4826,7 @@ impl ReviewApp {
                 ))
                 .with_background(if run.added { added } else { removed })
             })
+            .chain(mechanical_spans)
             .chain(selection_spans)
             .chain(draft_span)
             .chain(search_spans)
@@ -4066,7 +4851,10 @@ impl ReviewApp {
                     .find(|thread| &thread.element == annotation.id())
                 {
                     Some(thread) => render_thread(thread, owner.clone(), cx),
-                    None => render_draft(snapshot, owner.clone(), cx),
+                    None => match snapshot.class_notes.get(annotation.id()) {
+                        Some(note) => render_class_note(note, cx),
+                        None => render_draft(snapshot, owner.clone(), cx),
+                    },
                 }
             })
             // Two ways into a comment: the diff's own + beside the hovered
@@ -4126,7 +4914,8 @@ impl ReviewApp {
                 let danger = cx.theme().danger;
                 let muted = cx.theme().muted_foreground;
                 let mono = cx.theme().mono_font_family.clone();
-                let quiet = view.is_some_and(|view| view.generated) || reviewed;
+                let quiet = view.is_some_and(|view| view.generated || view.mechanical.is_some())
+                    || reviewed;
                 let owner = owner.clone();
                 let counts = |count: usize, sign: char, color: Hsla| {
                     (count > 0).then(|| {
@@ -4259,6 +5048,23 @@ impl ReviewApp {
                             counts(view.deletions, '−', cx.theme().danger)
                         }
                     }))
+                    // The lines no one needs to read, grey beside the
+                    // meaningful counts.
+                    .children(view.and_then(|view| {
+                        (view.quiet_lines > 0).then(|| {
+                            div()
+                                .flex_none()
+                                .font_family(mono.clone())
+                                .text_size(px(11.5))
+                                .text_color(muted)
+                                .child(format!("{} mechanical", view.quiet_lines))
+                        })
+                    }))
+                    // The proof a fully mechanical file collapsed behind.
+                    .when_some(
+                        view.and_then(|view| view.mechanical.clone()),
+                        |row, proof| row.child(div().flex_none().text_color(muted).child(proof)),
+                    )
                     // The warning colour, plain weight: noticeable without
                     // shouting like an alert.
                     .when(view.is_some_and(|view| view.uncommitted), |row| {
@@ -4440,6 +5246,8 @@ impl ReviewApp {
             ("/", "search"),
             ("s", "split / unified"),
             ("o", "earlier comments"),
+            ("m", "mechanical"),
+            ("%", "counterpart"),
             ("zM zR", "fold"),
             ("t", "files"),
         ];
@@ -5084,6 +5892,25 @@ fn render_draft(snapshot: &Snapshot, owner: WeakEntity<ReviewApp>, cx: &mut App)
     div().w_full().px_2().py_1().child(card).into_any_element()
 }
 
+/// The one-line help under a classified range: where it came from, or why
+/// an identical move still needs reading. States the proof, no verdict.
+fn render_class_note(note: &SharedString, cx: &mut App) -> AnyElement {
+    div()
+        .w_full()
+        .px_2()
+        .child(
+            div()
+                .px(px(6.))
+                .py(px(2.))
+                .rounded(px(4.))
+                .text_size(px(11.))
+                .text_color(cx.theme().muted_foreground)
+                .bg(cx.theme().muted_foreground.opacity(0.06))
+                .child(note.clone()),
+        )
+        .into_any_element()
+}
+
 impl Render for ReviewApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.fit_mode_to_width(window, cx);
@@ -5212,6 +6039,8 @@ impl Render for ReviewApp {
             )
             .on_action(cx.listener(|this, _: &CollapseAll, _, cx| this.set_all_collapsed(true, cx)))
             .on_action(cx.listener(|this, _: &ExpandAll, _, cx| this.set_all_collapsed(false, cx)))
+            .on_action(cx.listener(|this, _: &ToggleMechanical, _, cx| this.cycle_mechanical(cx)))
+            .on_action(cx.listener(|this, _: &JumpCounterpart, _, cx| this.jump_counterpart(cx)))
             .on_action(cx.listener(|this, _: &StartComment, window, cx| {
                 if let Some(range) = this.diff.read(cx).selected_lines() {
                     this.start_comment(range, None, window, cx);
@@ -5265,6 +6094,12 @@ impl Render for ReviewApp {
             .on_action(
                 cx.listener(|this, _: &MenuExpandAll, _, cx| this.set_all_collapsed(false, cx)),
             )
+            .on_action(
+                cx.listener(|this, _: &MenuToggleMechanical, _, cx| this.cycle_mechanical(cx)),
+            )
+            .on_action(cx.listener(|this, _: &MenuMarkMechanicalReviewed, _, cx| {
+                this.mark_mechanical_reviewed(cx)
+            }))
             .on_action(cx.listener(|this, _: &MenuFileList, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &MenuEarlierComments, _, cx| {
                 this.toggle_other_revisions(cx)
@@ -5540,7 +6375,6 @@ fn load(
         resolved.comparison.uncommitted,
     )
     .map_err(text)?;
-    let moved = diffie_core::moved::moved_blocks(&patch.text);
 
     Ok(Loaded {
         resolved,
@@ -5557,7 +6391,6 @@ fn load(
         picked,
         completed_cleared,
         placed,
-        moved,
     })
 }
 
