@@ -10,6 +10,9 @@ publish.workspace = true
 serde.workspace = true
 toml.workspace = true
 thiserror.workspace = true
+# Exact pin: the rust-analyzer crates move weekly and break APIs between
+# releases.
+ra_ap_syntax = "=0.0.362"
 
 [dev-dependencies]
 tempfile = "3"

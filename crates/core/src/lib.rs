@@ -7,6 +7,7 @@
 //! This crate must never depend on GPUI or any UI code.
 
 pub mod backend;
+pub mod classify;
 pub mod git_cli;
 pub mod model;
 pub mod moved;

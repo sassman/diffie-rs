@@ -812,6 +812,23 @@ pub enum PromptError {
     File(PathBuf, ReviewFileError),
 }
 
+/// The review sources under `review/`: every subdirectory except
+/// dot-prefixed ones, which hold app data (`.cache`), never a review.
+fn review_folders(review_dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(review_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .is_some_and(|name| !name.to_string_lossy().starts_with('.'))
+        })
+        .collect()
+}
+
 /// Render one review source like "Copy all as prompt", without the UI.
 ///
 /// `source` picks the review folder, slugged exactly like the app names it.
@@ -823,13 +840,7 @@ pub fn prompt(
     source: Option<&str>,
     include_resolved: bool,
 ) -> Result<(String, String), PromptError> {
-    let folders: Vec<PathBuf> = std::fs::read_dir(review_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect();
+    let folders = review_folders(review_dir);
     if folders.is_empty() {
         return Err(PromptError::NoReviews(review_dir.to_path_buf()));
     }
@@ -956,13 +967,7 @@ pub fn reply(
     author: &str,
     session: Option<&str>,
 ) -> Result<RepliedTo, ReplyError> {
-    let folders: Vec<PathBuf> = std::fs::read_dir(review_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect();
+    let folders = review_folders(review_dir);
     if folders.is_empty() {
         return Err(ReplyError::NoReviews(review_dir.to_path_buf()));
     }
@@ -1543,6 +1548,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let error = prompt(&dir.path().join("review"), None, false).unwrap_err();
         assert!(error.to_string().starts_with("No reviews under "));
+    }
+
+    #[test]
+    fn dot_directories_are_app_data_not_reviews() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mine = ReviewFile::new("Ada", &resolved());
+        mine.add_comment(comment("c0ffee00000", 3));
+        mine.save(&ReviewFile::path_in(dir.path(), "feature", "Ada"))
+            .unwrap();
+        std::fs::create_dir_all(dir.path().join(".cache/items-v1")).unwrap();
+        std::fs::write(dir.path().join(".cache/items-v1/ab12.toml"), "junk").unwrap();
+
+        // With `.cache` mistaken for a review, the sole source would be
+        // refused as ambiguous and never printed.
+        let (source, _) = prompt(dir.path(), None, false).unwrap();
+        assert_eq!(source, "feature");
+        let error = prompt(dir.path(), Some(".cache"), false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "No review for '.cache'. Reviews: feature"
+        );
     }
 
     #[test]
