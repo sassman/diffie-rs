@@ -111,6 +111,21 @@ impl Fixture {
     }
 }
 
+/// The old and new blob ids of `path`'s `index` line in a patch.
+fn index_ids(patch: &str, path: &str) -> (String, String) {
+    let header = format!("diff --git a/{path} b/{path}");
+    let section = patch.split(&header).nth(1).expect("file section");
+    let ids = section
+        .lines()
+        .find_map(|line| line.strip_prefix("index "))
+        .expect("index line")
+        .split(' ')
+        .next()
+        .unwrap();
+    let (old, new) = ids.split_once("..").unwrap();
+    (old.to_string(), new.to_string())
+}
+
 fn paths(files: &[diffie_core::FileSummary]) -> Vec<&str> {
     let mut paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
     paths.sort();
@@ -1012,6 +1027,158 @@ fn commits_touching_names_a_renamed_file_as_each_commit_did() {
     // new one, next to the name changed_paths reports.
     assert_eq!(touched["b.txt"], [fixture.commits[1].clone()]);
     assert_eq!(touched["renamed.txt"], [rename]);
+}
+
+#[test]
+fn a_rename_reports_its_similarity_and_old_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("old.txt"), lines(&[])).unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "feat"]);
+    git(root, &["mv", "old.txt", "new.txt"]);
+    git(root, &["commit", "-q", "-m", "pure rename"]);
+
+    let backend = GitCli::open(root).unwrap();
+    let resolved = backend.resolve(&Fixture::comparison()).unwrap();
+    let patch = backend
+        .patch(&resolved, &Scope::WholeBranch, ReviewInput::EMPTY, false)
+        .unwrap();
+    let file = &patch.files[0];
+    assert_eq!(file.status, FileStatus::Renamed);
+    assert_eq!(file.path, "new.txt");
+    assert_eq!(file.renamed_from.as_deref(), Some("old.txt"));
+    assert_eq!(file.similarity, Some(100));
+
+    // One edited line on top of the rename: still a rename, below 100%.
+    std::fs::write(root.join("new.txt"), lines(&[(2, "edited")])).unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "edit after rename"]);
+    let resolved = backend.resolve(&Fixture::comparison()).unwrap();
+    let patch = backend
+        .patch(&resolved, &Scope::WholeBranch, ReviewInput::EMPTY, false)
+        .unwrap();
+    let file = &patch.files[0];
+    assert_eq!(file.status, FileStatus::Renamed);
+    assert_eq!(file.renamed_from.as_deref(), Some("old.txt"));
+    let similarity = file.similarity.expect("similarity parsed");
+    assert!((50..100).contains(&similarity), "got {similarity}");
+}
+
+#[test]
+fn blob_content_reads_committed_blobs_and_the_working_tree() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    let backend = fixture.backend();
+    let resolved = backend.resolve(&Fixture::comparison()).unwrap();
+    let patch = backend
+        .patch(&resolved, &Scope::WholeBranch, ReviewInput::EMPTY, false)
+        .unwrap();
+
+    // --full-index: the patch names blobs by their full ids.
+    let (_, b_new) = index_ids(&patch.text, "b.txt");
+    assert_eq!(b_new.len(), 40);
+    assert_eq!(
+        backend.blob_content(&Oid::new(&b_new)).unwrap().as_deref(),
+        Some("hello\n")
+    );
+    let (a_old, a_new) = index_ids(&patch.text, "a.txt");
+    assert_eq!(
+        backend.blob_content(&Oid::new(a_old)).unwrap().unwrap(),
+        lines(&[])
+    );
+    assert_eq!(
+        backend.blob_content(&Oid::new(a_new)).unwrap().unwrap(),
+        lines(&[(2, "TWO"), (9, "NINE")])
+    );
+
+    // Unknown ids and option-shaped values answer "no content", never act.
+    assert_eq!(
+        backend.blob_content(&Oid::new("f".repeat(40))).unwrap(),
+        None
+    );
+    let outfile = root.join("hijacked");
+    let evil = Oid::new(format!("--output={}", outfile.display()));
+    assert_eq!(backend.blob_content(&evil).unwrap(), None);
+    assert!(!outfile.exists(), "git obeyed the value as an option");
+
+    // A blob that is not UTF-8 text is "no content": the classifier only
+    // reads text files.
+    std::fs::write(root.join("bin.dat"), [0xFF, 0xFE, 0x00, b'x']).unwrap();
+    git(root, &["add", "bin.dat"]);
+    git(root, &["commit", "-q", "-m", "binary"]);
+    let id = git(root, &["rev-parse", "HEAD:bin.dat"]);
+    assert_eq!(backend.blob_content(&Oid::new(id)).unwrap(), None);
+
+    // The working-tree variant reads what is on disk right now.
+    std::fs::write(root.join("a.txt"), "uncommitted\n").unwrap();
+    assert_eq!(
+        backend.worktree_content("a.txt").unwrap().as_deref(),
+        Some("uncommitted\n")
+    );
+    assert_eq!(backend.worktree_content("missing.txt").unwrap(), None);
+    assert_eq!(backend.worktree_content("bin.dat").unwrap(), None);
+}
+
+#[test]
+fn combined_blobs_stay_readable_until_the_next_combine() {
+    let fixture = Fixture::new();
+    let backend = fixture.backend();
+    let resolved = backend.resolve(&Fixture::comparison()).unwrap();
+    let before = fixture.loose_objects();
+
+    // c1 and c4, skipping c2 and c3: the combined a.txt (TWO at line 2,
+    // line 9 untouched) matches no tree in the repository, so its blob can
+    // live only in the scratch.
+    let picked = vec![fixture.commits[0].clone(), fixture.commits[3].clone()];
+    let patch = backend
+        .patch(
+            &resolved,
+            &Scope::Commits {
+                picked,
+                uncommitted: false,
+            },
+            ReviewInput::EMPTY,
+            false,
+        )
+        .unwrap();
+    let (_, combined) = index_ids(&patch.text, "a.txt");
+    assert_eq!(combined.len(), 40);
+    assert_eq!(
+        backend.blob_content(&Oid::new(&combined)).unwrap().unwrap(),
+        lines(&[(2, "TWO")])
+    );
+    let first_scratch = backend.combined_scratch_dir().expect("scratch kept");
+    assert!(first_scratch.exists());
+
+    // The next combine replaces the scratch: the old directory is gone and
+    // the old combined blob is no longer readable.
+    let picked = vec![fixture.commits[0].clone(), fixture.commits[2].clone()];
+    backend
+        .patch(
+            &resolved,
+            &Scope::Commits {
+                picked,
+                uncommitted: false,
+            },
+            ReviewInput::EMPTY,
+            false,
+        )
+        .unwrap();
+    let second_scratch = backend.combined_scratch_dir().expect("scratch kept");
+    assert_ne!(first_scratch, second_scratch);
+    assert!(!first_scratch.exists(), "the old scratch lingers");
+    assert!(second_scratch.exists());
+    assert_eq!(backend.blob_content(&Oid::new(combined)).unwrap(), None);
+
+    // Everything above went to scratch directories, never the repository.
+    assert_eq!(
+        fixture.loose_objects(),
+        before,
+        "the repository gained objects"
+    );
 }
 
 #[test]

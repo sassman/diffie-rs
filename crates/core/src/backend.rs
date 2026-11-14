@@ -104,6 +104,19 @@ pub trait ReviewBackend: Send + Sync {
     fn worktree_blob_ids(&self, paths: &[String])
     -> Result<std::collections::HashMap<String, Oid>>;
 
+    /// The content of the blob `id` names, as text. Ids come from the
+    /// `index` lines of a [`Self::patch`] result (full since
+    /// `--full-index`), including the synthetic blobs of a combined custom
+    /// scope: those stay readable until the next combined load replaces
+    /// them. `None` when the object no longer exists or its content is not
+    /// valid UTF-8 - the classifier only reads text files.
+    fn blob_content(&self, id: &Oid) -> Result<Option<String>>;
+
+    /// The working-tree content of `path`, for the uncommitted side of a
+    /// patch, which no stored blob backs. `None` when the file is missing
+    /// on disk or its content is not valid UTF-8.
+    fn worktree_content(&self, path: &str) -> Result<Option<String>>;
+
     /// The reviewer's name as git knows it (`user.name`).
     fn author_name(&self) -> Result<String>;
 

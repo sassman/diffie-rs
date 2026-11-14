@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backend::{BackendError, Result, ReviewBackend};
@@ -30,6 +31,12 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 pub struct GitCli {
     repository: PathBuf,
+    /// The scratch of the most recent [`Self::combine`], kept so the blob
+    /// ids a combined patch names stay readable through
+    /// [`ReviewBackend::blob_content`] after the patch call returns. The
+    /// next `combine` replaces it, dropping the old directory. Interior
+    /// mutability because the trait reads through `&self`.
+    combined: Mutex<Option<ScratchGit>>,
 }
 
 impl GitCli {
@@ -37,6 +44,7 @@ impl GitCli {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let backend = Self {
             repository: path.into(),
+            combined: Mutex::new(None),
         };
         backend
             .read(&["rev-parse", "--git-dir"])
@@ -210,6 +218,8 @@ impl GitCli {
             "--histogram",
             "--indent-heuristic",
             "--find-renames",
+            // Full blob ids in the `index` lines: what blob_content takes.
+            "--full-index",
             "--src-prefix=a/",
             "--dst-prefix=b/",
         ]
@@ -288,7 +298,7 @@ impl GitCli {
             index,
             objects,
             real_objects,
-            _scratch: scratch,
+            scratch,
         })
     }
 
@@ -551,6 +561,8 @@ impl GitCli {
                 deletions: 0,
                 state,
                 binary: false,
+                renamed_from: None,
+                similarity: None,
             }),
         };
         for (path, commit) in failed {
@@ -559,11 +571,29 @@ impl GitCli {
         for path in uncommitted_failed {
             mark(path, FileState::UncommittedNotCombined);
         }
+        // Keep the scratch so blob_content can read the combined blobs the
+        // patch's index lines name; the old one is dropped with its
+        // directory. Still never the repository's own object store.
+        *self
+            .combined
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(scratch);
         Ok(ScopedPatch {
             text,
             files,
             new_side: NewSide::Synthetic,
         })
+    }
+
+    /// The kept combined scratch's directory. Only the scratch-lifetime
+    /// tests read it; the app never touches the scratch directly.
+    #[doc(hidden)]
+    pub fn combined_scratch_dir(&self) -> Option<PathBuf> {
+        self.combined
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|scratch| scratch.dir().to_path_buf())
     }
 
     fn absolute(&self, path: &str) -> PathBuf {
@@ -920,6 +950,44 @@ impl ReviewBackend for GitCli {
             .collect())
     }
 
+    fn blob_content(&self, id: &Oid) -> Result<Option<String>> {
+        let args = ["cat-file", "blob", "--end-of-options", id.as_str()];
+        let bytes = match run_bytes(&mut self.command(), &args, None) {
+            Ok(bytes) => Some(bytes),
+            Err(BackendError::Git { .. }) => {
+                // A combined patch's blobs live only in the kept scratch
+                // (whose alternates cover the real objects too); the plain
+                // read comes first so ordinary loads never take the lock.
+                let kept = self
+                    .combined
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match kept.as_ref() {
+                    Some(scratch) => match run_bytes(&mut scratch.command(self), &args, None) {
+                        Ok(bytes) => Some(bytes),
+                        Err(BackendError::Git { .. }) => None,
+                        Err(other) => return Err(other),
+                    },
+                    None => None,
+                }
+            }
+            Err(other) => return Err(other),
+        };
+        Ok(bytes.and_then(|bytes| String::from_utf8(bytes).ok()))
+    }
+
+    fn worktree_content(&self, path: &str) -> Result<Option<String>> {
+        let top = self
+            .try_read(&["rev-parse", "--show-toplevel"])?
+            .map(|output| PathBuf::from(output.trim()))
+            .ok_or_else(|| BackendError::NotARepository(self.repository.display().to_string()))?;
+        let file = top.join(path);
+        if !file.is_file() {
+            return Ok(None);
+        }
+        Ok(String::from_utf8(std::fs::read(&file)?).ok())
+    }
+
     fn author_name(&self) -> Result<String> {
         let name = self
             .try_read(&["config", "user.name"])?
@@ -938,6 +1006,16 @@ impl ReviewBackend for GitCli {
 }
 
 fn run(command: &mut Command, args: &[impl AsRef<str>], stdin: Option<&[u8]>) -> Result<String> {
+    Ok(String::from_utf8_lossy(&run_bytes(command, args, stdin)?).into_owned())
+}
+
+/// Like [`run`], but the raw stdout: blob content must not be lossily
+/// re-encoded, or a binary file could no longer be told from text.
+fn run_bytes(
+    command: &mut Command,
+    args: &[impl AsRef<str>],
+    stdin: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     command
         .args(args.iter().map(|argument| argument.as_ref()))
         .stdin(if stdin.is_some() {
@@ -963,7 +1041,7 @@ fn run(command: &mut Command, args: &[impl AsRef<str>], stdin: Option<&[u8]>) ->
     }
     let output = child.wait_with_output()?;
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(output.stdout)
     } else {
         Err(BackendError::Git {
             command: args
@@ -1021,6 +1099,8 @@ fn summarize(section: &str) -> FileSummary {
     let mut old_path = None;
     let mut new_path = None;
     let mut renamed_to = None;
+    let mut renamed_from = None;
+    let mut similarity = None;
     let mut status = FileStatus::Modified;
     let mut binary = false;
     let mut additions = 0;
@@ -1051,6 +1131,10 @@ fn summarize(section: &str) -> FileSummary {
         } else if let Some(path) = line.strip_prefix("rename to ") {
             renamed_to = Some(path.to_string());
             status = FileStatus::Renamed;
+        } else if let Some(path) = line.strip_prefix("rename from ") {
+            renamed_from = Some(path.to_string());
+        } else if let Some(percent) = line.strip_prefix("similarity index ") {
+            similarity = percent.trim_end_matches('%').parse().ok();
         } else if line.starts_with("new file mode") {
             status = FileStatus::Added;
         } else if line.starts_with("deleted file mode") {
@@ -1084,6 +1168,8 @@ fn summarize(section: &str) -> FileSummary {
         deletions,
         state: FileState::Changed,
         binary,
+        renamed_from,
+        similarity,
     }
 }
 
@@ -1155,23 +1241,31 @@ struct ScratchGit {
     index: PathBuf,
     objects: PathBuf,
     real_objects: PathBuf,
-    /// Held for its drop: the directory the index and objects live in.
-    _scratch: Scratch,
+    /// The directory the index and objects live in; dropping it removes them.
+    scratch: Scratch,
 }
 
 impl ScratchGit {
+    fn command(&self, backend: &GitCli) -> Command {
+        let mut command = backend.command();
+        command
+            .env("GIT_INDEX_FILE", &self.index)
+            .env("GIT_OBJECT_DIRECTORY", &self.objects)
+            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &self.real_objects);
+        command
+    }
+
     fn read(
         &self,
         backend: &GitCli,
         args: &[impl AsRef<str>],
         stdin: Option<&[u8]>,
     ) -> Result<String> {
-        let mut command = backend.command();
-        command
-            .env("GIT_INDEX_FILE", &self.index)
-            .env("GIT_OBJECT_DIRECTORY", &self.objects)
-            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &self.real_objects);
-        run(&mut command, args, stdin)
+        run(&mut self.command(backend), args, stdin)
+    }
+
+    fn dir(&self) -> &Path {
+        &self.scratch.path
     }
 }
 
@@ -1240,6 +1334,44 @@ Binary files a/logo.png and b/logo.png differ
         assert_eq!(files[2].0.path, "logo.png");
         assert!(files[2].0.binary);
         assert!(files[1].1.starts_with("diff --git a/new.txt"));
+    }
+
+    #[test]
+    fn summarizes_rename_metadata() {
+        // A 100% rename carries no ---/+++ lines; the path comes from
+        // `rename to`.
+        let pure = "\
+diff --git a/old.rs b/new.rs
+similarity index 100%
+rename from old.rs
+rename to new.rs
+";
+        let summary = summarize(pure);
+        assert_eq!(summary.status, FileStatus::Renamed);
+        assert_eq!(summary.path, "new.rs");
+        assert_eq!(summary.renamed_from.as_deref(), Some("old.rs"));
+        assert_eq!(summary.similarity, Some(100));
+
+        let edited = "\
+diff --git a/old.rs b/new.rs
+similarity index 97%
+rename from old.rs
+rename to new.rs
+index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644
+--- a/old.rs
++++ b/new.rs
+@@ -1 +1 @@
+-x
++y
+";
+        let summary = summarize(edited);
+        assert_eq!(summary.status, FileStatus::Renamed);
+        assert_eq!(summary.renamed_from.as_deref(), Some("old.rs"));
+        assert_eq!(summary.similarity, Some(97));
+
+        let plain = summarize("diff --git a/x b/x\n--- a/x\n+++ b/x\n");
+        assert_eq!(plain.renamed_from, None);
+        assert_eq!(plain.similarity, None);
     }
 
     #[test]
