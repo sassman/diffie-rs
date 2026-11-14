@@ -4,10 +4,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A full git object id in hex. Never abbreviate when storing.
+/// A full git object id in hex. Never abbreviate when storing. The field
+/// stays private so every id enters through [`Oid::new`] or serde.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Oid(pub String);
+pub struct Oid(String);
 
 impl Oid {
     pub fn new(hex: impl Into<String>) -> Self {
@@ -20,7 +21,9 @@ impl Oid {
 
     /// The seven character form shown in the UI. Display only.
     pub fn short(&self) -> &str {
-        &self.0[..self.0.len().min(7)]
+        // `get` instead of slicing: a malformed id from a hand-edited
+        // review file must not panic the UI.
+        self.0.get(..7).unwrap_or(&self.0)
     }
 }
 

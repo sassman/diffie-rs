@@ -23,15 +23,6 @@ pub fn rfc3339(unix_seconds: i64) -> String {
     )
 }
 
-/// `9 Nov`-style date for commit lists. UTC.
-pub fn short_date(unix_seconds: i64) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let (_, month, day) = civil_from_days(unix_seconds.div_euclid(86_400));
-    format!("{day} {}", MONTHS[(month - 1) as usize])
-}
-
 /// Days since 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's
 /// `civil_from_days`).
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
@@ -88,7 +79,6 @@ mod tests {
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(rfc3339(1_794_384_145), "2026-11-11T08:02:25Z");
-        assert_eq!(short_date(1_794_384_145), "11 Nov");
     }
 
     #[test]

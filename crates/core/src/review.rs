@@ -547,13 +547,6 @@ impl ReviewSet {
         }
         threads
     }
-
-    pub fn threads_for<'a>(&'a self, path: &str) -> Vec<Thread<'a>> {
-        self.threads()
-            .into_iter()
-            .filter(|thread| thread.comment.path == path)
-            .collect()
-    }
 }
 
 /// Where a comment shows up in the current view.
@@ -691,47 +684,24 @@ pub fn as_prompt(threads: &[Thread<'_>]) -> String {
 }
 
 /// Why the headless prompt (`diffie --prompt`) produced nothing.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PromptError {
     /// No review folder with files under the review dir.
+    #[error("No reviews under {}", .0.display())]
     NoReviews(PathBuf),
     /// The asked-for source has no review; the sources that do are listed.
+    #[error("No review for '{asked}'. Reviews: {}", available.join(", "))]
     UnknownSource {
         asked: String,
         available: Vec<String>,
     },
     /// No source asked for while several exist. Never guessed: the wrong
     /// pick would hand out another review's comments.
-    SeveralReviews {
-        available: Vec<String>,
-    },
+    #[error("Several reviews here: {}. Name the one to print.", available.join(", "))]
+    SeveralReviews { available: Vec<String> },
+    #[error("{}: {}", .0.display(), .1)]
     File(PathBuf, ReviewFileError),
 }
-
-impl std::fmt::Display for PromptError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoReviews(dir) => write!(f, "No reviews under {}", dir.display()),
-            Self::UnknownSource { asked, available } => {
-                write!(
-                    f,
-                    "No review for '{asked}'. Reviews: {}",
-                    available.join(", ")
-                )
-            }
-            Self::SeveralReviews { available } => {
-                write!(
-                    f,
-                    "Several reviews here: {}. Name the one to print.",
-                    available.join(", ")
-                )
-            }
-            Self::File(path, error) => write!(f, "{}: {error}", path.display()),
-        }
-    }
-}
-
-impl std::error::Error for PromptError {}
 
 /// Render one review source like "Copy all as prompt", without the UI.
 ///
@@ -838,43 +808,24 @@ fn slug(name: &str) -> String {
 }
 
 /// Why `diffie --reply` could not thread an answer.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ReplyError {
     /// No review folder with files under the review dir.
+    #[error("No reviews under {}", .0.display())]
     NoReviews(PathBuf),
     /// No comment id starts with the prefix.
-    UnknownComment {
-        prefix: String,
-    },
+    #[error("No comment starts with #{prefix}.")]
+    UnknownComment { prefix: String },
     /// Several comments match the prefix. Never guessed: the answer would
     /// thread under the wrong question.
+    #[error("#{prefix} matches several comments: {}. Give more of the id.", matches.join(", "))]
     AmbiguousComment {
         prefix: String,
         matches: Vec<String>,
     },
+    #[error("{}: {}", .0.display(), .1)]
     File(PathBuf, ReviewFileError),
 }
-
-impl std::fmt::Display for ReplyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoReviews(dir) => write!(f, "No reviews under {}", dir.display()),
-            Self::UnknownComment { prefix } => {
-                write!(f, "No comment starts with #{prefix}.")
-            }
-            Self::AmbiguousComment { prefix, matches } => {
-                write!(
-                    f,
-                    "#{prefix} matches several comments: {}. Give more of the id.",
-                    matches.join(", ")
-                )
-            }
-            Self::File(path, error) => write!(f, "{}: {error}", path.display()),
-        }
-    }
-}
-
-impl std::error::Error for ReplyError {}
 
 /// Where [`reply`] threaded the answer: enough to confirm the address.
 #[derive(Debug, PartialEq, Eq)]
@@ -906,9 +857,9 @@ pub fn reply(
     if folders.is_empty() {
         return Err(ReplyError::NoReviews(review_dir.to_path_buf()));
     }
-    // (folder, the file holding the comment, its index): the host header
-    // seeds the replier's file when this review has none from them yet.
-    let mut matches: Vec<(&PathBuf, ReviewFile, usize)> = Vec::new();
+    // (folder, the host file's header, the comment): the header seeds the
+    // replier's file when this review has none from them yet.
+    let mut matches: Vec<(&PathBuf, Header, Comment)> = Vec::new();
     for folder in &folders {
         let mut files: Vec<PathBuf> = std::fs::read_dir(folder)
             .into_iter()
@@ -921,9 +872,9 @@ pub fn reply(
         for path in files {
             let file =
                 ReviewFile::load(&path).map_err(|error| ReplyError::File(path.clone(), error))?;
-            for index in 0..file.comments.len() {
-                if file.comments[index].id.starts_with(id_prefix) {
-                    matches.push((folder, file.clone(), index));
+            for comment in &file.comments {
+                if comment.id.starts_with(id_prefix) {
+                    matches.push((folder, file.review.clone(), comment.clone()));
                 }
             }
         }
@@ -932,8 +883,7 @@ pub fn reply(
         [] => Err(ReplyError::UnknownComment {
             prefix: id_prefix.to_string(),
         }),
-        [(folder, host, index)] => {
-            let comment = &host.comments[*index];
+        [(folder, host, comment)] => {
             let target = folder.join(format!("{}.toml", slug(author)));
             let mut mine = match ReviewFile::load(&target) {
                 Ok(file) => file,
@@ -941,7 +891,7 @@ pub fn reply(
                     ReviewFile {
                         review: Header {
                             author: author.to_string(),
-                            ..host.review.clone()
+                            ..host.clone()
                         },
                         completed: None,
                         reviewed: Vec::new(),
@@ -970,8 +920,7 @@ pub fn reply(
             prefix: id_prefix.to_string(),
             matches: several
                 .iter()
-                .map(|(_, host, index)| {
-                    let comment = &host.comments[*index];
+                .map(|(_, _, comment)| {
                     format!(
                         "#{} {}:{}",
                         &comment.id[..comment.id.len().min(8)],
