@@ -6,6 +6,7 @@
 
 use std::ops::Range;
 
+use crate::patch::{PatchEvent, walk};
 use crate::review::Side;
 
 /// One line of the patch containing the needle.
@@ -39,82 +40,25 @@ pub fn search_patch(patch: &str, needle: &str) -> Vec<SearchHit> {
     } else {
         needle.to_string()
     };
-    let matches = |text: &str| match_ranges(text, &folded_needle, fold);
-
     let mut hits = Vec::new();
-    let mut old_path = String::new();
-    let mut new_path = String::new();
-    let mut old_line = 0usize;
-    let mut new_line = 0usize;
-    let mut in_hunk = false;
-    // 1-based start of `-old[,len]` or `+new[,len]`; a missing length means 1.
-    let start = |spec: &str| -> usize {
-        spec[1..]
-            .split(',')
-            .next()
-            .and_then(|number| number.parse().ok())
-            .unwrap_or(0)
-    };
-
-    for line in patch.lines() {
-        if line.starts_with("diff --git ") {
-            // Only here may header lines follow: a removed line that itself
-            // started with dashes renders as `--- text` inside a hunk and
-            // must not be read as a header.
-            in_hunk = false;
-        } else if let Some(rest) = line.strip_prefix("@@ ") {
-            let mut sides = rest.split(' ');
-            old_line = sides.next().map(start).unwrap_or(0);
-            new_line = sides.next().map(start).unwrap_or(0);
-            in_hunk = true;
-        } else if in_hunk {
-            match line.as_bytes().first() {
-                Some(b'-') => {
-                    let spans = matches(&line[1..]);
-                    if !spans.is_empty() {
-                        hits.push(SearchHit {
-                            path: old_path.clone(),
-                            side: Side::Old,
-                            line: old_line,
-                            spans,
-                        });
-                    }
-                    old_line += 1;
-                }
-                Some(b'+') => {
-                    let spans = matches(&line[1..]);
-                    if !spans.is_empty() {
-                        hits.push(SearchHit {
-                            path: new_path.clone(),
-                            side: Side::New,
-                            line: new_line,
-                            spans,
-                        });
-                    }
-                    new_line += 1;
-                }
-                Some(b' ') => {
-                    let spans = matches(&line[1..]);
-                    if !spans.is_empty() {
-                        hits.push(SearchHit {
-                            path: new_path.clone(),
-                            side: Side::New,
-                            line: new_line,
-                            spans,
-                        });
-                    }
-                    old_line += 1;
-                    new_line += 1;
-                }
-                Some(b'\\') => {}
-                _ => in_hunk = false,
+    walk(patch, |event| {
+        let (path, side, line, text) = match event {
+            PatchEvent::Removed { path, line, text } => (path, Side::Old, line, text),
+            PatchEvent::Added { path, line, text } | PatchEvent::Context { path, line, text } => {
+                (path, Side::New, line, text)
             }
-        } else if let Some(rest) = line.strip_prefix("--- ") {
-            old_path = rest.strip_prefix("a/").unwrap_or(rest).to_string();
-        } else if let Some(rest) = line.strip_prefix("+++ ") {
-            new_path = rest.strip_prefix("b/").unwrap_or(rest).to_string();
+            PatchEvent::Break => return,
+        };
+        let spans = match_ranges(text, &folded_needle, fold);
+        if !spans.is_empty() {
+            hits.push(SearchHit {
+                path: path.to_string(),
+                side,
+                line,
+                spans,
+            });
         }
-    }
+    });
     hits
 }
 

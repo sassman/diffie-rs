@@ -10,6 +10,8 @@
 
 use std::collections::HashMap;
 
+use crate::patch::{PatchEvent, walk};
+
 /// A run of lines removed in one place and added verbatim in another.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MovedBlock {
@@ -105,85 +107,39 @@ fn significant(lines: &[String]) -> bool {
 fn runs(patch: &str) -> (Vec<Run>, Vec<Run>) {
     let mut removed = Vec::new();
     let mut added = Vec::new();
-    let mut old_path = String::new();
-    let mut new_path = String::new();
-    let mut old_line = 0usize;
-    let mut new_line = 0usize;
-    let mut in_hunk = false;
     let mut removing: Option<Run> = None;
     let mut adding: Option<Run> = None;
 
-    // 1-based start of `-old[,len]` or `+new[,len]`; a missing length means 1.
-    let start = |spec: &str| -> usize {
-        spec[1..]
-            .split(',')
-            .next()
-            .and_then(|number| number.parse().ok())
-            .unwrap_or(0)
-    };
-
-    for line in patch.lines() {
-        if line.starts_with("diff --git ") {
-            // Only here may header lines follow: a removed line that itself
-            // started with dashes renders as `--- text` inside a hunk and
-            // must not be read as a header.
-            removed.extend(removing.take());
+    walk(patch, |event| match event {
+        PatchEvent::Removed { path, line, text } => {
             added.extend(adding.take());
-            in_hunk = false;
-        } else if let Some(rest) = line.strip_prefix("@@ ") {
-            removed.extend(removing.take());
-            added.extend(adding.take());
-            let mut sides = rest.split(' ');
-            old_line = sides.next().map(start).unwrap_or(0);
-            new_line = sides.next().map(start).unwrap_or(0);
-            in_hunk = true;
-        } else if in_hunk {
-            match line.as_bytes().first() {
-                Some(b'-') => {
-                    added.extend(adding.take());
-                    removing
-                        .get_or_insert_with(|| Run {
-                            path: old_path.clone(),
-                            start: old_line,
-                            texts: Vec::new(),
-                        })
-                        .texts
-                        .push(line[1..].to_string());
-                    old_line += 1;
-                }
-                Some(b'+') => {
-                    removed.extend(removing.take());
-                    adding
-                        .get_or_insert_with(|| Run {
-                            path: new_path.clone(),
-                            start: new_line,
-                            texts: Vec::new(),
-                        })
-                        .texts
-                        .push(line[1..].to_string());
-                    new_line += 1;
-                }
-                Some(b' ') => {
-                    removed.extend(removing.take());
-                    added.extend(adding.take());
-                    old_line += 1;
-                    new_line += 1;
-                }
-                // `\ No newline at end of file` moves neither side; any
-                // other prefix ends the hunk (a new file header follows).
-                Some(b'\\') => {}
-                _ => {
-                    removed.extend(removing.take());
-                    added.extend(adding.take());
-                    in_hunk = false;
-                }
-            }
-        } else if let Some(rest) = line.strip_prefix("--- ") {
-            old_path = rest.strip_prefix("a/").unwrap_or(rest).to_string();
-        } else if let Some(rest) = line.strip_prefix("+++ ") {
-            new_path = rest.strip_prefix("b/").unwrap_or(rest).to_string();
+            removing
+                .get_or_insert_with(|| Run {
+                    path: path.to_string(),
+                    start: line,
+                    texts: Vec::new(),
+                })
+                .texts
+                .push(text.to_string());
         }
-    }
+        PatchEvent::Added { path, line, text } => {
+            removed.extend(removing.take());
+            adding
+                .get_or_insert_with(|| Run {
+                    path: path.to_string(),
+                    start: line,
+                    texts: Vec::new(),
+                })
+                .texts
+                .push(text.to_string());
+        }
+        // A context line or a header interrupts both sides: whatever run was
+        // open is complete.
+        PatchEvent::Context { .. } | PatchEvent::Break => {
+            removed.extend(removing.take());
+            added.extend(adding.take());
+        }
+    });
     removed.extend(removing.take());
     added.extend(adding.take());
     (removed, added)

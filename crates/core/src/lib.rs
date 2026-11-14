@@ -10,6 +10,7 @@ pub mod backend;
 pub mod git_cli;
 pub mod model;
 pub mod moved;
+mod patch;
 pub mod pr;
 pub mod review;
 pub mod search;
