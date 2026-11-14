@@ -287,7 +287,14 @@ it landed); a click reveals the lines, another folds them back (owner,
 edit worth seeing - and needs at least 20 alphanumeric characters, the
 `git --color-moved` bar that keeps lone braces from pairing up. Moves
 with edits in flight stay ordinary removals and additions for now; the
-SemanticDiff-style "show only the in-flight edits" view is future work.## 8. Layout
+SemanticDiff-style "show only the in-flight edits" view is future work.
+Superseding decision (owner, 2026-11-14, not yet shipped): moves will pair
+by token hash, so a re-indented move folds too, with the re-indentation
+named in the fold's label - worth seeing, not worth seeing first; see
+`docs/superpowers/specs/mechanical-changes-spec.md`. Rewrite this item when
+that lands.
+
+## 8. Layout
 
 Decided: each split panel is half the window and scrolls its long lines on
 its own (owner, 2026-11-12; the Kit strip that scrolled both as one canvas
