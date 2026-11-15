@@ -55,6 +55,7 @@ Be exact about this when you report further work.
 | 2026-11-14 cleanup on screen: the review-save ordering and reload grafting, the stale-blame guard on a draft's attach commit, the status-bar notice, the split scope-bar rendering | Compiled, clippy-clean, core tests pass; not seen on screen - the window was not run |
 | Removed-file header: danger-coloured name, D badge tooltip with the deleting commit (newest in-scope commit touching the path; plain fallback for a worktree deletion) | Compiled, clippy-clean, core tests pass; not seen on screen - the window was not run |
 | Reload semantics: pinned CLI target across Cmd/Ctrl+R, new commits extending an all-picked custom scope, View > Reload menu item | Compiled, clippy-clean; the one-revision CLI reading (`diffie HEAD~1` = `git diff HEAD~1`) is covered by a core test (`one_revision_reads_like_git_diff`); the reload flow itself not seen on screen - the window was not run |
+| Navigation focus marker and viewport re-anchoring for `]`/`[`/`n`/`p` | Marking, stepping from a visible mark and viewport re-anchoring are covered by a Kit integration test (`change_keys_mark_the_reached_group_and_step_from_a_visible_mark`); the comment-jump mirror compiles and is clippy-clean; not seen on screen - the window was not run |
 
 ## Build, run, test
 
@@ -404,6 +405,15 @@ actually exercised):
 - Shortcuts: `]` `[` `}` `{` `s` `o` `t` `n` `p` `1` `2` `3` `zM` `zR` `c`
   `r`, Escape, Cmd/Ctrl+Enter, Cmd/Ctrl+R, Cmd/Ctrl+Q, Space in the commit
   list.
+- Navigation focus marker: `]`/`[` and `n`/`p` mark where they land (the
+  Kit fork's focus marker - a slim primary edge bar with a faint wash -
+  via `DiffState::set_focused_ranges`; the change keys set it inside the
+  Kit). A visible mark is the anchor the keys step from; once the reader
+  scrolls it off the page the walk re-anchors at the viewport, so the
+  keys guide within the page being looked at instead of yanking back.
+  The change keys also land below the pinned header now rather than
+  under it. One marker serves both steppers - a comment jump moves it
+  off the last change group and vice versa.
 - Application menu bar (`install_menus` in `app.rs`, set at init so it sees
   the keymap): app menu with About diffie (the standard AppKit panel with
   name and version, since the dev binary has no bundle), Services and Quit;

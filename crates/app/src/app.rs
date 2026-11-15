@@ -1487,10 +1487,20 @@ impl ReviewApp {
             // in this comparison at all; the status bar says so.
             return;
         }
-        let at = self
-            .comment_cursor
-            .as_ref()
-            .and_then(|id| stops.iter().position(|(sid, ..)| sid == id));
+        // A cursor the reader can still see steps to its neighbour; one
+        // scrolled off the page is abandoned and the walk re-anchors at the
+        // viewport, mirroring the change keys, so after paging away the key
+        // guides within the page the reader is looking at.
+        let at = self.comment_cursor.as_ref().and_then(|id| {
+            let index = stops.iter().position(|(sid, ..)| sid == id)?;
+            let (_, path, side, line) = &stops[index];
+            let position =
+                DiffLinePosition::new(SharedString::from(path.clone()), diff_side(*side), *line);
+            self.diff
+                .read(cx)
+                .is_line_visible(&position)
+                .then_some(index)
+        });
         // The walk stops at the ends instead of circling: wrapping around
         // made it impossible to feel where the list ends.
         let next = match (at, forward) {
@@ -1498,8 +1508,47 @@ impl ReviewApp {
             (Some(index), true) => index + 1,
             (Some(0), false) => return,
             (Some(index), false) => index - 1,
-            (None, true) => 0,
-            (None, false) => stops.len() - 1,
+            (None, forward) => {
+                let order: HashMap<&str, usize> = self
+                    .files
+                    .iter()
+                    .enumerate()
+                    .map(|(index, file)| (file.path.as_str(), index))
+                    .collect();
+                let key = |path: &str, new_side: bool, line: usize| {
+                    (
+                        order.get(path).copied().unwrap_or(usize::MAX),
+                        line,
+                        new_side,
+                    )
+                };
+                let top = self.diff.read(cx).top_line().map(|position| {
+                    key(
+                        position.path().as_ref(),
+                        position.side() == DiffSide::Modified,
+                        position.line(),
+                    )
+                });
+                let stop_key = |(_, path, side, line): &(String, String, Side, usize)| {
+                    key(path, *side == Side::New, *line)
+                };
+                match (top, forward) {
+                    (None, true) => 0,
+                    (None, false) => stops.len() - 1,
+                    (Some(top), true) => {
+                        match stops.iter().position(|stop| stop_key(stop) >= top) {
+                            Some(index) => index,
+                            None => return,
+                        }
+                    }
+                    (Some(top), false) => {
+                        match stops.iter().rposition(|stop| stop_key(stop) < top) {
+                            Some(index) => index,
+                            None => return,
+                        }
+                    }
+                }
+            }
         };
         let (id, path, side, line) = stops[next].clone();
         let side = diff_side(side);
@@ -1507,6 +1556,9 @@ impl ReviewApp {
         let path = SharedString::from(path);
         self.diff.update(cx, |state, cx| {
             state.set_file_collapsed(&path, false, cx);
+            // The focus marker shows where the jump landed, as the change
+            // keys do for their groups.
+            state.set_focused_ranges([DiffLineRange::new(path.clone(), side, line, line)], cx);
             state.scroll_to_line(DiffLinePosition::new(path.clone(), side, line), cx);
         });
         self.current_file = Some(path);
