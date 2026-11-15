@@ -899,6 +899,63 @@ fn changed_runs(patch: &str) -> Vec<ChangedRun> {
     runs
 }
 
+/// The widest run of unchanged lines the Diff never folds between two
+/// changed runs: twice its context window of 3, plus the 1-line disclosure
+/// it refuses to collapse (both Kit defaults, which the app keeps).
+const SHOWN_GAP: usize = 7;
+
+/// Intersects a classified range with the changed runs on its side,
+/// bridging gaps the Diff always keeps visible (see [`SHOWN_GAP`]). A fold
+/// must never cover a line behind one of the Diff's own context folds:
+/// the Diff hides every code row inside an unrevealed fold, so expanding
+/// the context fold would reveal nothing. Runs arrive in patch order,
+/// which is ascending per side.
+fn clip_to_changed(first: usize, last: usize, runs: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut segments: Vec<(usize, usize)> = Vec::new();
+    for &(start, end) in runs {
+        let (start, end) = (start.max(first), end.min(last));
+        if start > end {
+            continue;
+        }
+        match segments.last_mut() {
+            Some((_, stop)) if start <= *stop + SHOWN_GAP + 1 => *stop = (*stop).max(end),
+            _ => segments.push((start, end)),
+        }
+    }
+    segments
+}
+
+#[cfg(test)]
+mod clip_to_changed_tests {
+    use super::clip_to_changed;
+
+    #[test]
+    fn clips_a_whole_file_range_to_its_changed_runs() {
+        // A token-equal reformat claims the whole file: two touched lines
+        // close together merge, the next run sits beyond a gap the Diff
+        // would fold.
+        let runs = [(7, 7), (9, 9), (25, 25), (27, 27)];
+        assert_eq!(clip_to_changed(1, 100, &runs), vec![(7, 9), (25, 27)]);
+    }
+
+    #[test]
+    fn bridges_a_gap_the_diff_keeps_visible_and_splits_a_wider_one() {
+        assert_eq!(
+            clip_to_changed(1, 100, &[(10, 12), (20, 21), (30, 30)]),
+            vec![(10, 21), (30, 30)]
+        );
+    }
+
+    #[test]
+    fn respects_the_range_borders() {
+        assert_eq!(
+            clip_to_changed(8, 26, &[(5, 9), (25, 40)]),
+            vec![(8, 9), (25, 26)]
+        );
+        assert_eq!(clip_to_changed(10, 20, &[(1, 5), (30, 40)]), Vec::new());
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScopeKind {
     NewForMe,
@@ -1778,37 +1835,77 @@ impl ReviewApp {
         };
         match self.mechanical_view {
             MechanicalView::Shown => Vec::new(),
-            MechanicalView::Folded => classes
-                .ranges
-                .iter()
-                .filter(|range| range.class.is_mechanical())
-                .filter(|range| range.last_line + 1 - range.first_line >= 4)
-                .filter(|range| {
-                    !self.commented(
-                        &range.path,
-                        class_side(range.side),
-                        range.first_line,
-                        range.last_line,
-                    )
-                })
-                .map(|range| {
-                    let lines = range.last_line + 1 - range.first_line;
-                    // "48 lines moved to `src/b.rs:40`, identical tokens";
-                    // the other proofs do not read as a sentence, so they
-                    // get a separator.
-                    let label = match range.class {
-                        Class::Moved => format!("{lines} lines {}", range.proof),
-                        _ => format!("{lines} lines · {}", range.proof),
-                    };
-                    DiffFold::new(
-                        range.path.clone(),
-                        class_side(range.side),
-                        range.first_line,
-                        lines,
-                        label,
-                    )
-                })
-                .collect(),
+            MechanicalView::Folded => {
+                // A classified range can span unchanged lines - a token-equal
+                // reformat claims the whole file, an in-place Formatting or
+                // Moved range its whole item. The Kit hides every code row
+                // inside an unrevealed fold, yet still shows the "n unchanged
+                // lines" rows of its own context folds in that span, so
+                // expanding one makes the row vanish without revealing
+                // anything. Until the Kit absorbs those rows into the
+                // placeholder, each fold is clipped to the changed runs,
+                // bridging only gaps the Kit always keeps visible.
+                let mut changed: HashMap<(&str, DiffSide), Vec<(usize, usize)>> = HashMap::new();
+                for run in &self.runs {
+                    changed
+                        .entry((run.path.as_ref(), run.side))
+                        .or_default()
+                        .push((run.start, run.end));
+                }
+                classes
+                    .ranges
+                    .iter()
+                    // Generated stays mechanical for the counts and the
+                    // Guided root, but never folds: the owner tried folded
+                    // lockfiles and found them unreadable. Generated files
+                    // collapse at the file level instead.
+                    .filter(|range| range.class.is_mechanical() && range.class != Class::Generated)
+                    .filter(|range| range.last_line + 1 - range.first_line >= 4)
+                    .filter(|range| {
+                        !self.commented(
+                            &range.path,
+                            class_side(range.side),
+                            range.first_line,
+                            range.last_line,
+                        )
+                    })
+                    .flat_map(|range| {
+                        let side = class_side(range.side);
+                        let touched = changed
+                            .contains_key(&(range.path.as_str(), DiffSide::Original))
+                            || changed.contains_key(&(range.path.as_str(), DiffSide::Modified));
+                        let segments = if touched {
+                            clip_to_changed(
+                                range.first_line,
+                                range.last_line,
+                                changed
+                                    .get(&(range.path.as_str(), side))
+                                    .map_or(&[][..], Vec::as_slice),
+                            )
+                        } else {
+                            // An identical rename changes no line; with no
+                            // changes the Kit folds no context either, so the
+                            // whole-file fold cannot clash and stands whole.
+                            vec![(range.first_line, range.last_line)]
+                        };
+                        let path = range.path.clone();
+                        let proof = range.proof.clone();
+                        let class = range.class;
+                        segments.into_iter().map(move |(first, last)| {
+                            let lines = last + 1 - first;
+                            let plural = if lines == 1 { "" } else { "s" };
+                            // "48 lines moved to `src/b.rs:40`, identical
+                            // tokens"; the other proofs do not read as a
+                            // sentence, so they get a separator.
+                            let label = match class {
+                                Class::Moved => format!("{lines} line{plural} {proof}"),
+                                _ => format!("{lines} line{plural} · {proof}"),
+                            };
+                            DiffFold::new(path.clone(), side, first, lines, label)
+                        })
+                    })
+                    .collect()
+            }
             MechanicalView::OnlyMechanical => {
                 // The inverse: every changed run keeps only what some class
                 // claimed; the remainder - the meaningful lines - folds.

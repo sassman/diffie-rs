@@ -385,7 +385,18 @@ actually exercised):
   neutral tint decoration chained after the app's own fills; mechanical
   ranges of 4+ lines fold behind their proof ("48 lines moved to
   `src/b.rs:40`, identical tokens"); a range carrying a comment never
-  folds. Moved-and-edited and moved-context-changed ranges render their
+  folds. Generated ranges never fold at all (owner, 2026-11-15: tried on
+  `Cargo.lock`, read badly) - a generated file keeps its classification,
+  Guided root, tint and counts, but its diff renders unfolded; only the
+  file-level collapse stands. Each remaining fold is clipped to the
+  changed runs (`clip_to_changed`), bridging only gaps the Diff always
+  keeps visible: a range spanning unchanged lines (a token-equal whole-file
+  reformat, an item-span Formatting or Moved range) would otherwise
+  swallow the lines the Kit's own "n unchanged lines" folds disclose -
+  the Kit still shows those rows inside an unrevealed fold's span, but
+  expanding one reveals nothing. Kit-fork follow-up: absorb such rows
+  into the fold placeholder, then the clipping can go.
+  Moved-and-edited and moved-context-changed ranges render their
   proof as an annotation under their first line. `m` (bound in
   `Reading > Diff`; `MenuToggleMechanical` for the View menu) cycles
   folded / shown / only mechanical - the third folds the *meaningful*

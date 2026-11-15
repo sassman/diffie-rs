@@ -69,6 +69,14 @@ Notes on feasibility:
 Generated differs in kind: it is not proven equal, it is declared not worth
 reading. It is in the same bucket but always carries its own label.
 
+**Decided (owner, 2026-11-15):** generated files are classified and listed -
+the Guided "only generated" root, the tint, the counts in the summary and
+progress all stay - but they never fold in the diff view. Folding was tried
+on `Cargo.lock` and read badly; a generated file's diff renders unfolded
+like any normal file, and the file-level collapse (generated files start
+collapsed) remains the only thing standing between the reviewer and its
+content.
+
 ### Comment-only
 
 **Decided:** a class of its own, not folded into Meaningful.
@@ -272,7 +280,9 @@ proof and a jump, through the Kit's header slots
   change backgrounds itself, with `.change_background(false)`).
 - A mechanical range of 4 lines or more folds into one row via the fork's
   `DiffFold` / `set_folds`, which folds changed rows: "48 lines moved to
-  `src/b.rs:40`, identical tokens". Known limits to design around: the
+  `src/b.rs:40`, identical tokens". Generated ranges are the exception and
+  never fold (Decided, owner, 2026-11-15; see section 3). Known limits to
+  design around: the
   placeholder renders its label only, a click reveals, there is no inline
   link or jump button without a Kit render hook; in split view a fold hides
   the whole paired row; folds must be re-applied after `set_files` (the app
