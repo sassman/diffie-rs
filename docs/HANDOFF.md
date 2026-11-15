@@ -411,9 +411,15 @@ actually exercised):
   Kit). A visible mark is the anchor the keys step from; once the reader
   scrolls it off the page the walk re-anchors at the viewport, so the
   keys guide within the page being looked at instead of yanking back.
-  The change keys also land below the pinned header now rather than
-  under it. One marker serves both steppers - a comment jump moves it
-  off the last change group and vice versa.
+  Landings center the mark in the viewport (the Kit's `center_block`: a
+  group taller than the viewport starts a header's height below the top,
+  and the list clamps at the document's ends); `n`/`p` ride on the Kit's
+  `scroll_to_line`, so comment jumps center the same way. One marker
+  serves both steppers - a comment jump moves it off the last change
+  group and vice versa. While the mark is still the line a comment jump
+  placed, that comment's card carries a prominent 2px primary border
+  (`ThreadView::active`); a change-key press replaces the mark and the
+  card falls back in line.
 - Application menu bar (`install_menus` in `app.rs`, set at init so it sees
   the keymap): app menu with About diffie (the standard AppKit panel with
   name and version, since the dev binary has no bundle), Services and Quit;

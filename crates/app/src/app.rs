@@ -707,6 +707,8 @@ struct ThreadView {
     answer_input: Option<Entity<TextareaState>>,
     /// The diff's soft-wrap toggle; the quoted snippet follows it.
     wrap: bool,
+    /// The comment the jump stepper is on; its card's border leaps out.
+    active: bool,
 }
 
 struct ReplyView {
@@ -2218,7 +2220,7 @@ impl ReviewApp {
 
     // ---- rendering -------------------------------------------------------
 
-    fn snapshot(&self) -> Snapshot {
+    fn snapshot(&self, cx: &App) -> Snapshot {
         let mut threads = Vec::new();
         if let Some(set) = &self.reviews {
             let set_threads = set.threads();
@@ -2303,6 +2305,18 @@ impl ReviewApp {
                         .filter(|answer| answer.comment == thread.comment.id)
                         .map(|answer| answer.input.clone()),
                     wrap: self.wrap,
+                    // Prominent only while the diff's focus mark is still the
+                    // line the jump placed; a change-key press replaces the
+                    // mark and the card falls back in line with the rest.
+                    active: self.comment_cursor.as_deref() == Some(thread.comment.id.as_str()) && {
+                        let mark = DiffLineRange::new(
+                            SharedString::from(placed.path.clone()),
+                            diff_side(placed.side),
+                            placed.line,
+                            placed.line,
+                        );
+                        self.diff.read(cx).focused_ranges() == std::slice::from_ref(&mark)
+                    },
                 });
             }
         }
@@ -3645,7 +3659,7 @@ impl ReviewApp {
                 .into_any_element();
         }
 
-        let snapshot = Rc::new(self.snapshot());
+        let snapshot = Rc::new(self.snapshot(cx));
         let annotations = self.annotations(&snapshot);
         let owner = cx.entity().downgrade();
         let for_annotations = (snapshot.clone(), owner.clone());
@@ -4388,6 +4402,12 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
                     .border_color(accent.opacity(0.45))
                     .bg(accent.opacity(0.07))
             }
+        })
+        // The jump stepper's landing: the border leaps out so the eye finds
+        // the card among its neighbours. Width over padding - the box grows
+        // by the border alone, keeping the density rules.
+        .when(thread.active, |card| {
+            card.border_2().border_color(cx.theme().primary)
         })
         .child(header)
         // The rewritten code the comment was about, quoted from the review
