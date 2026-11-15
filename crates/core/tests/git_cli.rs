@@ -1068,3 +1068,45 @@ fn open_comments_keep_a_ticked_file_in_new_for_me() {
     assert_eq!(a.state, FileState::KeptForComments);
     assert!(patch.text.contains("+TWO"));
 }
+
+#[test]
+fn one_revision_reads_like_git_diff() {
+    // `diffie HEAD~1` must show the working tree against that revision -
+    // the commits since it and the uncommitted layer together, exactly
+    // what `git diff HEAD~1` prints.
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    // Uncommitted edit on line 5 on top of c5.
+    std::fs::write(
+        root.join("a.txt"),
+        lines(&[(2, "TWO"), (5, "FIVE"), (9, "NINE")]),
+    )
+    .unwrap();
+
+    let backend = fixture.backend();
+    let comparison = Comparison {
+        source: "working tree".into(),
+        target: "HEAD~1".into(),
+        mode: CompareMode::BranchAdds,
+        uncommitted: true,
+        ..Default::default()
+    };
+    let resolved = backend.resolve(&comparison).unwrap();
+    // HEAD~1 is an ancestor, so the merge-base rule changes nothing.
+    assert_eq!(resolved.base, resolved.target_head);
+    assert_eq!(resolved.base, fixture.commits[3]);
+
+    // The commit between the revision and HEAD stays pickable.
+    let commits = backend.commits(&resolved).unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].subject, "c5 edit line 9 again");
+
+    let patch = backend
+        .patch(&resolved, &Scope::NewForMe, ReviewInput::EMPTY, false)
+        .unwrap();
+    assert_eq!(paths(&patch.files), ["a.txt"]);
+    assert!(
+        patch.text.contains("+FIVE") && patch.text.contains("+NINE"),
+        "the committed run and the uncommitted layer both show"
+    );
+}
