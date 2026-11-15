@@ -3435,15 +3435,8 @@ impl ReviewApp {
                         .text_color(cx.theme().blue_light),
                 )
             })
-            .when(state == ReviewState::ChangedSince, |row| {
-                // The lost tick alone is invisible; the reviewer needs to
-                // see which files moved under them since the last pass.
-                row.child(
-                    Icon::new(Lucide::TriangleAlert)
-                        .xsmall()
-                        .text_color(cx.theme().warning),
-                )
-            })
+            // A changed-since triangle sat here and was rejected as noise:
+            // the tree stays quiet, the file header's note carries it.
             .when(is_generated(&file.path), |row| {
                 row.child(div().flex_none().text_size(px(10.5)).child("generated"))
             })
