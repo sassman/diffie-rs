@@ -3786,25 +3786,36 @@ impl ReviewApp {
                 });
                 let comments = view.and_then(|view| {
                     (view.comments > 0).then(|| {
-                        let mut text = format!(
+                        format!(
                             "{} comment{}",
                             view.comments,
                             if view.comments == 1 { "" } else { "s" }
-                        );
-                        if view.other_revision > 0 {
-                            text.push_str(&format!(
-                                " · {} from another revision",
-                                view.other_revision
-                            ));
-                        }
-                        if view.changed_code_comments > 0 {
-                            text.push_str(&format!(
-                                " · {} on changed code",
-                                view.changed_code_comments
-                            ));
-                        }
-                        text
+                        )
                     })
+                });
+                // The breakdown is on-demand detail, not header text; it
+                // rides the info tooltip so the header stays one count.
+                let comment_detail = view.and_then(|view| {
+                    let mut parts = Vec::new();
+                    if view.other_revision > 0 {
+                        parts.push(format!(
+                            "{} comment{} from another revision",
+                            view.other_revision,
+                            if view.other_revision == 1 { "" } else { "s" }
+                        ));
+                    }
+                    if view.changed_code_comments > 0 {
+                        parts.push(format!(
+                            "{} comment{} on changed code",
+                            view.changed_code_comments,
+                            if view.changed_code_comments == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        ));
+                    }
+                    (!parts.is_empty()).then(|| parts.join(" · "))
                 });
                 let path_for_copy = path.clone();
                 h_flex()
@@ -3890,19 +3901,26 @@ impl ReviewApp {
                     .when(view.is_some_and(|view| view.uncommitted), |row| {
                         row.child(div().flex_none().text_color(warning).child("uncommitted"))
                     })
-                    // Quiet metadata: the count message only matters when the
-                    // reviewer asks, so it hides behind the icon's hover.
-                    .when_some(touched, |row, touched| {
-                        row.child(
-                            Button::new(SharedString::from(format!("touched-{path}")))
-                                .ghost()
-                                .xsmall()
-                                .w(px(18.))
-                                .h(px(18.))
-                                .icon(Icon::new(Lucide::Info))
-                                .tooltip(touched),
-                        )
-                    })
+                    // Quiet metadata: the count messages only matter when the
+                    // reviewer asks, so they share one icon's hover.
+                    .when_some(
+                        {
+                            let parts: Vec<_> =
+                                [touched, comment_detail].into_iter().flatten().collect();
+                            (!parts.is_empty()).then(|| parts.join(" · "))
+                        },
+                        |row, info| {
+                            row.child(
+                                Button::new(SharedString::from(format!("info-{path}")))
+                                    .ghost()
+                                    .xsmall()
+                                    .w(px(18.))
+                                    .h(px(18.))
+                                    .icon(Icon::new(Lucide::Info))
+                                    .tooltip(info),
+                            )
+                        },
+                    )
                     .when_some(comments, |row, comments| {
                         let path = path.clone();
                         let owner = owner.clone();
