@@ -406,7 +406,8 @@ actually exercised):
   `r`, Escape, Cmd/Ctrl+Enter, Cmd/Ctrl+R, Cmd/Ctrl+Q, Space in the commit
   list.
 - Navigation focus marker: `]`/`[` and `n`/`p` mark where they land (the
-  Kit fork's focus marker - a slim primary edge bar with a faint wash -
+  Kit fork's focus marker - a primary edge bar, a translucent wash and a
+  tinted gutter on the marked rows -
   via `DiffState::set_focused_ranges`; the change keys set it inside the
   Kit). A visible mark is the anchor the keys step from; once the reader
   scrolls it off the page the walk re-anchors at the viewport, so the
