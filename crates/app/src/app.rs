@@ -228,6 +228,8 @@ fn install_menus(cx: &mut App) {
             MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
         ]),
         Menu::new("View").items([
+            MenuItem::action("Reload", Refresh),
+            MenuItem::separator(),
             MenuItem::action("Split | Unified", MenuSplitUnified),
             MenuItem::action("Wrap long lines", MenuWrap),
             MenuItem::action("Hide whitespace-only changes", MenuHideWhitespace),
@@ -648,6 +650,9 @@ struct Loaded {
     branch: Vec<(String, Option<Oid>)>,
     touched: HashMap<String, Vec<Oid>>,
     uncommitted_paths: HashSet<String>,
+    /// The picks after an all-picked custom scope took in the commits the
+    /// branch gained; `None` leaves the picker untouched.
+    picked: Option<Vec<Oid>>,
     /// A stale `completed` marker was cleared and the file needs saving.
     completed_cleared: bool,
     placed: Vec<Placed>,
@@ -990,6 +995,15 @@ impl ReviewApp {
         let backend = self.backend.clone();
         let comparison = self.comparison.clone();
         let scope = self.core_scope();
+        // A reload can find commits HEAD gained since the last load. Picking
+        // every commit means "everything", so the load re-picks the fresh
+        // list and the newcomers join the scope; a hand-picked subset stays
+        // exactly as picked.
+        let extend_picks = self.scope == ScopeKind::Custom
+            && self
+                .commits
+                .iter()
+                .all(|commit| self.picked.contains(&commit.id));
         let mine = self.reviews.as_ref().map(|set| set.mine.clone());
         let generation = self.review_generation;
         let ignore_whitespace = self.ignore_whitespace;
@@ -997,7 +1011,14 @@ impl ReviewApp {
         self._load = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let result = load(&*backend, &comparison, &scope, mine, ignore_whitespace);
+                    let result = load(
+                        &*backend,
+                        &comparison,
+                        &scope,
+                        extend_picks,
+                        mine,
+                        ignore_whitespace,
+                    );
                     tracing::debug!(ok = result.is_ok(), "load finished");
                     result
                 })
@@ -1114,6 +1135,9 @@ impl ReviewApp {
                 });
                 self.resolved = Some(loaded.resolved);
                 self.commits = Arc::new(loaded.commits);
+                if let Some(picked) = loaded.picked {
+                    self.picked = picked;
+                }
                 self.runs = loaded.runs;
                 self.files = Arc::new(loaded.patch.files);
                 self.branch = loaded.branch;
@@ -4817,12 +4841,27 @@ fn load(
     backend: &dyn ReviewBackend,
     comparison: &Comparison,
     scope: &Scope,
+    extend_picks: bool,
     mine: Option<ReviewFile>,
     ignore_whitespace: bool,
 ) -> Result<Loaded, String> {
     let text = |error: diffie_core::BackendError| error.to_string();
     let resolved = backend.resolve(comparison).map_err(text)?;
     let commits = backend.commits(&resolved).map_err(text)?;
+    // Only now is it known what HEAD gained; the caller could only say
+    // whether its picks meant "everything".
+    let scope = match scope {
+        Scope::Commits { uncommitted, .. } if extend_picks => Scope::Commits {
+            picked: commits.iter().map(|commit| commit.id.clone()).collect(),
+            uncommitted: *uncommitted,
+        },
+        other => other.clone(),
+    };
+    let scope = &scope;
+    let picked = match scope {
+        Scope::Commits { picked, .. } if extend_picks => Some(picked.clone()),
+        _ => None,
+    };
     let author = backend.author_name().map_err(text)?;
     let review_dir = backend.review_dir().map_err(text)?;
     let review_path = ReviewFile::path_in(&review_dir, &comparison.source, &author);
@@ -4953,6 +4992,7 @@ fn load(
         branch,
         touched,
         uncommitted_paths,
+        picked,
         completed_cleared,
         placed,
         moved,

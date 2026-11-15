@@ -54,6 +54,7 @@ Be exact about this when you report further work.
 | Edit menu's native Undo/Cut/Copy/Paste on a focused input, Linux and Windows (bar stores but draws nothing) | Not exercised |
 | 2026-11-14 cleanup on screen: the review-save ordering and reload grafting, the stale-blame guard on a draft's attach commit, the status-bar notice, the split scope-bar rendering | Compiled, clippy-clean, core tests pass; not seen on screen - the window was not run |
 | Removed-file header: danger-coloured name, D badge tooltip with the deleting commit (newest in-scope commit touching the path; plain fallback for a worktree deletion) | Compiled, clippy-clean, core tests pass; not seen on screen - the window was not run |
+| Reload semantics: pinned CLI target across Cmd/Ctrl+R, new commits extending an all-picked custom scope, View > Reload menu item | Compiled, clippy-clean; the one-revision CLI reading (`diffie HEAD~1` = `git diff HEAD~1`) is covered by a core test (`one_revision_reads_like_git_diff`); the reload flow itself not seen on screen - the window was not run |
 
 ## Build, run, test
 
@@ -329,6 +330,15 @@ actually exercised):
   keeps its branch diff (`FileState::KeptForComments`, note "no new
   changes - shown for its open comments") so the comments stay visible
   and judgeable; resolving them lets it collapse again.
+- Reload: Cmd/Ctrl+R (also View > Reload) re-resolves the comparison and
+  rebuilds the diff, so a review stays open while work continues. The
+  CLI-given target is pinned to its startup commit in `main.rs` (a
+  `HEAD~1` or branch target re-resolved on reload would move the base and
+  swallow the commits the reload should add); the head side re-resolves,
+  so commits made since appear. A custom scope with every commit picked
+  re-picks the fresh list - new commits join the review, and an unticked
+  uncommitted layer stays unticked; a hand-picked subset is left exactly
+  as picked (`extend_picks` in `reload`/`load`).
 - Search: `/` opens a bar under the scope bar, seeded from the text
   selection; smartcase matches over the scoped patch text
   (`diffie_core::search::search_patch`, scanned on the background executor

@@ -418,6 +418,27 @@ fn main() {
         },
         ..comparison
     };
+    // Reload re-resolves the comparison so HEAD can move and gain commits;
+    // the typed target must not move with it. `HEAD~1` names a commit
+    // relative to startup, and a branch target would swallow on reload the
+    // very commits the reload should add, so the base is pinned to its
+    // startup commit while the typed spelling stays the display name.
+    let comparison = if comparison.target_rev.is_none() {
+        match backend.resolve(&comparison) {
+            Ok(resolved) => Comparison {
+                target_rev: Some(resolved.target_head.to_string()),
+                ..comparison
+            },
+            // Same stance as a mistyped revision: fail here, not inside an
+            // empty window.
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        comparison
+    };
     // The project keeps its name in every worktree; the worktree shows
     // beside it in the title bar.
     let (name, worktree) = backend
