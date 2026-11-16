@@ -142,6 +142,12 @@ pub struct FileSummary {
     pub deletions: usize,
     pub state: FileState,
     pub binary: bool,
+    /// The old path of a rename, from the patch's `rename from` line.
+    /// `None` unless `status` is [`FileStatus::Renamed`].
+    pub renamed_from: Option<String>,
+    /// The rename's similarity in percent, from the patch's
+    /// `similarity index` line. 100 means the content is identical.
+    pub similarity: Option<u8>,
 }
 
 /// What line numbers on the new side of a patch refer to.

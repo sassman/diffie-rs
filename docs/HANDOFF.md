@@ -61,6 +61,8 @@ Be exact about this when you report further work.
 | Jump-back and forward (Cmd/Ctrl+[ and ]): the two stacks, the exact restore, the hint-bar entry and the Go > Back and Forward items | The Kit's `scroll_to_top_line`/`top_line` round trip is covered by a Kit integration test (`scroll_to_top_line_restores_what_top_line_read`); the app side compiled, clippy-clean, not seen on screen - the window was not run |
 | Other-revision cards keeping the full actions row, Edit and Delete disabled with explaining tooltips | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
+| 2026-11-14, macOS, mechanical-changes UI against the mechanical-demo repository: scope-bar counts ("155 lines to read · 281 mechanical · 6 comment-only") with the folded/shown/only-mechanical toggle; move folds with proof labels ("13 lines moved from `src/util.rs:6`, identical tokens · name resolution not checked"); `m` cycling all three states (shown: folds gone, moved ranges neutral-tinted while uncovered added lines keep green; only mechanical: meaningful runs folded behind "1 line to read"); file panel's "MECHANICAL · 1" bottom group with Cargo.lock tagged "generated"; mixed rows with meaningful counts in colour and grey mechanical counts; per-file header "+23 79 mechanical"; `m`/`%` status-bar hints | Verified by screenshot |
+| Same feature, not seen on screen: `%` counterpart jump (the desktop was in use and the window was closed under the test), the scope-bar toggle clicked directly, "Mark fully mechanical files as reviewed", the comment-on-a-mechanical-range never-folds rule, moved-and-edited and moved-context-changed annotations, fully-mechanical file header proof | Compiled, clippy-clean; logic mirrors verified paths (`show_hit`, `set_reviewed`) but was not driven |
 
 ## Build, run, test
 
@@ -373,6 +375,61 @@ actually exercised):
   fold their subtree, and the diff follows: a shut folder collapses its
   files in the main view, reopening frees only files not under another
   shut folder.
+- Mechanical changes (spec:
+  `docs/superpowers/specs/mechanical-changes-spec.md`): after each load a
+  second background task fetches both sides of every changed file
+  (`blob_content`/`worktree_content`, ids from the patch's `--full-index`
+  lines, regions from its hunks), runs `diffie_core::classify::classify`
+  with the parse cache at `<review-dir>/.cache`, and installs the result
+  under the load's revision guard. Mechanical and comment-only lines get a
+  neutral tint decoration chained after the app's own fills; mechanical
+  ranges of 4+ lines fold behind their proof ("48 lines moved to
+  `src/b.rs:40`, identical tokens"); a range carrying a comment never
+  folds. Generated ranges never fold at all (owner, 2026-11-15: tried on
+  `Cargo.lock`, read badly) - a generated file keeps its classification,
+  Guided root, tint and counts, but its diff renders unfolded; only the
+  file-level collapse stands. Each remaining fold is clipped to the
+  changed runs (`clip_to_changed`), bridging only gaps the Diff always
+  keeps visible: a range spanning unchanged lines (a token-equal whole-file
+  reformat, an item-span Formatting or Moved range) would otherwise
+  swallow the lines the Kit's own "n unchanged lines" folds disclose -
+  the Kit still shows those rows inside an unrevealed fold's span, but
+  expanding one reveals nothing. Kit-fork follow-up: absorb such rows
+  into the fold placeholder, then the clipping can go.
+  Moved-and-edited and moved-context-changed ranges render their
+  proof as an annotation under their first line. `m` (bound in
+  `Reading > Diff`; `MenuToggleMechanical` for the View menu) cycles
+  folded / shown / only mechanical - the third folds the *meaningful*
+  runs behind "n lines to read" instead; the scope bar carries the same
+  three-state toggle but no counts text (the bar overflowed; its
+  explanation truncates with an ellipsis when space runs out). Counts
+  live on the Guided roots and the progress line instead. The file panel
+  opens with a tight Files/Guided tab strip (Kit `TabBar`, underline,
+  `xsmall`, session-only choice) in place of the old "FILES · n" header;
+  Files is the unchanged tree with the mechanical bottom group, Guided
+  shows one collapsible root per class present - "only moved · n files ·
+  m lines", then renamed, comments, formatting, generated - each root the
+  same tree (same rows, selection, ticks) reduced to the files carrying
+  that class via the classified ranges; empty roots are hidden, a file
+  can sit under several roots, and while classification runs the tab
+  shows a one-line hint. Pressing a root makes it the active filter:
+  the diff re-feeds `set_files` with only that root's files (the full
+  parsed set is kept on the view; the standard collapsed set and the
+  folds are re-applied, so a manual expand does not survive, like a
+  reload). The active root is highlighted, pressing it again or
+  choosing the Files tab restores the full view, and the root's
+  chevron is a separate click target that only folds the subtree. `%`
+  jumps between a moved range
+  and its counterpart (gutter selection first, hovered line as fallback),
+  revealing folds on the way. Fully mechanical files start collapsed with
+  the proof in their header, leave the tree for a muted bottom group
+  "MECHANICAL · n" tagged with their one-word class, and a View-menu
+  entry "Mark fully mechanical files as reviewed" runs the ordinary tick
+  for all of them in one save (never automatic). Mixed files show
+  meaningful counts in colour and the mechanical+comment-only count grey;
+  the progress line reads "… · n mechanical". Binary files and files
+  whose content cannot be read as text are skipped and stay meaningful.
+  The app's `is_generated` now delegates to the core's `GeneratedRules`.
 - Diff: per-theme added and removed row fills (decorations), signs, a
   take-over header (path with a copy button, coloured counts, touched-by
   behind an info icon's hover, comment summary that jumps to the first
@@ -533,14 +590,15 @@ In this order, each one small enough to show the owner:
   feature renders), and `scroll_to_top_line` (the exact counterpart of
   `top_line`, which the jump-back restore rides on). Drop the patch when
   upstream ships them.
-- **Moved-code folds.** `diffie_core::moved::moved_blocks(&patch.text)`
-  pairs whole verbatim-moved runs - a complete removal run whose full
-  content reappears as a complete addition run (exact match, at least 20
-  alphanumeric characters); partial overlaps are edits, not moves.
-  `install()` turns each block into two `DiffFold`s labeled
-  "moved to/from path:span". A window fully covered by an always-on-top
-  window stops painting (GPUI skips occluded windows), which mimics a
-  load hang during screenshot verification - expose a sliver first.
+- **Folds belong to the classifier.** `mechanical_folds` in `app.rs` is
+  the only producer; `install()` clears the folds and the classification
+  task re-applies them, as does every toggle cycle and comment placement
+  change. The old `diffie_core::moved::moved_blocks` is no longer called
+  by the app; `crates/core/src/moved.rs` is dead weight awaiting the
+  phase-2 cleanup the spec names. A window fully covered by an
+  always-on-top window stops painting (GPUI skips occluded windows),
+  which mimics a load hang during screenshot verification - expose a
+  sliver first.
 - **gpui-kit is pinned with `=`.** Bumping it can change GPUI's API. Do it
   deliberately, alone, and re-check the whole UI.
 - **Comment line numbers.** A stored comment holds the line number in the
