@@ -1189,7 +1189,22 @@ impl ReviewApp {
                 self.reviews = Some(loaded.reviews);
                 self.review_path = loaded.review_path;
                 self.placed = loaded.placed;
-                self.current_file = None;
+                // A fresh view reads from the top, so the first file still
+                // open for review - expanded and unticked - is the one `r`
+                // and the file stepper act on until the reader moves. The
+                // collapsed headers leading the list (reviewed, generated,
+                // removed) are not being read, and with no current file at
+                // all, `r` on the opening screen did nothing.
+                self.current_file = {
+                    let diff = self.diff.read(cx);
+                    diff.files()
+                        .iter()
+                        .map(|file| file.path().clone())
+                        .find(|path| {
+                            !diff.is_file_collapsed(path)
+                                && self.review_state(path) != ReviewState::Reviewed
+                        })
+                };
                 if loaded.completed_cleared {
                     self.save_review(cx);
                 }

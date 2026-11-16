@@ -57,7 +57,7 @@ Be exact about this when you report further work.
 | Reload semantics: pinned CLI target across Cmd/Ctrl+R, new commits extending an all-picked custom scope, View > Reload menu item | Compiled, clippy-clean; the one-revision CLI reading (`diffie HEAD~1` = `git diff HEAD~1`) is covered by a core test (`one_revision_reads_like_git_diff`); the reload flow itself not seen on screen - the window was not run |
 | Navigation focus marker and viewport re-anchoring for `]`/`[`/`n`/`p` | Marking, stepping from a visible mark and viewport re-anchoring are covered by a Kit integration test (`change_keys_mark_the_reached_group_and_step_from_a_visible_mark`); the comment-jump mirror compiles and is clippy-clean; not seen on screen - the window was not run |
 | Archive action on own comments: `take_comment` + `ArchiveFile::append` in the core, Archive button and background write in the app | Core rules covered by unit tests (move out of the live file, append dedupe, invisibility to discovery and `--reply`); the button and the write flow compiled, clippy-clean, not seen on screen - the window was not run |
-| `r` ticking the file the focus mark is in after `]`/`[` (`follow_mark` pulls `current_file` from the Kit's mark; `n`/`p` and search jumps already set it) | Compiled, clippy-clean; not seen on screen - the window was not run |
+| `r` ticking the file the focus mark is in after `]`/`[` (`follow_mark` pulls `current_file` from the Kit's mark; `n`/`p` and search jumps already set it), and ticking the first expanded, unticked file on a fresh load before any navigation | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Jump-back and forward (Cmd/Ctrl+[ and ]): the two stacks, the exact restore, the hint-bar entry and the Go > Back and Forward items | The Kit's `scroll_to_top_line`/`top_line` round trip is covered by a Kit integration test (`scroll_to_top_line_restores_what_top_line_read`); the app side compiled, clippy-clean, not seen on screen - the window was not run |
 
 ## Build, run, test
@@ -413,7 +413,10 @@ actually exercised):
   step: selection, the file stepper, comment jumps, search hits, and the
   change keys (`follow_mark` reads the file out of the Kit's focus mark,
   which `next_change` moves internally - before that, `r` after `]`/`[`
-  ticked the file the reader had left).
+  ticked the file the reader had left). A fresh load starts with the
+  first expanded, unticked file current - the view opens at the top, and
+  the collapsed headers leading the list are not being read - before
+  that, `r` did nothing until the reader had navigated somewhere.
 - Status bar: side-task failures (saving the review, the search's
   whole-branch fetch, blame for a comment) surface as a `notice` there and
   clear on the next success; the full-screen `error` page is reserved for
