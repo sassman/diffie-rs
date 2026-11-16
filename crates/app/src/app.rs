@@ -1567,6 +1567,17 @@ impl ReviewApp {
         cx.notify();
     }
 
+    /// `r` and the file stepper act on `current_file`, but a change key
+    /// moves the focus mark inside the Kit; pull the file it landed in
+    /// back out, or `r` ticks the file the reader left behind. A comment
+    /// jump needs no follow-up: it sets `current_file` itself.
+    fn follow_mark(&mut self, cx: &mut Context<Self>) {
+        if let Some(range) = self.diff.read(cx).focused_ranges().first() {
+            self.current_file = Some(range.path().clone());
+            cx.notify();
+        }
+    }
+
     fn reveal_file(&mut self, path: SharedString, cx: &mut Context<Self>) {
         self.diff.update(cx, |state, cx| {
             let was = state.is_file_collapsed(&path);
@@ -4785,7 +4796,8 @@ impl Render for ReviewApp {
                 },
             ))
             .on_action(cx.listener(|this, _: &NextChange, _, cx| {
-                this.diff.update(cx, |state, cx| state.next_change(cx))
+                this.diff.update(cx, |state, cx| state.next_change(cx));
+                this.follow_mark(cx);
             }))
             .on_action(cx.listener(|this, _: &NextComment, _, cx| this.jump_comment(true, cx)))
             .on_action(
@@ -4795,7 +4807,8 @@ impl Render for ReviewApp {
                 this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PreviousChange, _, cx| {
-                this.diff.update(cx, |state, cx| state.previous_change(cx))
+                this.diff.update(cx, |state, cx| state.previous_change(cx));
+                this.follow_mark(cx);
             }))
             .on_action(cx.listener(|this, _: &NextFile, _, cx| this.move_file(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousFile, _, cx| this.move_file(-1, cx)))
@@ -4873,10 +4886,12 @@ impl Render for ReviewApp {
                 this.toggle_other_revisions(cx)
             }))
             .on_action(cx.listener(|this, _: &MenuNextChange, _, cx| {
-                this.diff.update(cx, |state, cx| state.next_change(cx))
+                this.diff.update(cx, |state, cx| state.next_change(cx));
+                this.follow_mark(cx);
             }))
             .on_action(cx.listener(|this, _: &MenuPreviousChange, _, cx| {
-                this.diff.update(cx, |state, cx| state.previous_change(cx))
+                this.diff.update(cx, |state, cx| state.previous_change(cx));
+                this.follow_mark(cx);
             }))
             .on_action(cx.listener(|this, _: &MenuNextFile, _, cx| this.move_file(1, cx)))
             .on_action(cx.listener(|this, _: &MenuPreviousFile, _, cx| this.move_file(-1, cx)))
