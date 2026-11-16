@@ -389,7 +389,9 @@ Assumed:
   after a rebase removes its commit.
 - A comment on a removed line belongs to the commit that removed it.
 - Actions per comment: edit, copy as prompt, archive, delete. Only the author
-  can edit, archive or delete.
+  can edit, archive or delete. Icon-only with tooltips (owner, 2026-11-16;
+  five labels read like a sentence); Resolve keeps its label as the row's
+  one verdict, with a tooltip like the rest.
 
 ## 10. Reactions
 

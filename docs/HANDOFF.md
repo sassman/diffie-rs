@@ -380,9 +380,11 @@ actually exercised):
   generated, unchanged-reviewed and removed files as collapsed headers, `Simple` hunk bands,
   auto-unified when the window is too narrow with the manual choice kept.
 - Comments: cards in the mockup's style with hash and line label, reaction
-  chips and the smile-plus picker, Edit, per-comment Copy as prompt, Archive
-  (own comments only: the thread moves into the archive file and out of
-  every view, no restore - `archive_comment`), Delete;
+  chips and the smile-plus picker, and icon-only actions with tooltips -
+  Edit (pencil), per-comment Copy as prompt (clipboard), Archive (box; own
+  comments only: the thread moves into the archive file and out of every
+  view, no restore - `archive_comment`), Delete (trash) - beside the
+  labelled Resolve button;
   other-revision comments dashed and quiet. A comment whose code was
   rewritten since follows the rewrite (blame misses, `changed_regions` +
   `map_line` carry it to the replacement) and sits there dashed in the

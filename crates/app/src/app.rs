@@ -4433,30 +4433,38 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
                 }),
         );
     }
-    let text_button = |id: SharedString, label: &'static str| {
+    // Icon-only like the title bar's toggles, each named by its tooltip:
+    // five labels made the row read like a sentence (owner, 2026-11-16).
+    // Resolve alone keeps its word - it is the row's one verdict.
+    let icon_button = |id: SharedString, icon: Lucide, tip: &'static str| {
         Button::new(id)
             .ghost()
             .xsmall()
             .h(px(22.))
-            .label(label)
+            .icon(Icon::new(icon))
             .text_color(muted)
+            .tooltip(tip)
     };
     if thread.mine {
         let (owner, id) = (owner.clone(), id.clone());
         actions = actions.child(
-            text_button(SharedString::from(format!("edit-{id}")), "Edit").on_click(
-                move |_, window, cx| {
-                    let _ = owner.update(cx, |this, cx| this.start_edit(&id, window, cx));
-                },
-            ),
+            icon_button(
+                SharedString::from(format!("edit-{id}")),
+                Lucide::Pencil,
+                "Edit the comment",
+            )
+            .on_click(move |_, window, cx| {
+                let _ = owner.update(cx, |this, cx| this.start_edit(&id, window, cx));
+            }),
         );
     }
     {
         let (owner, id) = (owner.clone(), id.clone());
         actions = actions.child(
-            text_button(
+            icon_button(
                 SharedString::from(format!("copy-prompt-{id}")),
-                "Copy as prompt",
+                Lucide::ClipboardCopy,
+                "Copy as a prompt for an agent",
             )
             .on_click(move |_, _, cx| {
                 let _ = owner.update(cx, |this, cx| this.copy_comment_as_prompt(&id, cx));
@@ -4466,21 +4474,27 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
     if thread.mine {
         let (owner, id) = (owner.clone(), id.clone());
         actions = actions.child(
-            text_button(SharedString::from(format!("archive-{id}")), "Archive")
-                .tooltip("Moves the thread into the archive file, out of every view - no restore")
-                .on_click(move |_, _, cx| {
-                    let _ = owner.update(cx, |this, cx| this.archive_comment(&id, cx));
-                }),
+            icon_button(
+                SharedString::from(format!("archive-{id}")),
+                Lucide::Archive,
+                "Moves the thread into the archive file, out of every view - no restore",
+            )
+            .on_click(move |_, _, cx| {
+                let _ = owner.update(cx, |this, cx| this.archive_comment(&id, cx));
+            }),
         );
     }
     if thread.mine {
         let (owner, id) = (owner.clone(), id.clone());
         actions = actions.child(
-            text_button(SharedString::from(format!("delete-{id}")), "Delete").on_click(
-                move |_, _, cx| {
-                    let _ = owner.update(cx, |this, cx| this.delete_comment(&id, cx));
-                },
-            ),
+            icon_button(
+                SharedString::from(format!("delete-{id}")),
+                Lucide::Trash,
+                "Delete the comment",
+            )
+            .on_click(move |_, _, cx| {
+                let _ = owner.update(cx, |this, cx| this.delete_comment(&id, cx));
+            }),
         );
     }
 
