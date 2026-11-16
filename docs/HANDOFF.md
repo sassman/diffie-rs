@@ -65,6 +65,7 @@ Be exact about this when you report further work.
 | Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Pull-request menu (title-bar icon in a `--pr` review): open in the browser, publish comments, approve with and without comments; the link icon on published cards; the status-bar line after a publish | Core covered by tests: what a publish sends and records (`forge.rs`, against a fake forge) and the exact gh calls, the file-level fallback and the pending-review cleanup (`github.rs`, against a stand-in gh script, Unix only). The GraphQL input and enum names were checked read-only against GitHub's live schema by introspection. The status query (`gh pr view --json state,reviewDecision,statusCheckRollup` with the app's jq) was run read-only against a real merged PR and its lines match what `fold_checks` parses. **Nothing was ever posted to a real pull request**, and the window was not run: the menu, the state icon and its red tint, the busy state, the link icon and whether a pending-review comment's URL still opens after the submit are all unseen |
 | User settings (`settings.rs`): split/unified and window bounds persisted to `~/.config/diffie/settings.toml`, restored at startup | Round trip, defaults on missing or broken files and future-key tolerance are unit-tested; the live flow (bounds observer, coalesced writes, startup placement) compiled, clippy-clean, not seen on screen - the window was not run |
+| Comment cards capped at the viewport in unwrapped unified view (Kit fork commit `b97451f2`: the annotation wrapper takes the viewport's width and cancels the strip's offset, as the pinned file header does) | Verified on macOS on 2026-11-16 by screenshot: a demo repository with a 2378-character changed line and a hand-written review comment; the card ends at the viewport's edge with its actions row visible. The offset-cancel while scrolled sideways was not exercised (synthetic wheel events did not reach the scroll mask); split view unaffected (owner looked at it) |
 
 ## Build, run, test
 
@@ -358,7 +359,11 @@ Things that cost time and are easy to hit again:
   that scroll their code separately - the fork's
   `diff: Scroll each split panel on its own` carries that behavior (branch
   `split-panel-scroll`); gutters stay put, only the code shifts. With wrap
-  on, both modes wrap instead of scrolling.
+  on, both modes wrap instead of scrolling. Line annotation cards no
+  longer ride that canvas: the fork pins them to the viewport's width and
+  cancels the strip's offset (`CardPlacement` in the Kit's diff, the same
+  treatment as the pinned file header), so a long line cannot stretch a
+  comment card sideways.
 - **The default `Assets` embeds only the Kit's own 101 icons.** Icons from
   the full catalogue silently render as nothing. The app registers
   `AllAssets` (about 1 MiB) for now; a small application asset source with
@@ -377,7 +382,10 @@ Things that cost time and are easy to hit again:
   macOS App Nap / a lost wake in the GPUI dispatcher while occluded, so a
   focused app behaves perfectly. Diagnosed with `/usr/bin/sample`; not fixed
   here - worth raising against the Kit or working around with a periodic
-  foreground timer while a load is in flight.
+  foreground timer while a load is in flight. For headless verification,
+  synthetic events posted with `CGEvent.postToPid` (a mouse move and click)
+  wake it even while another window covers it, and
+  `screencapture -l <CGWindowID>` then captures the occluded window.
 
 Other Kit facts used here:
 
