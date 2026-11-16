@@ -401,6 +401,17 @@ Decided:
   to Whole branch and lands there after the reload (owner, 2026-11-12; a
   count badge on the scope buttons was considered and dropped as
   duplication once nothing stays scope-hidden).
+- Orphaned open threads - file in no comparison at all, even Whole branch -
+  render as synthetic snippet files in the Diff, behind the earlier-comments
+  toggle: a file entry with the note "not in this comparison - shown for its
+  open comments" whose content is each comment's stored snippet as a
+  context-only hunk, the card anchored there with the out-of-scope action
+  row, archive as the disposal (owner, 2026-11-17; before this such threads
+  counted as open but had no card anywhere, the count-click dead-ended
+  after flipping the scope, and the only disposal was hand-editing the
+  review TOML. A popover from the count was considered and dropped: cards
+  outside the Diff would re-open the comment-box key-context problem).
+  Spec: `docs/superpowers/specs/2026-11-17-orphan-comments-design.md`.
 
 Assumed:
 
