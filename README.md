@@ -23,6 +23,24 @@ crates/app    diffie: the GPUI Kit window and binary.
 docs/         design decisions, handoff, mockup
 ```
 
+## Install
+
+With Homebrew, on macOS and Linux:
+
+```sh
+brew install sassman/tap/diffie
+```
+
+Or build it from source with a recent stable Rust; the first build compiles
+GPUI and takes several minutes (Linux needs the packages listed below):
+
+```sh
+cargo install --locked --git https://github.com/sassman/diffie-rs diffie
+```
+
+Prebuilt binaries for macOS, Linux and Windows are attached to every
+[release](https://github.com/sassman/diffie-rs/releases).
+
 ## Build and run
 
 Requires a recent stable Rust (edition 2024) and `git` on the PATH.

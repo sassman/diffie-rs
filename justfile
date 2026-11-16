@@ -10,3 +10,11 @@ ci-check:
     cargo shear
     cargo doc --workspace --no-deps --locked
     cargo test --workspace --locked
+
+# The tag is what releases, so this only prepares one: review and commit
+# the result, then tag `v<version>` and push the tag.
+# Stage a release: bump the version, curate CHANGELOG.md from the commits.
+release-prepare version:
+    perl -pi -e 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
+    cargo update --workspace
+    git-cliff --tag v{{version}} --output CHANGELOG.md
