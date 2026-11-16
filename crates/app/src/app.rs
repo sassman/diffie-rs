@@ -13,7 +13,7 @@ use std::sync::Arc;
 use diffie_core::pr::PullStatus;
 use diffie_core::review::{
     ArchiveFile, NewComment, Placement, ReactionKind, ReviewFile, ReviewInput, ReviewSet,
-    ReviewState, Side, as_prompt, map_line, place,
+    ReviewState, Side, as_prompt, map_line, orphan_patches, place,
 };
 use diffie_core::search::{SearchHit, search_patch};
 
@@ -694,6 +694,9 @@ struct Loaded {
     placed: Vec<Placed>,
     /// Blocks the patch moves verbatim; the diff folds them behind labels.
     moved: Vec<diffie_core::moved::MovedBlock>,
+    /// Synthetic snippet files for orphaned threads; joined to the Diff's
+    /// set only while the earlier-comments toggle is on.
+    orphan_files: Vec<DiffFile>,
 }
 
 /// What annotation and header callbacks may read. They receive an `App`, not
@@ -805,6 +808,8 @@ struct FileView {
     other_revision: usize,
     /// How many of the comments sit on code rewritten since they were made.
     changed_code_comments: usize,
+    /// A synthetic snippet entry for orphaned threads: nothing to tick.
+    orphan: bool,
 }
 
 pub struct ReviewApp {
@@ -847,6 +852,9 @@ pub struct ReviewApp {
     reviews: Option<ReviewSet>,
     review_path: PathBuf,
     placed: Vec<Placed>,
+    /// Synthetic snippet files for orphaned threads, kept apart from the
+    /// Diff's set so toggle flips can join or withhold them.
+    orphan_files: Vec<DiffFile>,
     diff: Entity<DiffState>,
     /// The reviewer's own split-or-unified choice. The view falls back to
     /// Unified while the window is too narrow for a split, without losing it.
@@ -1046,6 +1054,7 @@ impl ReviewApp {
             reviews: None,
             review_path: PathBuf::new(),
             placed: Vec::new(),
+            orphan_files: Vec::new(),
             diff,
             manual_mode: mode,
             settings,
@@ -1193,9 +1202,10 @@ impl ReviewApp {
                     .iter()
                     .filter(|file| {
                         let blob = loaded.blobs.get(&file.path).and_then(Option::as_ref);
-                        // A kept file is ticked too, but its open comments
-                        // are the point of showing it: never collapse it.
+                        // A kept or orphan file carries open comments, and
+                        // those are the point of showing it: never collapse.
                         file.state != FileState::KeptForComments
+                            && file.state != FileState::NotInComparison
                             && (file.state == FileState::UnchangedSinceReview
                                 || loaded.reviews.mine.review_state(&file.path, blob)
                                     == ReviewState::Reviewed)
@@ -1218,8 +1228,14 @@ impl ReviewApp {
                     .filter(|file| file.status == FileStatus::Deleted)
                     .map(|file| file.path.clone())
                     .collect();
+                self.orphan_files = loaded.orphan_files;
+                let mut diff_files = loaded.files;
+                if self.show_other_revisions && !self.orphan_files.is_empty() {
+                    diff_files.extend(self.orphan_files.iter().cloned());
+                    diff_files.sort_by(|a, b| tree_order(a.path().as_ref(), b.path().as_ref()));
+                }
                 self.diff.update(cx, |state, cx| {
-                    state.set_files(loaded.files, cx);
+                    state.set_files(diff_files, cx);
                     // One rebuild; collapsing one by one froze a review
                     // with thousands of ticked or generated files.
                     state.set_files_collapsed(
@@ -2803,6 +2819,9 @@ impl ReviewApp {
                     _ if file.state == FileState::KeptForComments => {
                         Some("no new changes - shown for its open comments".into())
                     }
+                    _ if file.state == FileState::NotInComparison => {
+                        Some("not in this comparison - shown for its open comments".into())
+                    }
                     _ if file.state == FileState::UnchangedSinceReview => {
                         Some("no changes since your review".into())
                     }
@@ -2856,6 +2875,7 @@ impl ReviewApp {
                         comments: tally.map_or(0, |tally| tally.comments),
                         other_revision: tally.map_or(0, |tally| tally.other_revision),
                         changed_code_comments: tally.map_or(0, |tally| tally.changed_since),
+                        orphan: file.state == FileState::NotInComparison,
                     },
                 )
             })
@@ -3668,12 +3688,19 @@ impl ReviewApp {
                     )
                 }),
         };
-        let progress = if self.files.is_empty() {
+        // Orphan snippet entries only carry comments; they are not files
+        // to review and stay out of the progress.
+        let reviewable = self
+            .files
+            .iter()
+            .filter(|file| file.state != FileState::NotInComparison)
+            .count();
+        let progress = if reviewable == 0 {
             0.
         } else {
-            reviewed as f32 * 100. / self.files.len() as f32
+            reviewed as f32 * 100. / reviewable as f32
         };
-        bar.child(format!("{reviewed} of {} files reviewed", self.files.len()))
+        bar.child(format!("{reviewed} of {reviewable} files reviewed"))
             .child(
                 Progress::new("files-reviewed")
                     .value(progress)
@@ -3979,6 +4006,11 @@ impl ReviewApp {
         let mut rows = Vec::new();
         let mut previous: Vec<String> = Vec::new();
         for (index, file) in self.files.iter().enumerate() {
+            // Orphan entries follow the earlier-comments toggle, as in the
+            // Diff, so panel and main content stay in step.
+            if file.state == FileState::NotInComparison && !self.show_other_revisions {
+                continue;
+            }
             let mut folders: Vec<String> = file.path.split('/').map(String::from).collect();
             folders.pop();
             let common = previous
@@ -4045,7 +4077,10 @@ impl ReviewApp {
                             .text_color(muted)
                             .child(format!(
                                 "FILES · {} · {reviewed} REVIEWED",
-                                self.files.len()
+                                self.files
+                                    .iter()
+                                    .filter(|file| file.state != FileState::NotInComparison)
+                                    .count()
                             )),
                     )
                     .child(
@@ -4526,7 +4561,8 @@ impl ReviewApp {
                                 .child(note),
                         )
                     })
-                    .child({
+                    // An orphan snippet entry is not reviewable: no tick.
+                    .when(!view.is_some_and(|view| view.orphan), |row| row.child({
                         // A ticked file should read as done at a glance: box
                         // and label turn the theme's light blue. The Kit's
                         // labeled Checkbox hard-codes both colors, so this is
@@ -4593,7 +4629,7 @@ impl ReviewApp {
                                     })
                                     .child("Reviewed"),
                             )
-                    })
+                    }))
                     .into_any_element()
             });
         // The marker lane carries the resolved threads' toggles. It is set
@@ -5338,6 +5374,7 @@ impl Render for ReviewApp {
         let reviewed = self
             .files
             .iter()
+            .filter(|file| file.state != FileState::NotInComparison)
             .filter(|file| self.review_state(&file.path) == ReviewState::Reviewed)
             .count();
         v_flex()
@@ -5770,7 +5807,7 @@ fn load(
         Scope::Commits { picked, .. } => picked.iter().cloned().collect(),
         _ => commits.iter().map(|commit| commit.id.clone()).collect(),
     };
-    let placed = place_all(
+    let mut placed = place_all(
         backend,
         &reviews,
         &patch,
@@ -5778,6 +5815,62 @@ fn load(
         resolved.comparison.uncommitted,
     )
     .map_err(text)?;
+    // Open threads no row can show and no scope widening could reach: their
+    // path is outside the whole branch, or the scope is already Whole branch
+    // and placement still failed (a rebase dropped the commit). Their stored
+    // snippets become synthetic files so the threads stay readable and
+    // disposable; archive is the way out.
+    let (orphan_files, orphan_placed) = {
+        let placed_ids: HashSet<&str> = placed.iter().map(|placed| placed.id.as_str()).collect();
+        let whole_branch = matches!(scope, Scope::WholeBranch);
+        let branch_paths: HashSet<&str> = branch.iter().map(|(path, _)| path.as_str()).collect();
+        let threads = reviews.threads();
+        let orphans: Vec<&diffie_core::review::Comment> = threads
+            .iter()
+            .filter(|thread| !thread.resolved())
+            .filter(|thread| !placed_ids.contains(thread.comment.id.as_str()))
+            .filter(|thread| whole_branch || !branch_paths.contains(thread.comment.path.as_str()))
+            .map(|thread| thread.comment)
+            .collect();
+        let mut files = Vec::new();
+        let mut parsed_paths: HashSet<String> = HashSet::new();
+        for (path, text) in orphan_patches(orphans.iter().copied()) {
+            // A snippet that does not parse loses its rows, not the review:
+            // its threads stay unplaced and keep the status-bar label.
+            let Ok(parsed) = DiffFile::parse(&text) else {
+                continue;
+            };
+            files.extend(parsed);
+            parsed_paths.insert(path.clone());
+            patch.files.push(diffie_core::FileSummary {
+                path,
+                status: FileStatus::Modified,
+                additions: 0,
+                deletions: 0,
+                state: FileState::NotInComparison,
+                binary: false,
+            });
+        }
+        let orphan_placed: Vec<Placed> = orphans
+            .into_iter()
+            .filter(|comment| parsed_paths.contains(&comment.path))
+            .map(|comment| Placed {
+                id: comment.id.clone(),
+                path: comment.path.clone(),
+                side: comment.side,
+                line: comment.line.max(1),
+                lines: comment.lines,
+                selection: comment.selection.is_some(),
+                // The earlier-round machinery gates the card and the jump
+                // stop behind the toggle; orphans ride it.
+                other_revision: true,
+                changed_since: false,
+            })
+            .collect();
+        (files, orphan_placed)
+    };
+    placed.extend(orphan_placed);
+    patch.files.sort_by(|a, b| tree_order(&a.path, &b.path));
     let moved = diffie_core::moved::moved_blocks(&patch.text);
 
     Ok(Loaded {
@@ -5796,6 +5889,7 @@ fn load(
         completed_cleared,
         placed,
         moved,
+        orphan_files,
     })
 }
 
@@ -5809,7 +5903,11 @@ fn place_all(
     let shown: HashSet<&str> = patch
         .files
         .iter()
-        .filter(|file| file.state != FileState::UnchangedSinceReview)
+        // Orphan entries are anchored by snippet synthesis, never by blame.
+        .filter(|file| {
+            file.state != FileState::UnchangedSinceReview
+                && file.state != FileState::NotInComparison
+        })
         .map(|file| file.path.as_str())
         .collect();
     let mut blames: HashMap<String, Vec<BlameLine>> = HashMap::new();
