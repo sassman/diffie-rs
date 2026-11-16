@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use diffie_core::forge::{Forge, Outcome, Pending, Verdict};
+use diffie_core::pr::{CheckState, PrState, PullRequest, PullStatus, ReviewDecision};
 use diffie_core::review::{
     ArchiveFile, NewComment, Placement, ReactionKind, ReviewFile, ReviewInput, ReviewSet,
     ReviewState, Side, as_prompt, map_line, place,
@@ -617,6 +619,212 @@ struct PickerContext {
     now: i64,
 }
 
+/// The pull request the review was opened from (`--pr`), with the forge
+/// that hosts it. Publishing and approving exist only with one.
+pub struct Pull {
+    pub forge: Arc<dyn Forge>,
+    pub request: PullRequest,
+}
+
+/// What a window reviews, as the command line settled it.
+pub struct Subject {
+    pub repository: SharedString,
+    /// The linked worktree the review runs in, when it is not the primary
+    /// checkout.
+    pub worktree: Option<SharedString>,
+    pub comparison: Comparison,
+    pub pull: Option<Pull>,
+}
+
+/// "open · approved · checks failing": where the pull request stands, as
+/// the menu's first line and the icon's tooltip say it. A part with
+/// nothing to report (no review yet, no checks) is left out.
+fn status_words(status: &PullStatus) -> String {
+    let state = match status.state {
+        PrState::Open => "open",
+        PrState::Merged => "merged",
+        PrState::Closed => "closed",
+    };
+    let review = status.review.map(|review| match review {
+        ReviewDecision::Approved => "approved",
+        ReviewDecision::ChangesRequested => "changes requested",
+        ReviewDecision::Required => "review required",
+    });
+    let checks = status.checks.as_ref().map(|checks| match checks.state {
+        CheckState::Passing => "checks passing",
+        CheckState::Running => "checks running",
+        CheckState::Failing => "checks failing",
+    });
+    [Some(state), review, checks]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// Whether the pull request asks for the reviewer's eye before anything
+/// else: its checks failed, or changes were requested.
+fn needs_attention(status: &PullStatus) -> bool {
+    status.review == Some(ReviewDecision::ChangesRequested)
+        || status
+            .checks
+            .as_ref()
+            .is_some_and(|checks| checks.state == CheckState::Failing)
+}
+
+/// "2 comments, 1 edit": what a publish holds, in the menu's and the
+/// status bar's words. `None` when there is nothing.
+fn pending_label(pending: Pending) -> Option<String> {
+    let part = |count: usize, noun: &str| {
+        (count > 0).then(|| format!("{count} {noun}{}", if count == 1 { "" } else { "s" }))
+    };
+    let parts: Vec<String> = [
+        part(pending.comments, "comment"),
+        part(pending.edits, "edit"),
+        part(pending.reactions, "reaction"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// The status-bar line after a publish, and whether it reports a failure.
+/// A partial publish names what landed before the complaint: those
+/// comments are on the pull request now, and silence would hide it.
+fn publish_summary(outcome: &Outcome, number: u64) -> (String, bool) {
+    // A comment that moved from its line to its file did land, but not
+    // where the reviewer put it; the line says so instead of plain success.
+    let sent = pending_label(outcome.done()).map(|sent| match outcome.on_file() {
+        0 => sent,
+        moved => format!("{sent} ({moved} on the file, no line took it)"),
+    });
+    let landed = match (outcome.approved, sent) {
+        (true, Some(sent)) => Some(format!("approved #{number} with {sent}")),
+        (true, None) => Some(format!("approved #{number}")),
+        (false, Some(sent)) => Some(format!("published {sent} to #{number}")),
+        (false, None) => None,
+    };
+    let complaint = outcome.error.as_ref().map(|error| match outcome.refused {
+        0 => format!("failed: {error}"),
+        1 => format!("1 comment was refused: {error}"),
+        refused => format!("{refused} comments were refused: {error}"),
+    });
+    match (complaint, landed) {
+        (Some(complaint), Some(landed)) => (format!("{landed}, but {complaint}"), true),
+        (Some(complaint), None) => (format!("nothing reached #{number}, {complaint}"), true),
+        (None, Some(landed)) => (landed, false),
+        (None, None) => (format!("nothing to publish to #{number}"), false),
+    }
+}
+
+#[cfg(test)]
+mod publish_summary_tests {
+    use super::*;
+    use diffie_core::pr::Checks;
+
+    fn status(
+        state: PrState,
+        review: Option<ReviewDecision>,
+        checks: Option<CheckState>,
+    ) -> PullStatus {
+        PullStatus {
+            state,
+            review,
+            checks: checks.map(|state| Checks {
+                state,
+                latest_run: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn the_standing_leaves_out_what_has_nothing_to_report() {
+        assert_eq!(status_words(&status(PrState::Merged, None, None)), "merged");
+        assert_eq!(
+            status_words(&status(
+                PrState::Open,
+                Some(ReviewDecision::Approved),
+                Some(CheckState::Failing)
+            )),
+            "open · approved · checks failing"
+        );
+        assert_eq!(
+            status_words(&status(PrState::Open, None, Some(CheckState::Running))),
+            "open · checks running"
+        );
+    }
+
+    #[test]
+    fn only_red_checks_and_requested_changes_want_attention() {
+        assert!(needs_attention(&status(
+            PrState::Open,
+            None,
+            Some(CheckState::Failing)
+        )));
+        assert!(needs_attention(&status(
+            PrState::Open,
+            Some(ReviewDecision::ChangesRequested),
+            Some(CheckState::Passing)
+        )));
+        assert!(!needs_attention(&status(
+            PrState::Open,
+            Some(ReviewDecision::Required),
+            Some(CheckState::Running)
+        )));
+    }
+
+    fn pending(comments: usize, edits: usize, reactions: usize) -> Pending {
+        Pending {
+            comments,
+            edits,
+            reactions,
+        }
+    }
+
+    #[test]
+    fn names_only_what_there_is_with_plurals() {
+        assert_eq!(pending_label(pending(0, 0, 0)), None);
+        assert_eq!(pending_label(pending(1, 0, 0)).unwrap(), "1 comment");
+        assert_eq!(
+            pending_label(pending(2, 1, 3)).unwrap(),
+            "2 comments, 1 edit, 3 reactions"
+        );
+    }
+
+    #[test]
+    fn a_bare_approval_and_a_bare_failure_read_plainly() {
+        let mut outcome = Outcome::default();
+        assert_eq!(
+            publish_summary(&outcome, 17),
+            ("nothing to publish to #17".to_string(), false)
+        );
+        outcome.approved = true;
+        assert_eq!(
+            publish_summary(&outcome, 17),
+            ("approved #17".to_string(), false)
+        );
+        outcome.error = Some("locked".into());
+        assert_eq!(
+            publish_summary(&outcome, 17),
+            ("approved #17, but failed: locked".to_string(), true)
+        );
+        outcome.approved = false;
+        assert_eq!(
+            publish_summary(&outcome, 17),
+            ("nothing reached #17, failed: locked".to_string(), true)
+        );
+        outcome.refused = 2;
+        assert_eq!(
+            publish_summary(&outcome, 17),
+            (
+                "nothing reached #17, 2 comments were refused: locked".to_string(),
+                true
+            )
+        );
+    }
+}
+
 /// Where a comment sits in the current view.
 #[derive(Clone)]
 struct Placed {
@@ -740,6 +948,9 @@ struct ThreadView {
     answered: bool,
     mine: bool,
     resolved: bool,
+    /// The comment's page on the pull request once published, and whether
+    /// an edit since then still waits for the next publish.
+    published: Option<(SharedString, bool)>,
     /// Kind, how many reviewers gave it, whether this reviewer did.
     reactions: Vec<(ReactionKind, usize, bool)>,
     left: Vec<ReactionKind>,
@@ -797,6 +1008,21 @@ pub struct ReviewApp {
     /// checkout; shown beside the project name.
     worktree: Option<SharedString>,
     comparison: Comparison,
+    pull: Option<Pull>,
+    /// A publish or approval is on its way to the forge; one at a time.
+    publishing: bool,
+    /// How the last publish went, and whether that was a failure. Its own
+    /// line beside `notice`, which the next review save clears - and every
+    /// publish ends in one.
+    publish_status: Option<(SharedString, bool)>,
+    /// Where the pull request stands, as last answered by the forge. Kept
+    /// through a failed refresh: an older answer beats none.
+    pull_status: Option<PullStatus>,
+    /// Why the last refresh failed, in the forge's words.
+    pull_status_error: Option<SharedString>,
+    /// Replacing it drops the refresh in flight, so answers never land
+    /// out of order.
+    _pull_status: Task<()>,
     scope: ScopeKind,
     picked: Vec<Oid>,
     /// Whether the uncommitted layer of an uncommitted review is checked in
@@ -922,13 +1148,17 @@ pub struct ReviewApp {
 impl ReviewApp {
     pub fn new(
         backend: Arc<dyn ReviewBackend>,
-        repository: SharedString,
-        worktree: Option<SharedString>,
-        comparison: Comparison,
+        subject: Subject,
         settings: Settings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let Subject {
+            repository,
+            worktree,
+            comparison,
+            pull,
+        } = subject;
         window.set_window_title(&match &worktree {
             Some(name) => format!("{repository} ({name}) — review"),
             None => format!("{repository} — review"),
@@ -990,6 +1220,12 @@ impl ReviewApp {
             repository,
             worktree,
             comparison,
+            pull,
+            publishing: false,
+            publish_status: None,
+            pull_status: None,
+            pull_status_error: None,
+            _pull_status: Task::ready(()),
             scope: ScopeKind::NewForMe,
             picked: Vec::new(),
             picked_uncommitted: true,
@@ -1091,6 +1327,9 @@ impl ReviewApp {
         // every commit means "everything", so the load re-picks the fresh
         // list and the newcomers join the scope; a hand-picked subset stays
         // exactly as picked.
+        // Whoever reloads wants the present: the pull request may have been
+        // merged, approved or turned red since the last look.
+        self.refresh_pull_status(cx);
         let extend_picks = self.scope == ScopeKind::Custom
             && self
                 .commits
@@ -1428,6 +1667,11 @@ impl ReviewApp {
     }
 
     fn swap_direction(&mut self, cx: &mut Context<Self>) {
+        // A publish in flight records its ids into the review file it
+        // started from; swapping would hand it the other direction's.
+        if self.publishing {
+            return;
+        }
         std::mem::swap(&mut self.comparison.source, &mut self.comparison.target);
         // A pinned revision (--pr) belongs to its display name; keep the
         // pairs together.
@@ -2551,6 +2795,125 @@ impl ReviewApp {
         .detach();
     }
 
+    /// Whether the view still shows the pull request as it was opened.
+    /// Swapped, the review file belongs to the reverse comparison, and
+    /// nothing in it is the pull request's to receive.
+    fn pull_in_view(&self) -> bool {
+        self.pull.as_ref().is_some_and(|pull| {
+            self.comparison.source_rev.as_deref() == Some(pull.request.source_commit.as_str())
+        })
+    }
+
+    /// Ask the forge where the pull request stands - merged or not, the
+    /// review decision, the checks - off the UI thread. Runs with every
+    /// reload and after every publish; there is no timer behind it.
+    fn refresh_pull_status(&mut self, cx: &mut Context<Self>) {
+        let Some(pull) = &self.pull else {
+            return;
+        };
+        let forge = pull.forge.clone();
+        let request = pull.request.clone();
+        self._pull_status = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    forge.status(&request).map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(status) => {
+                        this.pull_status = Some(status);
+                        this.pull_status_error = None;
+                    }
+                    Err(error) => this.pull_status_error = Some(error.into()),
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    /// Send the review to the pull request: the unpublished comments (with
+    /// edits and reactions) when `with_comments`, under `verdict`. The
+    /// forge's ids come back into the reviewer's own file through the one
+    /// writer, so a second publish never posts a comment twice.
+    fn publish(&mut self, verdict: Verdict, with_comments: bool, cx: &mut Context<Self>) {
+        if self.publishing || !self.pull_in_view() {
+            return;
+        }
+        let (Some(pull), Some(reviews), Some(resolved)) =
+            (&self.pull, &self.reviews, &self.resolved)
+        else {
+            return;
+        };
+        let forge = pull.forge.clone();
+        let request = pull.request.clone();
+        let number = request.number;
+        let reviews = reviews.clone();
+        let head = resolved.head.clone();
+        let backend = self.backend.clone();
+        self.publishing = true;
+        self.publish_status = None;
+        cx.spawn(async move |this, cx| {
+            // The review first, and its ids into the file before anything
+            // else is sent: edits and reactions go one call at a time, and
+            // a quit or a hung call among them must not leave posted
+            // comments looking unpublished - the next publish would post
+            // them again.
+            let (review, plan) = {
+                let (forge, request) = (forge.clone(), request.clone());
+                cx.background_spawn(async move {
+                    // A file gone at head has no blame; its comments go on
+                    // the file instead of failing the publish.
+                    let plan =
+                        diffie_core::forge::plan(&reviews, &head, verdict, with_comments, |path| {
+                            backend.blame(&head, path).ok()
+                        });
+                    let review = diffie_core::forge::publish_review(&*forge, &request, &plan);
+                    (review, plan)
+                })
+                .await
+            };
+            let landed = review.review_landed();
+            if this
+                .update(cx, |this, cx| this.record_published(&review, cx))
+                .is_err()
+            {
+                return;
+            }
+            let mut outcome = review;
+            if landed {
+                let followups = cx
+                    .background_spawn(async move {
+                        diffie_core::forge::publish_followups(&*forge, &request, &plan)
+                    })
+                    .await;
+                let _ = this.update(cx, |this, cx| this.record_published(&followups, cx));
+                outcome.merge(followups);
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.publishing = false;
+                // An approval or a review changes the decision.
+                this.refresh_pull_status(cx);
+                let (summary, failed) = publish_summary(&outcome, number);
+                this.publish_status = Some((summary.into(), failed));
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Write what a publish step achieved into the reviewer's own file,
+    /// through the one writer.
+    fn record_published(&mut self, outcome: &Outcome, cx: &mut Context<Self>) {
+        if let Some(set) = self.reviews.as_mut()
+            && set.mine.record(outcome)
+        {
+            self.save_review(cx);
+            cx.notify();
+        }
+    }
+
     fn copy_comment_as_prompt(&self, id: &str, cx: &mut Context<Self>) {
         if let Some(set) = &self.reviews
             && let Some(thread) = set
@@ -2680,6 +3043,11 @@ impl ReviewApp {
                     answered: thread.answered(),
                     mine: thread.mine,
                     resolved: thread.resolved(),
+                    published: thread
+                        .comment
+                        .published
+                        .as_ref()
+                        .map(|published| (published.url.clone().into(), published.stale)),
                     reactions,
                     left: set.mine.reactions_left(&thread.comment.id),
                     answer_input: self
@@ -2910,6 +3278,7 @@ impl ReviewApp {
                             .h(px(22.))
                             .icon(Icon::new(Lucide::ArrowLeftRight))
                             .tooltip("Swap direction")
+                            .disabled(self.publishing)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 // A second quick click must not reach the
                                 // title bar, whose double click minimizes
@@ -2945,6 +3314,9 @@ impl ReviewApp {
                         // stay out, so the native double click still works
                         // there.
                         .on_click(|_, _, cx| cx.stop_propagation())
+                        .when_some(self.pull.as_ref(), |controls, pull| {
+                            controls.child(self.render_pull_menu(pull, cx))
+                        })
                         .child(
                             ToggleGroup::new("layout")
                                 .outline()
@@ -3076,6 +3448,163 @@ impl ReviewApp {
                         ),
                 ),
         )
+    }
+
+    /// The pull request's menu behind its title-bar icon: open it in the
+    /// browser, publish the review to it, approve it.
+    fn render_pull_menu(&self, pull: &Pull, cx: &mut Context<Self>) -> impl IntoElement {
+        let number = pull.request.number;
+        let forge = pull.forge.name();
+        let url = pull.request.url.clone();
+        let owner = cx.weak_entity();
+        let in_view = self.pull_in_view();
+        let busy = self.publishing;
+        let pending = self
+            .reviews
+            .as_ref()
+            .filter(|_| in_view)
+            .map(diffie_core::forge::pending)
+            .unwrap_or_default();
+        let status = self.pull_status.clone();
+        // A merged or closed pull request still takes comments, but no
+        // approval. Until the forge answers, the state read at startup
+        // stands in.
+        let state = status
+            .as_ref()
+            .map_or(pull.request.state, |status| status.state);
+        let open = state == PrState::Open;
+        let standing: SharedString = match (&status, &self.pull_status_error) {
+            (Some(status), None) => status_words(status).into(),
+            // The older answer stays readable beside the complaint.
+            (Some(status), Some(error)) => {
+                format!("{} (not refreshed: {error})", status_words(status)).into()
+            }
+            (None, Some(error)) => format!("state unknown: {error}").into(),
+            (None, None) => "reading the state…".into(),
+        };
+        let attention = status.as_ref().is_some_and(needs_attention);
+        let latest_run = status
+            .as_ref()
+            .and_then(|status| status.checks.as_ref())
+            .and_then(|checks| checks.latest_run.clone());
+        let muted = cx.theme().muted_foreground;
+        let danger = cx.theme().danger;
+        Popover::new("pull-menu")
+            .trigger(
+                Button::new("pull")
+                    .outline()
+                    .xsmall()
+                    .w(px(28.))
+                    .h(px(24.))
+                    .icon(Icon::new(match state {
+                        PrState::Open => Lucide::GitPullRequest,
+                        PrState::Merged => Lucide::GitMerge,
+                        PrState::Closed => Lucide::GitPullRequestClosed,
+                    }))
+                    // Red only for what wants the reviewer's eye; passing
+                    // and running stay quiet like the rest of the bar.
+                    .when(attention, |button| button.text_color(danger))
+                    .loading(busy)
+                    .tooltip(format!("Pull request #{number} on {forge} - {standing}")),
+            )
+            // Content, not children: an item must also dismiss the popover,
+            // and only the content closure can reach it.
+            .content(move |_, _, cx| {
+                let popover = cx.entity();
+                let item = |id: &'static str, label: String, tip: Option<&'static str>| {
+                    Button::new(id)
+                        .ghost()
+                        .xsmall()
+                        .h(px(24.))
+                        .label(label)
+                        .when_some(tip, |item, tip| item.tooltip(tip))
+                };
+                let send = |verdict: Verdict, with_comments: bool| {
+                    let (owner, popover) = (owner.clone(), popover.clone());
+                    move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut App| {
+                        let _ = owner.update(cx, |this, cx| {
+                            this.publish(verdict, with_comments, cx);
+                        });
+                        popover.update(cx, |state, cx| state.dismiss(window, cx));
+                    }
+                };
+                let swapped =
+                    (!in_view).then_some("Swap back to the pull request's direction first");
+                let sent = pending_label(pending);
+                let (url, opener) = (url.clone(), popover.clone());
+                let (run, run_opener) = (latest_run.clone(), popover.clone());
+                v_flex()
+                    .gap_0p5()
+                    .items_start()
+                    .child(
+                        div()
+                            .px_2()
+                            .max_w(px(360.))
+                            .text_size(px(11.))
+                            .text_color(if attention { danger } else { muted })
+                            .child(format!("#{number} {standing}")),
+                    )
+                    .child(
+                        item("pull-open", format!("Open #{number} in the browser"), None).on_click(
+                            move |_, window, cx| {
+                                cx.open_url(&url);
+                                opener.update(cx, |state, cx| state.dismiss(window, cx));
+                            },
+                        ),
+                    )
+                    .child(
+                        item(
+                            "pull-open-run",
+                            "Open latest CI run".to_string(),
+                            run.is_none()
+                                .then_some("The pull request's head has no CI run to open"),
+                        )
+                        .disabled(run.is_none())
+                        .on_click(move |_, window, cx| {
+                            if let Some(run) = &run {
+                                cx.open_url(run);
+                            }
+                            run_opener.update(cx, |state, cx| state.dismiss(window, cx));
+                        }),
+                    )
+                    .child(
+                        item(
+                            "pull-publish",
+                            match &sent {
+                                Some(sent) => format!("Publish {sent}"),
+                                None => "Publish comments".to_string(),
+                            },
+                            swapped.or(sent.is_none().then_some(
+                                "Nothing new: every open comment of yours is on the pull request",
+                            )),
+                        )
+                        .disabled(busy || sent.is_none())
+                        .on_click(send(Verdict::Comment, true)),
+                    )
+                    .child(
+                        item(
+                            "pull-approve-with",
+                            match &sent {
+                                Some(sent) => format!("Approve with {sent}"),
+                                None => "Approve with comments".to_string(),
+                            },
+                            swapped
+                                .or((!open).then_some("Only an open pull request can be approved")),
+                        )
+                        .disabled(busy || !open || sent.is_none())
+                        .on_click(send(Verdict::Approve, true)),
+                    )
+                    .child(
+                        item(
+                            "pull-approve-without",
+                            "Approve without comments".to_string(),
+                            swapped
+                                .or((!open).then_some("Only an open pull request can be approved")),
+                        )
+                        .disabled(busy || !open || !in_view)
+                        .on_click(send(Verdict::Approve, false)),
+                    )
+            })
     }
 
     /// One picker item: checkbox, then the title over author, age and hash.
@@ -4614,6 +5143,19 @@ impl ReviewApp {
                     .child(notice.clone()),
             );
         }
+        if self.publishing {
+            bar = bar.child("Publishing…");
+        }
+        if let Some((status, failed)) = &self.publish_status {
+            bar = bar.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .when(*failed, |status| status.text_color(cx.theme().danger))
+                    .child(status.clone()),
+            );
+        }
         let position = self.current_file.as_ref().and_then(|current| {
             let files = self.diff.read(cx).files();
             let index = files.iter().position(|file| file.path() == current)?;
@@ -4796,6 +5338,20 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
             .text_color(muted)
             .tooltip(tip)
     };
+    if let Some((url, stale)) = thread.published.clone() {
+        actions = actions.child(
+            icon_button(
+                SharedString::from(format!("published-{id}")),
+                Lucide::Link,
+                if stale {
+                    "Open on the pull request - edited since, publish again to update it"
+                } else {
+                    "Open on the pull request"
+                },
+            )
+            .on_click(move |_, _, cx| cx.open_url(&url)),
+        );
+    }
     // An out-of-scope comment can still be addressed - react, resolve,
     // reply, copy, archive - but not rewritten: its code is not the code
     // on screen, so editing and deleting wait for the revision it was

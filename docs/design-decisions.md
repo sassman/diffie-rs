@@ -167,8 +167,8 @@ Decided:
   once it is merged or closed (the head branch is usually deleted; that
   ref always exists on GitHub and also reaches the real commits of a
   squash- or rebase-merged PR, which never land on the base branch).
-  Sending comments back to the pull request is intended later, and only
-  from a PR entry point.
+  Sending comments back to the pull request happens only from a PR entry
+  point (section 18).
 
 Assumed:
 
@@ -593,3 +593,79 @@ Assumed:
 - Writes coalesce behind a half-second pause (a window drag reports every
   frame) and run in a background task, like the review file's.
 - Panel width and other layout details join the file as the need shows.
+
+## 18. Pull requests and the forge
+
+Decided (owner, 2026-11-16):
+
+- The code host sits behind one trait, `Forge` (`diffie-core/src/forge.rs`),
+  so nothing in the review or the UI is tied to GitHub. GitHub through the
+  gh CLI (`github.rs`) is the first implementation.
+- Started with `--pr`, the review is connected to that pull request, and
+  only then: no other entry point guesses one.
+- A pull-request icon in the title bar opens a menu: open the pull request
+  in the browser, publish the comments to it, approve it with comments,
+  approve it without.
+- Publishing keeps the forge's comment id and URL with the comment in the
+  reviewer's own file, so a comment is never posted twice, and every
+  published card carries a link icon that opens it on the forge.
+- Reactions map to the forge's emoji.
+- The app reads where the pull request stands - open, merged or closed,
+  the review decision, and the CI state when the head has checks - and
+  the menu offers "Open latest CI run", which opens the pipeline in the
+  browser.
+
+Assumed (working defaults - none of these were spelled out):
+
+- **When the state is read**: at startup, with every reload (Cmd/Ctrl+R,
+  and the reloads a scope change triggers) and after every publish. No
+  timer polls the forge.
+- **How it shows**: the menu's first line and the icon's tooltip say it in
+  words ("open · approved · checks failing"); the icon follows the state
+  (open, merged, closed) and turns red only for failing checks or
+  requested changes. A failed refresh keeps the older answer and says so.
+- **CI verdict**: one failed check makes it failing, even while others
+  still run; otherwise one unfinished check makes it running. A check
+  word the app does not know counts as running, never as passing.
+- **Latest CI run**: the check that started last; a GitHub Actions job
+  link is shortened to its run's page, so the whole pipeline shows.
+
+- **What is published**: the reviewer's own open threads. A thread already
+  resolved here was settled without the pull request and stays local; a
+  colleague's comments are theirs to publish. Replies are not sent.
+- **One review, one notification**: a publish is a single forge review
+  holding the comments. A line the forge refuses (it is outside the pull
+  request's diff) is posted on the file instead, with the lines named and
+  the stored snippet quoted; a comment the forge will not take even there
+  (its path is not in the pull request) stays out, unpublished, and the
+  status bar says so - one bad comment never blocks the rest.
+- **Where a comment lands**: on its line as blame finds it at the pull
+  request's head, when the whole commented span survives there unbroken;
+  otherwise on the file. Comments on removed lines always go on the file:
+  their stored line counts in whatever the view's old side was when they
+  were made (the base, or an intermediate commit under a narrower scope),
+  and a wrong line is worse than none. The status bar counts the comments
+  that landed on the file.
+- **Reaction emoji on GitHub**, whose set is closed and has no checkmark,
+  stop sign or pin: Seen 👀 `EYES`, Done 👍 `THUMBS_UP`, Won't fix 👎
+  `THUMBS_DOWN`, Follow-up 🚀 `ROCKET`. A reaction is sent once its comment
+  is on the forge - the reviewer's own, or a colleague's whose file carries
+  the forge id.
+- **Edits follow**: a published comment edited here is marked stale and the
+  next publish updates the forge's copy, in the form it was posted (a
+  file-level comment keeps its quoted code).
+- **Nothing is taken back**: deleting or archiving a published comment, or
+  removing a published reaction, changes only the local file. The forge
+  keeps its copy.
+- **Approving** needs an open pull request; "with comments" puts the
+  unpublished comments into the approving review.
+- A swapped direction disables publishing and approving: the review file
+  on screen then belongs to the reverse comparison.
+
+Open:
+
+- Whether replies should be published as answers in the forge thread.
+- Whether Done or Won't fix should also resolve the forge's conversation.
+- Whether comments made on the pull request should be read back in.
+- Whether removed-line comments should record the old side they were made
+  against, so they can be anchored on the pull request's left side.

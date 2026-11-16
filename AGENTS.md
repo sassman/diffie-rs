@@ -34,7 +34,8 @@ Windows and Linux.
    virtualization, selection or annotations.
 4. **`diffie-core` has no UI dependency.** It must never depend on `gpui-kit`
    or on `diffie`. The UI reaches the repository only through the
-   `ReviewBackend` trait.
+   `ReviewBackend` trait, and the code host only through the `Forge`
+   trait - no GitHub name, API or CLI call outside `github.rs`.
 5. **Never write to the reviewed repository.** No changes to its objects,
    index, refs, config or working tree. The only files the app writes are
    review files under `<git-dir>/review/`. Scratch objects go to a temporary
@@ -80,6 +81,9 @@ When calling git:
   else's comment go in the reactor's file, by comment id. Never edit, merge or
   rewrite a colleague's file.
 - **A "Reviewed" tick stores the file's content id**, not a commit.
+- **The forge is only reached on the reviewer's click.** Publishing and
+  approving exist only in a review opened with `--pr`; nothing posts,
+  reacts or approves on its own, and nothing is deleted on the forge.
 - **Density.** Controls are 22 to 26 px high, list rows 22 px, file headers
   28 px, text 12 px. Prefer `xsmall` Kit controls. Do not add padding to make
   things "breathe".

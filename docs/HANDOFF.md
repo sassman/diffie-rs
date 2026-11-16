@@ -1,6 +1,6 @@
 # Handoff
 
-State of the project on 2026-11-14, written for whoever continues it in a
+State of the project on 2026-11-16, written for whoever continues it in a
 coding session. Read `AGENTS.md` first for the rules, and
 `docs/design-decisions.md` for product behaviour.
 
@@ -62,6 +62,7 @@ Be exact about this when you report further work.
 | Other-revision cards keeping the full actions row, Edit and Delete disabled with explaining tooltips | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 | Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
+| Pull-request menu (title-bar icon in a `--pr` review): open in the browser, publish comments, approve with and without comments; the link icon on published cards; the status-bar line after a publish | Core covered by tests: what a publish sends and records (`forge.rs`, against a fake forge) and the exact gh calls, the file-level fallback and the pending-review cleanup (`github.rs`, against a stand-in gh script, Unix only). The GraphQL input and enum names were checked read-only against GitHub's live schema by introspection. The status query (`gh pr view --json state,reviewDecision,statusCheckRollup` with the app's jq) was run read-only against a real merged PR and its lines match what `fold_checks` parses. **Nothing was ever posted to a real pull request**, and the window was not run: the menu, the state icon and its red tint, the busy state, the link icon and whether a pending-review comment's URL still opens after the submit are all unseen |
 | User settings (`settings.rs`): split/unified and window bounds persisted to `~/.config/diffie/settings.toml`, restored at startup | Round trip, defaults on missing or broken files and future-key tolerance are unit-tested; the live flow (bounds observer, coalesced writes, startup placement) compiled, clippy-clean, not seen on screen - the window was not run |
 
 ## Build, run, test
@@ -91,6 +92,10 @@ matches what the PR holds. The title and the review file keep the branch
 names. A commit that is not here is refused with the `git fetch` to run
 (the head branch while open, `refs/pull/<n>/head` once merged or closed,
 the fork named for a cross-repository head) - diffie never fetches.
+A `--pr` review is connected to its pull request: the title bar gains a
+pull-request icon whose menu opens it in the browser, publishes the
+reviewer's comments to it, and approves it (see "Pull requests and the
+forge" below).
 `diffie --prompt [<review>]` opens no window: it prints the open review
 comments the way "Copy all as prompt" does (no name works only for a sole
 review, several are listed and refused; `--all` includes resolved ones,
@@ -121,8 +126,11 @@ crates/core/src/
   search.rs                   smartcase search over patch text
   moved.rs                    pairs verbatim-moved runs for the diff folds
   review.rs                   review file: comments, reactions, ticks, ReviewSet
-  pr.rs                       --pr: a pull request's state, branches and
-                              exact commits via the gh CLI
+  pr.rs                       --pr: the argument's parsing and the pull
+                              request as a forge describes it
+  forge.rs                    Forge trait; what a publish sends (`plan`),
+                              sending it (`publish`), recording the ids
+  github.rs                   GitHubCli: the Forge over the gh CLI
   time.rs                     RFC 3339 without a date-time crate
 crates/core/tests/git_cli.rs  backend tests against a throwaway repository
 crates/app/src/
@@ -208,11 +216,68 @@ write never loses the thread.
 
 `pr.rs` is command-line plumbing, not part of `ReviewBackend`: it parses the
 `--pr` value (a number, or a pull-request URL kept verbatim so gh keeps the
-host and repository) and shells out to `gh pr view` for the PR's state,
-branch names and exact commits. `main.rs` turns that into a comparison whose
-`source_rev`/`target_rev` pin the PR's commits while `source`/`target` keep
-the branch names for the title and the review file; `GitCli::resolve`
-resolves the pinned revision when one is set.
+host and repository) and holds the `PullRequest` a forge answers with: state,
+branch names, exact commits, its page and its forge id. `main.rs` turns that
+into a comparison whose `source_rev`/`target_rev` pin the PR's commits while
+`source`/`target` keep the branch names for the title and the review file;
+`GitCli::resolve` resolves the pinned revision when one is set.
+
+### Pull requests and the forge
+
+`Forge` (`forge.rs`) is the code host behind one trait, beside
+`ReviewBackend` and just as blocking: `pull_request`, `status`,
+`submit_review`, `update_comment`, `react`. `main.rs` builds the one implementation,
+`GitHubCli`, and hands the app a `Pull` (forge plus pull request) only for
+a `--pr` start. Design document section 18 holds the product rules and
+which of them are assumptions.
+
+A publish is separate steps, so each is testable alone:
+
+- `plan(reviews, head, verdict, with_comments, blame)` decides what goes:
+  the reviewer's own open, unpublished comments, stale edits, and unsent
+  reactions on comments the forge knows. A new-side comment is anchored
+  where blame finds its whole span unbroken at head (`anchor_at_head`);
+  anything else - a rewritten or split span, a file gone at head, every
+  old-side comment - becomes a file-level comment quoting the snippet.
+  `pending(reviews)` counts the same things without building anything;
+  the menu calls it on every render.
+- `publish_review` sends the review (comments and verdict) and
+  `publish_followups` the edits and reactions, one call each; `publish`
+  runs both. Each returns an `Outcome` that is partial on purpose: what
+  landed is reported even when a later call failed, refused comments are
+  counted, and the first error is kept.
+- `ReviewFile::record(outcome)` writes the forge ids into the reviewer's
+  own file (`Comment::published`, `Reaction::published`). It compares the
+  sent bodies with the live file, so an edit made while the publish ran
+  stays pending, and a comment deleted meanwhile is skipped.
+  `Published::on_file` remembers a file-level posting so a later edit
+  sends the quoted form again.
+
+`GitHubCli` writes through `gh api graphql`: open a pending review, add
+each thread (falling back to a file-level thread when the line is
+refused, and leaving the comment out as `Posting::Refused` when the file
+is refused too), submit once - one review, one notification, and every
+thread answers with its own id and URL. A failed submit, or a comment
+review whose every thread was refused, deletes the pending review, or it
+would block the next attempt (GitHub allows one per user and pull
+request). REST's one-shot review was rejected: one bad line fails the
+batch and it returns no comment ids. Variables go as `-f` (raw) so a body
+starting with `@` is never read as a file; only line numbers use `-F`.
+
+`Forge::status` answers a `PullStatus`: state, review decision and the
+checks folded into one `CheckState` with the latest run's page.
+`GitHubCli` reads it with one `gh pr view --json
+state,reviewDecision,statusCheckRollup`, one tab-separated line per check
+(`fold_checks`, `run_page`). `ReviewApp::refresh_pull_status` asks in the
+background from `reload` and after a publish; `_pull_status` holds the one
+task, so a newer request drops the older.
+
+In the app, `ReviewApp::publish` runs the plan and the review step on the
+background executor, records and saves the ids (`record_published`, on
+the UI thread through `save_review` - the one writer), and only then runs
+the follow-ups: a quit or a hung gh call among the one-by-one edits and
+reactions must not leave posted comments looking unpublished. `publish_status` is its own status-bar line because `notice`
+is cleared by the next successful save, and every publish ends in one.
 
 ## GPUI Kit: what to know
 
@@ -438,6 +503,21 @@ actually exercised):
   first expanded, unticked file current - the view opens at the top, and
   the collapsed headers leading the list are not being read - before
   that, `r` did nothing until the reader had navigated somewhere.
+- Pull request (only in a `--pr` review): a pull-request icon leads the
+  title bar's controls (it spins while a publish runs). The icon follows
+  the pull request's state (open, merged, closed) and turns red for
+  failing checks or requested changes; its tooltip and the menu's first
+  line say the standing in words ("#17 open · approved · checks
+  failing"). The menu holds "Open #n in the browser", "Open latest CI
+  run" (disabled without one), "Publish 2 comments, 1 edit" (naming what
+  would go, disabled with nothing new), "Approve with ..." and "Approve
+  without comments" (both only for an open pull request). Swapping the
+  direction disables the sending items, and a running publish disables
+  swap. A published comment's card gains a link icon that opens it on the
+  pull request; edited since, its tooltip says a publish will update it.
+  The status bar reports the result ("published 2 comments to #17",
+  with "(1 on the file, no line took it)" when a comment moved off its
+  line, or what landed and then the forge's error in the danger colour).
 - Status bar: side-task failures (saving the review, the search's
   whole-branch fetch, blame for a comment) surface as a `notice` there and
   clear on the next success; the full-screen `error` page is reserved for
@@ -528,6 +608,24 @@ In this order, each one small enough to show the owner:
 6. Only when the UI has settled: the `gix` and `imara-diff` backend.
 
 ## Traps
+
+- **Publishing was never run against a real pull request.** Everything
+  below the `Forge` trait is tested against a stand-in gh, and the schema
+  names were introspected, but the first real publish is the first real
+  test. Try it on a scratch pull request before trusting it on a
+  colleague's. Things to watch: whether GitHub accepts a blamed head line
+  that is not inside a diff hunk (it should refuse, and the comment should
+  land on the file), whether a comment URL from the pending review still
+  opens after the submit, and what gh prints when the user already has a
+  pending review on that pull request. Two known gaps: gh calls have no
+  timeout, and a submit whose answer is lost is reported as a failure
+  although the review may have landed - the next publish then posts the
+  comments a second time.
+- **Any failed line thread is retried on the file**, a dropped connection
+  included: gh's exit code does not tell a refused line from a network
+  error. The status bar counts file-level landings so the move is seen.
+- **A published comment is never taken back.** Delete, archive and
+  un-react change only the local file.
 
 - **The Kit currently comes from the owner's fork.** `[patch.crates-io]`
   in the workspace manifest points every Kit crate at `sassman/gpui-kit`;
