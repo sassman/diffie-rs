@@ -15,6 +15,9 @@ diffie-core = { path = "crates/core" }
 gpui-kit = { version = "=0.9.1", features = ["syntect"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+# The user's config directory. favor-xdg-style keeps the `~/.config`
+# spelling on macOS too - the owner wants one place across machines.
+dirs-lite = { version = "1", features = ["favor-xdg-style"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

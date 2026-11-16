@@ -1,12 +1,6 @@
-//! `--pr`: a GitHub pull request resolved to its branches through the
-//! GitHub CLI.
-//!
-//! gh does the talking because it already carries the user's authentication
-//! and knows GitHub Enterprise hosts. Its embedded jq (`--jq`) hands back
-//! plain lines, so the crate stays free of HTTP and JSON dependencies.
-
-use std::path::Path;
-use std::process::{Command, Stdio};
+//! `--pr`: the pull request a review is connected to, as a
+//! [`Forge`](crate::forge::Forge) describes it, and the parsing of the
+//! command-line value that names it.
 
 /// The `--pr` value, parsed but not yet resolved.
 #[derive(Debug, PartialEq, Eq)]
@@ -18,10 +12,14 @@ pub struct PrArgument {
     pub url: Option<String>,
 }
 
-/// What gh reports about the pull request.
-#[derive(Debug)]
+/// What the forge reports about the pull request.
+#[derive(Clone, Debug)]
 pub struct PullRequest {
     pub number: u64,
+    /// The forge's own id for the pull request; opaque outside the forge.
+    pub id: String,
+    /// The pull request's page, for the browser.
+    pub url: String,
     pub state: PrState,
     /// The branch the pull request merges (`headRefName`). Display only;
     /// the review resolves `source_commit`.
@@ -55,16 +53,41 @@ pub enum PrState {
     Closed,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum PrError {
-    #[error("GitHub CLI (gh) is required for --pr, and it was not found on PATH: {0}")]
-    GhMissing(std::io::Error),
-    #[error("gh pr view failed: {0}")]
-    GhFailed(String),
-    #[error("unexpected output from gh pr view: {0:?}")]
-    Output(String),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+/// Where the pull request stands right now. Unlike [`PullRequest`], which
+/// pins what the review was opened on, this is asked again and again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullStatus {
+    pub state: PrState,
+    /// `None` while nobody has reviewed and no review is required.
+    pub review: Option<ReviewDecision>,
+    /// `None` when the head commit has no checks at all.
+    pub checks: Option<Checks>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewDecision {
+    Approved,
+    ChangesRequested,
+    /// The branch rules ask for a review that has not happened yet.
+    Required,
+}
+
+/// The head commit's CI, folded into one verdict.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Checks {
+    pub state: CheckState,
+    /// The page of the run that started last, for the browser. `None`
+    /// when no check names one.
+    pub latest_run: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckState {
+    Passing,
+    /// At least one check is still queued or running, and none failed.
+    Running,
+    /// At least one check failed; it outranks the ones still running.
+    Failing,
 }
 
 /// Parses the `--pr` value: a decimal number, or an http(s) URL shaped
@@ -116,88 +139,6 @@ pub fn parse(value: &str) -> Result<PrArgument, String> {
     Ok(PrArgument {
         number: number(digits)?,
         url: Some(value.to_string()),
-    })
-}
-
-/// Asks gh for the pull request's state, branches and exact commits.
-/// `repository` becomes the process working directory, so a bare number
-/// resolves against this checkout's remotes.
-pub fn resolve(repository: &Path, argument: &PrArgument) -> Result<PullRequest, PrError> {
-    let selector = argument
-        .url
-        .clone()
-        .unwrap_or_else(|| argument.number.to_string());
-    let output = Command::new("gh")
-        .args(["pr", "view"])
-        .arg(&selector)
-        .args([
-            "--json",
-            "state,headRefName,headRefOid,baseRefName,baseRefOid,isCrossRepository,headRepositoryOwner",
-            // One value per line; `// ""` keeps the line count stable when a
-            // fork's owner cannot be read.
-            "--jq",
-            ".state, .headRefName, .headRefOid, .baseRefName, .baseRefOid, .isCrossRepository, .headRepositoryOwner.login // \"\"",
-        ])
-        .current_dir(repository)
-        // gh's errors reach the user verbatim; keep them in English.
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => PrError::GhMissing(error),
-            _ => PrError::Io(error),
-        })?;
-    if !output.status.success() {
-        return Err(PrError::GhFailed(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let unexpected = || PrError::Output(stdout.trim().to_string());
-    let mut lines = stdout.lines();
-    let (
-        Some(state),
-        Some(source_branch),
-        Some(source_commit),
-        Some(target_branch),
-        Some(target_commit),
-        Some(cross),
-    ) = (
-        lines.next(),
-        lines.next(),
-        lines.next(),
-        lines.next(),
-        lines.next(),
-        lines.next(),
-    )
-    else {
-        return Err(unexpected());
-    };
-    let state = match state {
-        "OPEN" => PrState::Open,
-        "MERGED" => PrState::Merged,
-        "CLOSED" => PrState::Closed,
-        _ => return Err(unexpected()),
-    };
-    let cross_repository = match cross {
-        "true" => true,
-        "false" => false,
-        _ => return Err(unexpected()),
-    };
-    if source_commit.is_empty() || target_commit.is_empty() {
-        return Err(unexpected());
-    }
-    Ok(PullRequest {
-        number: argument.number,
-        state,
-        source_branch: source_branch.to_string(),
-        source_commit: source_commit.to_string(),
-        target_branch: target_branch.to_string(),
-        target_commit: target_commit.to_string(),
-        cross_repository,
-        head_owner: lines.next().unwrap_or_default().to_string(),
     })
 }
 

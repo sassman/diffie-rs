@@ -133,10 +133,33 @@ pub struct Comment {
     pub created: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edited: Option<String>,
+    /// Where the comment lives on the pull request, once published there.
+    /// Last in the struct: TOML wants a record's sub-table after its values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published: Option<Published>,
 }
 
 fn one() -> usize {
     1
+}
+
+/// A comment's counterpart on the forge, kept so a second publish never
+/// posts it twice and the card can link to it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Published {
+    /// The forge's own id for the comment; opaque outside the forge.
+    pub id: String,
+    pub url: String,
+    pub at: String,
+    /// The body was edited since; the next publish updates the forge's
+    /// copy. A flag, not a time comparison: timestamps here have second
+    /// precision, and an edit can share its second with the publish.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
+    /// The forge holds it on the file, with the code quoted in the body,
+    /// because no line would take it. An edit must send that form again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub on_file: bool,
 }
 
 /// The agreed, closed set of reactions. Do not add free-form emoji.
@@ -182,6 +205,9 @@ pub struct Reaction {
     pub comment: String,
     pub kind: ReactionKind,
     pub at: String,
+    /// When the reaction was sent to the pull request, if it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published: Option<String>,
 }
 
 /// A threaded answer under a comment. Like a reaction it lives in the
@@ -365,6 +391,7 @@ impl ReviewFile {
             suggestion: new.suggestion,
             created: now_rfc3339(),
             edited: None,
+            published: None,
         });
         id
     }
@@ -374,6 +401,12 @@ impl ReviewFile {
     pub fn edit_comment(&mut self, id: &str, body: String) -> bool {
         match self.comments.iter_mut().find(|comment| comment.id == id) {
             Some(comment) => {
+                // An unchanged body leaves the forge's copy current.
+                if comment.body != body
+                    && let Some(published) = comment.published.as_mut()
+                {
+                    published.stale = true;
+                }
                 comment.body = body;
                 comment.edited = Some(now_rfc3339());
                 true
@@ -430,6 +463,7 @@ impl ReviewFile {
                     comment: comment_id.to_string(),
                     kind,
                     at: now_rfc3339(),
+                    published: None,
                 });
                 true
             }

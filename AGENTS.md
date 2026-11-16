@@ -23,12 +23,19 @@ Windows and Linux.
    owner's fork (`sassman/gpui-kit` - v0.9.1 plus the fork's stacked diff
    features; `Cargo.toml` names the current branch) until the upstream PRs
    land; the patch dies with the next Kit release that carries them.
+   When a change needs the Kit itself, the fork is checked out one
+   directory above this repository (`../gpui-kit`): commit there on the
+   branch `Cargo.toml` names, push to `o`, then run
+   `cargo update gpui-kit gpui-component gpui-base gpui-kit-assets` here so
+   the lock picks up the new revision - the patch pulls from GitHub, never
+   from the local checkout.
 3. **Use Kit components before writing your own.** In particular the diff view
    is `gpui_kit::component::diff::Diff`. Do not hand-roll diff rendering,
    virtualization, selection or annotations.
 4. **`diffie-core` has no UI dependency.** It must never depend on `gpui-kit`
    or on `diffie`. The UI reaches the repository only through the
-   `ReviewBackend` trait.
+   `ReviewBackend` trait, and the code host only through the `Forge`
+   trait - no GitHub name, API or CLI call outside `github.rs`.
 5. **Never write to the reviewed repository.** No changes to its objects,
    index, refs, config or working tree. The only files the app writes are
    review files under `<git-dir>/review/`. Scratch objects go to a temporary
@@ -74,6 +81,9 @@ When calling git:
   else's comment go in the reactor's file, by comment id. Never edit, merge or
   rewrite a colleague's file.
 - **A "Reviewed" tick stores the file's content id**, not a commit.
+- **The forge is only reached on the reviewer's click.** Publishing and
+  approving exist only in a review opened with `--pr`; nothing posts,
+  reacts or approves on its own, and nothing is deleted on the forge.
 - **Density.** Controls are 22 to 26 px high, list rows 22 px, file headers
   28 px, text 12 px. Prefer `xsmall` Kit controls. Do not add padding to make
   things "breathe".
@@ -125,8 +135,6 @@ Linux build dependencies are listed in `README.md`.
 
 ## Before you finish a change
 
-- `cargo fmt --all`, `cargo clippy --workspace --all-targets` and
-  `cargo test -p diffie-core` are clean.
-- `cargo check -p diffie` has no warnings.
+- `just ci-check` is clean and not warnings / errors.
 - `docs/HANDOFF.md` reflects the new state if you changed what exists or what
   is next.

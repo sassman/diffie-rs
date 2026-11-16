@@ -1,10 +1,15 @@
 mod app;
+mod settings;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use diffie_core::forge::Forge;
+use diffie_core::github::GitHubCli;
 use diffie_core::{CompareMode, Comparison, GitCli, ReviewBackend as _};
-use gpui_kit::{AppContext as _, WindowBounds, WindowOptions, component::TitleBar, px, size};
+use gpui_kit::{
+    AppContext as _, Bounds, WindowBounds, WindowOptions, component::TitleBar, point, px, size,
+};
 
 const USAGE: &str = "\
 Usage: diffie [-C <path>] [<revision> [<revision>]] [--every-difference]
@@ -25,7 +30,9 @@ pins host and repository, GitHub Enterprise included). The GitHub CLI
 (gh) describes the PR, and the review pins the PR's exact commits -
 never a same-named local branch, whose tip can differ; the title keeps
 the branch names. A commit that is not fetched here is refused with the
-`git fetch` to run - diffie never fetches. Requires gh on PATH.
+`git fetch` to run - diffie never fetches. The window then carries a
+pull-request menu: open it in the browser, publish the review's comments
+to it, approve it. Requires gh on PATH.
 
 --prompt opens no window: it prints the open review comments the way the
 app's \"Copy all as prompt\" button does, and exits. Without a review name
@@ -239,18 +246,26 @@ fn main() {
             }
         }
     }
+    // The review's pull request, kept for the window: publishing and
+    // approving exist only when the review was opened from one.
+    let mut connected = None;
     let pr_comparison = pr.map(|value| {
         let argument = match diffie_core::pr::parse(&value) {
             Ok(argument) => argument,
             Err(message) => exit_usage(&message),
         };
-        let pull = match diffie_core::pr::resolve(&path, &argument) {
+        let forge: Arc<dyn Forge> = Arc::new(GitHubCli::new(&path));
+        let pull = match forge.pull_request(&argument) {
             Ok(pull) => pull,
             Err(error) => {
                 eprintln!("{error}");
                 std::process::exit(1);
             }
         };
+        connected = Some(app::Pull {
+            forge,
+            request: pull.clone(),
+        });
         use diffie_core::pr::PrState;
         let exists = |revision: &str| -> bool {
             backend.revision_exists(revision).unwrap_or_else(|error| {
@@ -510,8 +525,20 @@ fn main() {
                     ),
                 }
             }
+            // The remembered place and size, in global coordinates, so the
+            // window also returns to the screen it was left on; first runs
+            // center a default. A remembered screen that is gone leaves
+            // the window to the OS's own clamping.
+            let settings = settings::load();
+            let window_bounds = match settings.window {
+                Some(window) => WindowBounds::Windowed(Bounds::new(
+                    point(px(window.x), px(window.y)),
+                    size(px(window.width), px(window.height)),
+                )),
+                None => WindowBounds::centered(size(px(1440.), px(900.)), cx),
+            };
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(1440.), px(900.)), cx)),
+                window_bounds: Some(window_bounds),
                 window_min_size: Some(size(px(900.), px(560.))),
                 app_id: Some("diff-review".into()),
                 icon,
@@ -531,9 +558,13 @@ fn main() {
                 cx.new(|cx| {
                     app::ReviewApp::new(
                         backend,
-                        name.into(),
-                        worktree.map(Into::into),
-                        comparison,
+                        app::Subject {
+                            repository: name.into(),
+                            worktree: worktree.map(Into::into),
+                            comparison,
+                            pull: connected,
+                        },
+                        settings,
                         window,
                         cx,
                     )

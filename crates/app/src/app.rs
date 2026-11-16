@@ -10,11 +10,14 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use diffie_core::pr::PullStatus;
 use diffie_core::review::{
     ArchiveFile, NewComment, Placement, ReactionKind, ReviewFile, ReviewInput, ReviewSet,
     ReviewState, Side, as_prompt, map_line, place,
 };
 use diffie_core::search::{SearchHit, search_patch};
+
+use crate::settings::{LayoutMode, Settings, WindowSettings};
 use diffie_core::time::ago;
 use diffie_core::{
     BlameLine, ChangedRegion, Commit, Comparison, FileState, FileStatus, FileSummary, NewSide, Oid,
@@ -50,9 +53,12 @@ use gpui_kit::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClipboardItem, Context,
     ElementId, Entity, FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
     KeyBinding, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, WeakEntity, Window, deferred, div,
+    Styled as _, Subscription, Task, WeakEntity, Window, WindowBounds, deferred, div,
     prelude::FluentBuilder as _, px, rgb,
 };
+
+mod pull;
+pub use pull::Pull;
 
 mod commands {
     gpui_kit::actions!(
@@ -132,6 +138,10 @@ const REVIEW: Option<&str> = Some("Review");
 /// marker - three seconds from verdict to quiet.
 const FOLD_GRACE: std::time::Duration = std::time::Duration::from_millis(2500);
 const FOLD_FADE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The pause before a settings write, long enough to turn a window
+/// drag's stream of bounds into one write.
+const SETTINGS_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// The application's themes, embedded so every platform ships them. The
 /// owner's default dark theme is Gruvbox; Midnight is the mockup's palette.
@@ -611,6 +621,16 @@ struct PickerContext {
     now: i64,
 }
 
+/// What a window reviews, as the command line settled it.
+pub struct Subject {
+    pub repository: SharedString,
+    /// The linked worktree the review runs in, when it is not the primary
+    /// checkout.
+    pub worktree: Option<SharedString>,
+    pub comparison: Comparison,
+    pub pull: Option<Pull>,
+}
+
 /// Where a comment sits in the current view.
 #[derive(Clone)]
 struct Placed {
@@ -734,6 +754,9 @@ struct ThreadView {
     answered: bool,
     mine: bool,
     resolved: bool,
+    /// The comment's page on the pull request once published, and whether
+    /// an edit since then still waits for the next publish.
+    published: Option<(SharedString, bool)>,
     /// Kind, how many reviewers gave it, whether this reviewer did.
     reactions: Vec<(ReactionKind, usize, bool)>,
     left: Vec<ReactionKind>,
@@ -791,6 +814,21 @@ pub struct ReviewApp {
     /// checkout; shown beside the project name.
     worktree: Option<SharedString>,
     comparison: Comparison,
+    pull: Option<Pull>,
+    /// A publish or approval is on its way to the forge; one at a time.
+    publishing: bool,
+    /// How the last publish went, and whether that was a failure. Its own
+    /// line beside `notice`, which the next review save clears - and every
+    /// publish ends in one.
+    publish_status: Option<(SharedString, bool)>,
+    /// Where the pull request stands, as last answered by the forge. Kept
+    /// through a failed refresh: an older answer beats none.
+    pull_status: Option<PullStatus>,
+    /// Why the last refresh failed, in the forge's words.
+    pull_status_error: Option<SharedString>,
+    /// Replacing it drops the refresh in flight, so answers never land
+    /// out of order.
+    _pull_status: Task<()>,
     scope: ScopeKind,
     picked: Vec<Oid>,
     /// Whether the uncommitted layer of an uncommitted review is checked in
@@ -813,6 +851,11 @@ pub struct ReviewApp {
     /// The reviewer's own split-or-unified choice. The view falls back to
     /// Unified while the window is too narrow for a split, without losing it.
     manual_mode: DiffMode,
+    /// The machine-wide settings file's state, kept current and written
+    /// behind `persist_settings`'s coalescing delay.
+    settings: Settings,
+    settings_pending: bool,
+    settings_running: bool,
     /// Soft-wrap long lines instead of scrolling the diff horizontally.
     wrap: bool,
     /// Hide changes in amount of whitespace. The diff is rebuilt with
@@ -911,23 +954,51 @@ pub struct ReviewApp {
 impl ReviewApp {
     pub fn new(
         backend: Arc<dyn ReviewBackend>,
-        repository: SharedString,
-        worktree: Option<SharedString>,
-        comparison: Comparison,
+        subject: Subject,
+        settings: Settings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let Subject {
+            repository,
+            worktree,
+            comparison,
+            pull,
+        } = subject;
         window.set_window_title(&match &worktree {
             Some(name) => format!("{repository} ({name}) — review"),
             None => format!("{repository} — review"),
         });
         Theme::change(ThemeMode::Dark, Some(window), cx);
-        let diff = cx.new(|cx| DiffState::new([], cx).with_mode(DiffMode::Split));
+        let mode = match settings.mode {
+            Some(LayoutMode::Unified) => DiffMode::Unified,
+            _ => DiffMode::Split,
+        };
+        let diff = cx.new(|cx| DiffState::new([], cx).with_mode(mode));
         let picker_query =
             cx.new(|cx| InputState::new(window, cx).placeholder("Message, hash or author"));
         let search_query =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search the changeset"));
         let subscriptions = vec![
+            // Fires on every move and resize tick; the settings writer
+            // coalesces behind its delay. Maximized and fullscreen report
+            // their restore bounds, which would overwrite the remembered
+            // windowed ones, so only windowed bounds are taken.
+            cx.observe_window_bounds(window, |this, window, cx| {
+                let WindowBounds::Windowed(bounds) = window.window_bounds() else {
+                    return;
+                };
+                let window = WindowSettings {
+                    x: f32::from(bounds.origin.x),
+                    y: f32::from(bounds.origin.y),
+                    width: f32::from(bounds.size.width),
+                    height: f32::from(bounds.size.height),
+                };
+                if this.settings.window != Some(window) {
+                    this.settings.window = Some(window);
+                    this.persist_settings(cx);
+                }
+            }),
             cx.observe(&diff, |_, _, cx| cx.notify()),
             cx.subscribe(&diff, |this, _, event: &DiffEvent, cx| {
                 if let DiffEvent::SelectionChanged(Some(range)) = event {
@@ -955,6 +1026,12 @@ impl ReviewApp {
             repository,
             worktree,
             comparison,
+            pull,
+            publishing: false,
+            publish_status: None,
+            pull_status: None,
+            pull_status_error: None,
+            _pull_status: Task::ready(()),
             scope: ScopeKind::NewForMe,
             picked: Vec::new(),
             picked_uncommitted: true,
@@ -970,7 +1047,10 @@ impl ReviewApp {
             review_path: PathBuf::new(),
             placed: Vec::new(),
             diff,
-            manual_mode: DiffMode::Split,
+            manual_mode: mode,
+            settings,
+            settings_pending: false,
+            settings_running: false,
             wrap: false,
             ignore_whitespace: false,
             comment_cursor: None,
@@ -1053,6 +1133,9 @@ impl ReviewApp {
         // every commit means "everything", so the load re-picks the fresh
         // list and the newcomers join the scope; a hand-picked subset stays
         // exactly as picked.
+        // Whoever reloads wants the present: the pull request may have been
+        // merged, approved or turned red since the last look.
+        self.refresh_pull_status(cx);
         let extend_picks = self.scope == ScopeKind::Custom
             && self
                 .commits
@@ -1390,6 +1473,11 @@ impl ReviewApp {
     }
 
     fn swap_direction(&mut self, cx: &mut Context<Self>) {
+        // A publish in flight records its ids into the review file it
+        // started from; swapping would hand it the other direction's.
+        if self.publishing {
+            return;
+        }
         std::mem::swap(&mut self.comparison.source, &mut self.comparison.target);
         // A pinned revision (--pr) belongs to its display name; keep the
         // pairs together.
@@ -1780,6 +1868,50 @@ impl ReviewApp {
     fn set_manual_mode(&mut self, mode: DiffMode, cx: &mut Context<Self>) {
         self.manual_mode = mode;
         self.diff.update(cx, |state, cx| state.set_mode(mode, cx));
+        let stored = match mode {
+            DiffMode::Unified => LayoutMode::Unified,
+            _ => LayoutMode::Split,
+        };
+        if self.settings.mode != Some(stored) {
+            self.settings.mode = Some(stored);
+            self.persist_settings(cx);
+        }
+    }
+
+    /// Settings writes ride the review file's pattern - a dirty flag and
+    /// one writer - plus a pause before each write, because a window drag
+    /// reports every frame and the file deserves one write per gesture,
+    /// not one per pixel. The state is read after the pause, so the write
+    /// carries the newest of everything.
+    fn persist_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_pending = true;
+        self.write_settings(cx);
+    }
+
+    fn write_settings(&mut self, cx: &mut Context<Self>) {
+        if self.settings_running || !self.settings_pending {
+            return;
+        }
+        self.settings_running = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SETTINGS_DELAY).await;
+            let Ok(settings) = this.update(cx, |this, _| {
+                this.settings_pending = false;
+                this.settings.clone()
+            }) else {
+                return;
+            };
+            let result = cx.background_spawn(async move { settings.save() }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.settings_running = false;
+                if let Err(error) = result {
+                    this.notice = Some(format!("settings not saved: {error}").into());
+                    cx.notify();
+                }
+                this.write_settings(cx);
+            });
+        })
+        .detach();
     }
 
     fn toggle_mode(&mut self, cx: &mut Context<Self>) {
@@ -2598,6 +2730,11 @@ impl ReviewApp {
                     answered: thread.answered(),
                     mine: thread.mine,
                     resolved: thread.resolved(),
+                    published: thread
+                        .comment
+                        .published
+                        .as_ref()
+                        .map(|published| (published.url.clone().into(), published.stale)),
                     reactions,
                     left: set.mine.reactions_left(&thread.comment.id),
                     answer_input: self
@@ -2828,6 +2965,7 @@ impl ReviewApp {
                             .h(px(22.))
                             .icon(Icon::new(Lucide::ArrowLeftRight))
                             .tooltip("Swap direction")
+                            .disabled(self.publishing)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 // A second quick click must not reach the
                                 // title bar, whose double click minimizes
@@ -2863,6 +3001,9 @@ impl ReviewApp {
                         // stay out, so the native double click still works
                         // there.
                         .on_click(|_, _, cx| cx.stop_propagation())
+                        .when_some(self.pull.as_ref(), |controls, pull| {
+                            controls.child(self.render_pull_menu(pull, cx))
+                        })
                         .child(
                             ToggleGroup::new("layout")
                                 .outline()
@@ -3534,6 +3675,21 @@ impl ReviewApp {
             ScopeKind::WholeBranch => "Everything the branch adds",
             ScopeKind::Custom => "Combined diff of the checked commits",
         };
+        // The jump history and reload as buttons, so the keyboardless hand
+        // has them too; the tooltips teach the keys.
+        let (back_key, forward_key, reload_key) = if cx.platform_info().is_mac() {
+            ("⌘[", "⌘]", "⌘R")
+        } else {
+            ("Ctrl+[", "Ctrl+]", "Ctrl+R")
+        };
+        let nav_button = |id: &'static str, icon: Lucide, tip: String| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .h(px(22.))
+                .icon(Icon::new(icon))
+                .tooltip(tip)
+        };
         h_flex()
             .flex_none()
             .w_full()
@@ -3543,6 +3699,32 @@ impl ReviewApp {
             .bg(cx.theme().sidebar)
             .border_b_1()
             .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .gap_0p5()
+                    .child(
+                        nav_button("nav-back", Lucide::ArrowLeft, format!("Back ({back_key})"))
+                            .disabled(self.back_stack.is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| this.jump_back(cx))),
+                    )
+                    .child(
+                        nav_button(
+                            "nav-forward",
+                            Lucide::ArrowRight,
+                            format!("Forward ({forward_key})"),
+                        )
+                        .disabled(self.forward_stack.is_empty())
+                        .on_click(cx.listener(|this, _, _, cx| this.jump_forward(cx))),
+                    )
+                    .child(
+                        nav_button(
+                            "nav-reload",
+                            Lucide::RefreshCw,
+                            format!("Reload ({reload_key})"),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
+                    ),
+            )
             .child(
                 div()
                     .text_size(px(10.5))
@@ -4491,6 +4673,19 @@ impl ReviewApp {
                     .child(notice.clone()),
             );
         }
+        if self.publishing {
+            bar = bar.child("Publishing…");
+        }
+        if let Some((status, failed)) = &self.publish_status {
+            bar = bar.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .when(*failed, |status| status.text_color(cx.theme().danger))
+                    .child(status.clone()),
+            );
+        }
         let position = self.current_file.as_ref().and_then(|current| {
             let files = self.diff.read(cx).files();
             let index = files.iter().position(|file| file.path() == current)?;
@@ -4673,6 +4868,20 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
             .text_color(muted)
             .tooltip(tip)
     };
+    if let Some((url, stale)) = thread.published.clone() {
+        actions = actions.child(
+            icon_button(
+                SharedString::from(format!("published-{id}")),
+                Lucide::Link,
+                if stale {
+                    "Open on the pull request - edited since, publish again to update it"
+                } else {
+                    "Open on the pull request"
+                },
+            )
+            .on_click(move |_, _, cx| cx.open_url(&url)),
+        );
+    }
     // An out-of-scope comment can still be addressed - react, resolve,
     // reply, copy, archive - but not rewritten: its code is not the code
     // on screen, so editing and deleting wait for the revision it was

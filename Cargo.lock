@@ -1218,11 +1218,15 @@ name = "diffie"
 version = "0.1.0"
 dependencies = [
  "diffie-core",
+ "dirs-lite",
  "gpui-kit",
  "image",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "serde",
+ "tempfile",
+ "toml 1.2.1+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1276,6 +1280,12 @@ checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
 dependencies = [
  "dirs-sys 0.5.0",
 ]
+
+[[package]]
+name = "dirs-lite"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70377eaab9803482dd96f7c1728f3dae00cc4a5b1185e100befd2f28a2fed291"
 
 [[package]]
 name = "dirs-sys"

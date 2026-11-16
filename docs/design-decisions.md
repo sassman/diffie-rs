@@ -167,8 +167,8 @@ Decided:
   once it is merged or closed (the head branch is usually deleted; that
   ref always exists on GitHub and also reaches the real commits of a
   squash- or rebase-merged PR, which never land on the base branch).
-  Sending comments back to the pull request is intended later, and only
-  from a PR entry point.
+  Sending comments back to the pull request happens only from a PR entry
+  point (section 18).
 
 Assumed:
 
@@ -505,7 +505,10 @@ remembers the page it tears the reader away from, by its top row; plain
 scrolling remembers nothing, so an accidental `n` off a scrolled-to spot
 still comes back to it. The restore is exact (the page's top row returns to
 the top, not the viewport's middle), repeated presses walk further, and a
-fresh jump clears the forward trail, as in a browser.
+fresh jump clears the forward trail, as in a browser. The scope bar leads
+with icon buttons for back, forward and reload (owner, 2026-11-16) -
+tooltips teach the keys, and back and forward disable while their stack
+is empty.
 
 ## 14. Per-file commit stepper
 
@@ -564,3 +567,116 @@ Ask the owner; do not decide these silently.
     remains a placeholder.
 12. **Scale.** The commit picker is not virtualized (the file panel is).
     Fine for dozens, not for thousands.
+
+## 17. User settings
+
+Decided (owner, 2026-11-16):
+
+- Machine-wide settings live in one TOML file under the user's config
+  directory: `~/.config/diffie/settings.toml` on Linux and macOS alike
+  (`dirs-lite` with `favor-xdg-style`; Windows: `%APPDATA%\diffie`).
+  Distinct from the review files, which travel with the reviewed
+  repository and are shared.
+- TOML over KDL, for the mature serde support - the same call the review
+  file made.
+- Stored so far: the manual split-or-unified choice (the narrow-window
+  fallback is a fallback, never stored) and the window's windowed bounds
+  in global coordinates - position, size, and through the origin the
+  screen. Maximized and fullscreen keep the last windowed bounds instead
+  of overwriting them.
+- Missing or unreadable settings are the defaults, logged, never fatal.
+  Unknown keys are ignored and missing ones default, so older and newer
+  builds share the file.
+
+Assumed:
+
+- Writes coalesce behind a half-second pause (a window drag reports every
+  frame) and run in a background task, like the review file's.
+- Panel width and other layout details join the file as the need shows.
+
+## 18. Pull requests and the forge
+
+Decided (owner, 2026-11-16):
+
+- The code host sits behind one trait, `Forge` (`diffie-core/src/forge.rs`),
+  so nothing in the review or the UI is tied to GitHub. GitHub through the
+  gh CLI (`github.rs`) is the first implementation.
+- Started with `--pr`, the review is connected to that pull request, and
+  only then: no other entry point guesses one.
+- A pull-request icon in the title bar opens a menu: open the pull request
+  in the browser, publish the comments to it, approve it with comments,
+  approve it without, request changes with comments.
+- Requesting changes insists on comments (owner, 2026-11-16): it is only
+  offered while at least one new comment of the reviewer's would be
+  published with it. Edits and reactions alone do not count, and the core
+  refuses the verdict without a comment even if asked.
+- Publishing keeps the forge's comment id and URL with the comment in the
+  reviewer's own file, so a comment is never posted twice, and every
+  published card carries a link icon that opens it on the forge.
+- Reactions map to the forge's emoji.
+- The app reads where the pull request stands - open, merged or closed,
+  the review decision, and the CI state when the head has checks - and
+  the menu offers "Open latest CI run", which opens the pipeline in the
+  browser.
+
+Assumed (working defaults - none of these were spelled out):
+
+- **When the state is read**: at startup, with every reload (Cmd/Ctrl+R,
+  and the reloads a scope change triggers) and after every publish. No
+  timer polls the forge.
+- **How it shows**: the title-bar button reads icon plus number; the
+  icon's shape follows the state (open, merged, closed) and a dot carries
+  the loudest news - red for failing checks or requested changes, amber
+  for running checks, green for passing ones. The menu opens with three
+  fixed rows, State, Review and Checks, each with an icon and a value in
+  its colour; the tooltip says the same in words. A failed refresh keeps
+  the older answer and adds a line saying so.
+- **Menu order**: standing, pages to open, publish, then the verdicts -
+  the approvals and the request for changes - apart from the rest.
+- A request for changes whose every comment the forge refuses is not
+  sent: it would block the merge without saying why.
+- **CI verdict**: one failed check makes it failing, even while others
+  still run; otherwise one unfinished check makes it running. A check
+  word the app does not know counts as running, never as passing.
+- **Latest CI run**: the check that started last; a GitHub Actions job
+  link is shortened to its run's page, so the whole pipeline shows.
+
+- **What is published**: the reviewer's own open threads. A thread already
+  resolved here was settled without the pull request and stays local; a
+  colleague's comments are theirs to publish. Replies are not sent.
+- **One review, one notification**: a publish is a single forge review
+  holding the comments. A line the forge refuses (it is outside the pull
+  request's diff) is posted on the file instead, with the lines named and
+  the stored snippet quoted; a comment the forge will not take even there
+  (its path is not in the pull request) stays out, unpublished, and the
+  status bar says so - one bad comment never blocks the rest.
+- **Where a comment lands**: on its line as blame finds it at the pull
+  request's head, when the whole commented span survives there unbroken;
+  otherwise on the file. Comments on removed lines always go on the file:
+  their stored line counts in whatever the view's old side was when they
+  were made (the base, or an intermediate commit under a narrower scope),
+  and a wrong line is worse than none. The status bar counts the comments
+  that landed on the file.
+- **Reaction emoji on GitHub**, whose set is closed and has no checkmark,
+  stop sign or pin: Seen 👀 `EYES`, Done 👍 `THUMBS_UP`, Won't fix 👎
+  `THUMBS_DOWN`, Follow-up 🚀 `ROCKET`. A reaction is sent once its comment
+  is on the forge - the reviewer's own, or a colleague's whose file carries
+  the forge id.
+- **Edits follow**: a published comment edited here is marked stale and the
+  next publish updates the forge's copy, in the form it was posted (a
+  file-level comment keeps its quoted code).
+- **Nothing is taken back**: deleting or archiving a published comment, or
+  removing a published reaction, changes only the local file. The forge
+  keeps its copy.
+- **Approving** needs an open pull request; "with comments" puts the
+  unpublished comments into the approving review.
+- A swapped direction disables publishing and approving: the review file
+  on screen then belongs to the reverse comparison.
+
+Open:
+
+- Whether replies should be published as answers in the forge thread.
+- Whether Done or Won't fix should also resolve the forge's conversation.
+- Whether comments made on the pull request should be read back in.
+- Whether removed-line comments should record the old side they were made
+  against, so they can be anchored on the pull request's left side.
