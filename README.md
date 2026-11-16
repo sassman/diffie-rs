@@ -2,7 +2,19 @@
   <img src="assets/logo.svg" width="160" alt="diffie logo: an eagle's eye">
 </p>
 
-# diffie 
+<h1 align="center">diffie</h1>
+
+<p align="center">
+  Review git changes natively, comment on lines, hand the review to your agent.
+</p>
+
+<p align="center">
+  <a href="https://github.com/sassman/diffie-rs/actions/workflows/build.yml"><img src="https://github.com/sassman/diffie-rs/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
+  <a href="https://github.com/sassman/diffie-rs/releases/latest"><img src="https://img.shields.io/github/v/release/sassman/diffie-rs?label=release" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-informational" alt="Platforms: macOS, Linux, Windows">
+  <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20GPUI%20Kit-orange" alt="Built with Rust and GPUI Kit">
+  <img src="https://img.shields.io/badge/status-early%20alpha-yellow" alt="Status: early alpha">
+</p>
 
 A native desktop app for reviewing git changes across several commits or a
 whole branch, with comments on lines and selections. Rust and GPUI Kit, for
