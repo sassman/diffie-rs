@@ -4673,14 +4673,23 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
             .text_color(muted)
             .tooltip(tip)
     };
+    // An out-of-scope comment can still be addressed - react, resolve,
+    // reply, copy, archive - but not rewritten: its code is not the code
+    // on screen, so editing and deleting wait for the revision it was
+    // written against (owner, 2026-11-16).
     if thread.mine {
         let (owner, id) = (owner.clone(), id.clone());
         actions = actions.child(
             icon_button(
                 SharedString::from(format!("edit-{id}")),
                 Lucide::Pencil,
-                "Edit the comment",
+                if thread.other_revision {
+                    "Editing needs the comment's own revision in view"
+                } else {
+                    "Edit the comment"
+                },
             )
+            .disabled(thread.other_revision)
             .on_click(move |_, window, cx| {
                 let _ = owner.update(cx, |this, cx| this.start_edit(&id, window, cx));
             }),
@@ -4718,8 +4727,13 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
             icon_button(
                 SharedString::from(format!("delete-{id}")),
                 Lucide::Trash,
-                "Delete the comment",
+                if thread.other_revision {
+                    "Deleting needs the comment's own revision in view"
+                } else {
+                    "Delete the comment"
+                },
             )
+            .disabled(thread.other_revision)
             .on_click(move |_, _, cx| {
                 let _ = owner.update(cx, |this, cx| this.delete_comment(&id, cx));
             }),
@@ -4953,16 +4967,14 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
                 }
             })
         })
-        .when(!thread.other_revision, |card| {
-            card.child(
-                // A sliver of air so the last answer does not sit on the
-                // action buttons.
-                div()
-                    .w_full()
-                    .when(!thread.replies.is_empty(), |actions| actions.mt(px(2.)))
-                    .child(actions),
-            )
-        });
+        .child(
+            // A sliver of air so the last answer does not sit on the
+            // action buttons.
+            div()
+                .w_full()
+                .when(!thread.replies.is_empty(), |actions| actions.mt(px(2.)))
+                .child(actions),
+        );
 
     let wrapped = div().w_full().px_2().py_1().child(card);
     if thread.fading {

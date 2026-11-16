@@ -405,6 +405,11 @@ Assumed:
   can edit, archive or delete. Icon-only with tooltips (owner, 2026-11-16;
   five labels read like a sentence); Resolve keeps its label as the row's
   one verdict, with a tooltip like the rest.
+- An out-of-scope (other revision) comment keeps the full actions row -
+  being pinned to another revision is no reason it cannot be addressed:
+  react, resolve, reply, copy, archive. Only edit and delete render
+  disabled there, since the code it was written against is not on screen
+  (owner, 2026-11-16; before this the whole row was hidden).
 
 ## 10. Reactions
 

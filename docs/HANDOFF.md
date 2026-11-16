@@ -59,6 +59,7 @@ Be exact about this when you report further work.
 | Archive action on own comments: `take_comment` + `ArchiveFile::append` in the core, Archive button and background write in the app | Core rules covered by unit tests (move out of the live file, append dedupe, invisibility to discovery and `--reply`); the button and the write flow compiled, clippy-clean, not seen on screen - the window was not run |
 | `r` ticking the file the focus mark is in after `]`/`[` (`follow_mark` pulls `current_file` from the Kit's mark; `n`/`p` and search jumps already set it), and ticking the first expanded, unticked file on a fresh load before any navigation | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Jump-back and forward (Cmd/Ctrl+[ and ]): the two stacks, the exact restore, the hint-bar entry and the Go > Back and Forward items | The Kit's `scroll_to_top_line`/`top_line` round trip is covered by a Kit integration test (`scroll_to_top_line_restores_what_top_line_read`); the app side compiled, clippy-clean, not seen on screen - the window was not run |
+| Other-revision cards keeping the full actions row, Edit and Delete disabled with explaining tooltips | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 
 ## Build, run, test
@@ -386,7 +387,9 @@ actually exercised):
   Edit (pencil), per-comment Copy as prompt (clipboard), Archive (box; own
   comments only: the thread moves into the archive file and out of every
   view, no restore - `archive_comment`), Delete (trash) - beside the
-  labelled Resolve button;
+  labelled Resolve button. An other-revision card keeps the full row so
+  the comment stays addressable; only Edit and Delete render disabled
+  there, with the tooltip saying why;
   other-revision comments dashed and quiet. A comment whose code was
   rewritten since follows the rewrite (blame misses, `changed_regions` +
   `map_line` carry it to the replacement) and sits there dashed in the
