@@ -2645,8 +2645,20 @@ impl ReviewApp {
                         if let Some(set) = this.reviews.as_mut()
                             && set.mine.take_comment(&id).is_some()
                         {
+                            // An orphan's file exists only for its threads:
+                            // reload, or an empty snippet entry lingers.
+                            let orphan = this.placed.iter().any(|placed| {
+                                placed.id == id
+                                    && this
+                                        .orphan_files
+                                        .iter()
+                                        .any(|file| file.path().as_ref() == placed.path)
+                            });
                             this.placed.retain(|placed| placed.id != id);
                             this.save_review(cx);
+                            if orphan {
+                                this.reload(cx);
+                            }
                         }
                     }
                 }
@@ -3681,17 +3693,26 @@ impl ReviewApp {
         // here, even ones the other-revisions toggle hides.
         let open = threads.iter().filter(|thread| !thread.resolved()).count();
         let any = !threads.is_empty();
-        // Open comments no row can show - their file is not in this
-        // comparison. Named, so the count never promises more than the
-        // window can deliver.
+        // Open comments no row currently shows - their file is not in this
+        // comparison, or it is an orphan entry the earlier-comments toggle
+        // hides. Named, so the count never promises more than the window
+        // delivers.
+        let orphans: HashSet<&str> = self
+            .orphan_files
+            .iter()
+            .map(|file| file.path().as_ref())
+            .collect();
         let unplaced = threads
             .iter()
+            .filter(|thread| !thread.resolved())
             .filter(|thread| {
-                !thread.resolved()
-                    && !self
-                        .placed
-                        .iter()
-                        .any(|placed| placed.id == thread.comment.id)
+                let placed = self
+                    .placed
+                    .iter()
+                    .any(|placed| placed.id == thread.comment.id);
+                !placed
+                    || (!self.show_other_revisions
+                        && orphans.contains(thread.comment.path.as_str()))
             })
             .count();
         let bar = match (any, open) {
