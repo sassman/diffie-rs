@@ -505,7 +505,10 @@ remembers the page it tears the reader away from, by its top row; plain
 scrolling remembers nothing, so an accidental `n` off a scrolled-to spot
 still comes back to it. The restore is exact (the page's top row returns to
 the top, not the viewport's middle), repeated presses walk further, and a
-fresh jump clears the forward trail, as in a browser.
+fresh jump clears the forward trail, as in a browser. The scope bar leads
+with icon buttons for back, forward and reload (owner, 2026-11-16) -
+tooltips teach the keys, and back and forward disable while their stack
+is empty.
 
 ## 14. Per-file commit stepper
 

@@ -61,6 +61,7 @@ Be exact about this when you report further work.
 | Jump-back and forward (Cmd/Ctrl+[ and ]): the two stacks, the exact restore, the hint-bar entry and the Go > Back and Forward items | The Kit's `scroll_to_top_line`/`top_line` round trip is covered by a Kit integration test (`scroll_to_top_line_restores_what_top_line_read`); the app side compiled, clippy-clean, not seen on screen - the window was not run |
 | Other-revision cards keeping the full actions row, Edit and Delete disabled with explaining tooltips | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
+| Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
 | User settings (`settings.rs`): split/unified and window bounds persisted to `~/.config/diffie/settings.toml`, restored at startup | Round trip, defaults on missing or broken files and future-key tolerance are unit-tested; the live flow (bounds observer, coalesced writes, startup placement) compiled, clippy-clean, not seen on screen - the window was not run |
 
 ## Build, run, test
@@ -327,7 +328,9 @@ actually exercised):
   bubble, "Earlier comments - from other revisions" on hover; it also
   hides the changed-since cards, which are earlier comments too),
   copy all as prompt, a theme menu behind the palette button.
-- Scope bar: segmented scopes; the commit picker with search, group
+- Scope bar: icon buttons for back, forward and reload leading it
+  (tooltips name the shortcuts; back and forward disable with empty
+  stacks), then segmented scopes; the commit picker with search, group
   checkboxes, skipped markers, comment badges, Show-more rows, shift-click
   runs and Space on the hovered row; in an uncommitted review an
   "Uncommitted changes" row leads "New since your review" so the working

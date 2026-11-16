@@ -3616,6 +3616,21 @@ impl ReviewApp {
             ScopeKind::WholeBranch => "Everything the branch adds",
             ScopeKind::Custom => "Combined diff of the checked commits",
         };
+        // The jump history and reload as buttons, so the keyboardless hand
+        // has them too; the tooltips teach the keys.
+        let (back_key, forward_key, reload_key) = if cx.platform_info().is_mac() {
+            ("⌘[", "⌘]", "⌘R")
+        } else {
+            ("Ctrl+[", "Ctrl+]", "Ctrl+R")
+        };
+        let nav_button = |id: &'static str, icon: Lucide, tip: String| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .h(px(22.))
+                .icon(Icon::new(icon))
+                .tooltip(tip)
+        };
         h_flex()
             .flex_none()
             .w_full()
@@ -3625,6 +3640,32 @@ impl ReviewApp {
             .bg(cx.theme().sidebar)
             .border_b_1()
             .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .gap_0p5()
+                    .child(
+                        nav_button("nav-back", Lucide::ArrowLeft, format!("Back ({back_key})"))
+                            .disabled(self.back_stack.is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| this.jump_back(cx))),
+                    )
+                    .child(
+                        nav_button(
+                            "nav-forward",
+                            Lucide::ArrowRight,
+                            format!("Forward ({forward_key})"),
+                        )
+                        .disabled(self.forward_stack.is_empty())
+                        .on_click(cx.listener(|this, _, _, cx| this.jump_forward(cx))),
+                    )
+                    .child(
+                        nav_button(
+                            "nav-reload",
+                            Lucide::RefreshCw,
+                            format!("Reload ({reload_key})"),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
+                    ),
+            )
             .child(
                 div()
                     .text_size(px(10.5))
