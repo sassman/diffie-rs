@@ -59,6 +59,7 @@ Be exact about this when you report further work.
 | Archive action on own comments: `take_comment` + `ArchiveFile::append` in the core, Archive button and background write in the app | Core rules covered by unit tests (move out of the live file, append dedupe, invisibility to discovery and `--reply`); the button and the write flow compiled, clippy-clean, not seen on screen - the window was not run |
 | `r` ticking the file the focus mark is in after `]`/`[` (`follow_mark` pulls `current_file` from the Kit's mark; `n`/`p` and search jumps already set it), and ticking the first expanded, unticked file on a fresh load before any navigation | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Jump-back and forward (Cmd/Ctrl+[ and ]): the two stacks, the exact restore, the hint-bar entry and the Go > Back and Forward items | The Kit's `scroll_to_top_line`/`top_line` round trip is covered by a Kit integration test (`scroll_to_top_line_restores_what_top_line_read`); the app side compiled, clippy-clean, not seen on screen - the window was not run |
+| Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 
 ## Build, run, test
 
@@ -330,8 +331,9 @@ actually exercised):
   "uncommitted" in the diff header, warning-coloured); the open-comments count in the
   comment accent ("comments handled" once every thread is resolved) -
   clickable: it walks to the next open comment like `n`;
-  the files-reviewed count with a progress bar. `n`/`p` walk the
-  comments, resolved included, in reading order, stop at the ends instead of circling, and
+  the files-reviewed count with a progress bar. `n`/`p` walk the open
+  comments (resolved ones fold away and left the walk on 2026-11-16) in
+  reading order, stop at the ends instead of circling, and
   reveal a collapsed file on landing; when
   every stop is hidden they clear the blocker instead of dying silently -
   the earlier-comments toggle flips on, or the scope widens to Whole
@@ -393,8 +395,14 @@ actually exercised):
   Done to approve the fix; file headers count these as "on changed code"
   and the status bar names open comments nothing can show ("n not in this
   comparison"). Replies thread under the comment body (author plus
-  markdown, left-bordered). Resolving changes nothing but the reaction:
-  question, answers and respond box all stay, the thread is the record.
+  markdown, left-bordered). Resolving changes nothing but the reaction -
+  the thread stays the full record - but its card folds away: a 3 s
+  grace (the last 500 ms a fade, `FOLD_GRACE`/`FOLD_FADE`), then only a
+  checked comment bubble remains in the gutter's marker lane, faint
+  until the pointer is on the line. Clicking the marker toggles the
+  line's resolved cards; the state (`unfolded`/`fading` on `ReviewApp`)
+  is session-only, so a restart folds everything again. The marker lane
+  is set only while resolved threads exist.
   A thread with answers carries a quiet "Respond…" stand-in that a click
   turns into a textarea (Cmd/Ctrl+Enter sends the reply into the
   reviewer's own file, Escape closes), and every open thread's actions
@@ -405,7 +413,9 @@ actually exercised):
   before saving - the blame that names it is dropped when the draft or
   comparison changed underneath it (`resolve_draft_commit`) - and Comment/Suggest change (disabled)/Cancel carry their
   shortcut hints. Right-clicking in the diff opens a context menu with Copy
-  and Comment acting on the text selection (both disabled without one); the
+  and Comment acting on the text selection (both disabled without one), and
+  Comment line starting a fresh selection-less thread on the right-clicked
+  line - also the way to comment a line whose resolved threads folded; the
   items use the payload snapshotted at menu-open, because picking an item
   clears the live selection first. The menu and `c` are the only
   selection-comment entry points; there is no floating button.

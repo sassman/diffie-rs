@@ -316,11 +316,13 @@ Decided:
   selection inside a line.
 - The scope bar counts open comments ("3 open comments" in the comment
   accent, "comments handled" once every thread carries a resolving
-  reaction), and `n`/`p` walk the comments in reading order,
-  revealing a collapsed file on landing (owner, 2026-11-12; resolved ones
-  included since 2026-11-13 - the walk is for reading and must not die
-  with the last verdict). The counter counts every open comment; the walk
-  skips ones the other-revisions toggle currently hides, because a jump
+  reaction), and `n`/`p` walk the open comments in reading order,
+  revealing a collapsed file on landing (owner, 2026-11-12). Resolved
+  ones were included from 2026-11-13 ("the walk is for reading") until
+  2026-11-16, when the owner reversed it with the fold: the walk is a
+  tool for working through what is open - done is done - and a folded
+  card is reachable by its line marker instead. The walk also skips
+  comments the other-revisions toggle currently hides, because a jump
   must land on something visible.
 - Two entry points (owner, 2026-11-12; a + pinned at the pointer after a
   text drag was dropped - it stuck around through clicks and keypresses):
@@ -342,6 +344,17 @@ Decided:
   was dropped because "outdated" judges relevance while the comments are
   only pinned to another revision).
 - Comments can be marked done.
+- A resolved thread folds away (owner, 2026-11-16): the card vanishes and
+  a checked comment bubble stays in the gutter's marker lane beside the
+  line number - faint until the pointer is on the line, full strength
+  while the card is open. Clicking it toggles the line's resolved cards.
+  The unfold is session state only, never written anywhere, so a restart
+  folds everything again. Resolving folds after a three-second grace (the
+  last half second a fade), so the verdict is seen landing; clicking the
+  marker during the grace folds at once. Unfolded, the thread is still
+  the full record: question, answers and respond box. Because the marker
+  claims the line, the context menu gains "Comment line" to start a
+  fresh thread on such a line without a selection.
 - A comment whose code was rewritten since follows the rewrite instead of
   vanishing: blame loses the line, the diff from the comment's commit to the
   view's new side carries it to the replacement, and the card sits there

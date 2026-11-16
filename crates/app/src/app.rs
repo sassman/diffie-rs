@@ -30,8 +30,8 @@ use gpui_kit::component::{
     checkbox::Checkbox,
     diff::{
         Diff, DiffAnnotation, DiffChangeIndicator, DiffDecoration, DiffEvent, DiffFile, DiffFold,
-        DiffHunkSeparator, DiffLinePosition, DiffLineRange, DiffMode, DiffSide, DiffSpanHighlight,
-        DiffState,
+        DiffGutterMarker, DiffHunkSeparator, DiffLinePosition, DiffLineRange, DiffMode, DiffSide,
+        DiffSpanHighlight, DiffState,
     },
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
@@ -47,10 +47,11 @@ use gpui_kit::component::{
     v_flex,
 };
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, ElementId, Entity,
-    FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement, KeyBinding,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, WeakEntity, Window, deferred, div, prelude::FluentBuilder as _, px, rgb,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClipboardItem, Context,
+    ElementId, Entity, FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
+    KeyBinding, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, WeakEntity, Window, deferred, div,
+    prelude::FluentBuilder as _, px, rgb,
 };
 
 mod commands {
@@ -125,6 +126,12 @@ use commands::*;
 /// open.
 const DIFF: Option<&str> = Some("Reading > Diff");
 const REVIEW: Option<&str> = Some("Review");
+
+/// Resolving folds the card away, but not under the pointer: the thread
+/// stays for this grace, then fades over [`FOLD_FADE`] into its line
+/// marker - three seconds from verdict to quiet.
+const FOLD_GRACE: std::time::Duration = std::time::Duration::from_millis(2500);
+const FOLD_FADE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// The application's themes, embedded so every platform ships them. The
 /// owner's default dark theme is Gruvbox; Midnight is the mockup's palette.
@@ -675,6 +682,24 @@ struct Snapshot {
     threads: Vec<ThreadView>,
     files: HashMap<SharedString, FileView>,
     draft: Option<DraftView>,
+    /// One per line holding resolved threads, folded or not: the marker
+    /// in the gutter lane that toggles their cards.
+    resolved_markers: Vec<ResolvedMarker>,
+    /// The line under the pointer; its marker brightens.
+    hovered_line: Option<DiffLinePosition>,
+}
+
+/// A line's resolved threads, behind one gutter-lane marker.
+#[derive(Clone)]
+struct ResolvedMarker {
+    path: String,
+    side: Side,
+    line: usize,
+    /// The comment ids the marker's click toggles.
+    ids: Vec<String>,
+    /// True while at least one of the cards is hidden: a click shows
+    /// them; otherwise it folds them away again.
+    folded: bool,
 }
 
 struct DraftView {
@@ -718,6 +743,8 @@ struct ThreadView {
     wrap: bool,
     /// The comment the jump stepper is on; its card's border leaps out.
     active: bool,
+    /// In the fold animation's last moment: the card fades out.
+    fading: bool,
 }
 
 struct ReplyView {
@@ -794,6 +821,12 @@ pub struct ReviewApp {
     /// The comment `n`/`p` last jumped to, so the walk continues from
     /// there instead of restarting at the top.
     comment_cursor: Option<String>,
+    /// Resolved threads whose cards are open anyway: the fold grace after
+    /// a verdict, and marker clicks, put ids here. Session-only on
+    /// purpose - a restart folds every resolved thread again.
+    unfolded: HashSet<String>,
+    /// Resolved threads in the fold animation's fade.
+    fading: HashSet<String>,
     /// Pages left behind by jumps, each keyed by its top row, newest last.
     /// Cmd/Ctrl+[ pops back through them; plain scrolling never pushes.
     back_stack: Vec<DiffLinePosition>,
@@ -941,6 +974,8 @@ impl ReviewApp {
             wrap: false,
             ignore_whitespace: false,
             comment_cursor: None,
+            unfolded: HashSet::new(),
+            fading: HashSet::new(),
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             search_open: false,
@@ -1474,10 +1509,25 @@ impl ReviewApp {
             .enumerate()
             .map(|(index, file)| (file.path.as_str(), index))
             .collect();
+        // The walk is for working through what is still open - done is
+        // done (owner, 2026-11-16, reversing the resolved-included walk of
+        // 2026-11-13: folded cards are reachable by their line markers).
+        let resolved: HashSet<&str> = self
+            .reviews
+            .as_ref()
+            .map(|set| {
+                set.threads()
+                    .iter()
+                    .filter(|thread| thread.resolved())
+                    .map(|thread| thread.comment.id.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut stops: Vec<(String, String, Side, usize)> = self
             .placed
             .iter()
             .filter(|placed| self.show_other_revisions || !placed.earlier())
+            .filter(|placed| !resolved.contains(placed.id.as_str()))
             .map(|placed| {
                 (
                     placed.id.clone(),
@@ -1510,10 +1560,12 @@ impl ReviewApp {
             }
         }
         if stops.is_empty() {
+            // Only open threads justify hunting: a review where everything
+            // is resolved has no stop a wider scope could surface.
             let any = self
                 .reviews
                 .as_ref()
-                .is_some_and(|set| !set.threads().is_empty());
+                .is_some_and(|set| set.threads().iter().any(|thread| !thread.resolved()));
             if any && self.scope != ScopeKind::WholeBranch {
                 self.pending_comment_jump = true;
                 self.set_scope(ScopeKind::WholeBranch, cx);
@@ -2299,10 +2351,73 @@ impl ReviewApp {
 
     fn toggle_reaction(&mut self, id: &str, kind: ReactionKind, cx: &mut Context<Self>) {
         if let Some(set) = self.reviews.as_mut() {
-            set.mine.toggle_reaction(id, kind);
+            let given = set.mine.toggle_reaction(id, kind);
+            if kind.resolves() {
+                if given && self.thread_resolved(id) {
+                    self.grace_then_fold(id.to_string(), cx);
+                } else if !self.thread_resolved(id) {
+                    // Open again: the session's fold state has nothing to say.
+                    self.unfolded.remove(id);
+                    self.fading.remove(id);
+                }
+            }
             self.save_review(cx);
             cx.notify();
         }
+    }
+
+    fn thread_resolved(&self, id: &str) -> bool {
+        self.reviews.as_ref().is_some_and(|set| {
+            set.threads()
+                .iter()
+                .any(|thread| thread.comment.id == id && thread.resolved())
+        })
+    }
+
+    /// A verdict folds the card into its line marker, but not under the
+    /// pointer: the thread stays [`FOLD_GRACE`] so the click is seen
+    /// landing, fades [`FOLD_FADE`], and is gone. Folding by hand or
+    /// reopening during the grace calls the timer off.
+    fn grace_then_fold(&mut self, id: String, cx: &mut Context<Self>) {
+        self.unfolded.insert(id.clone());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FOLD_GRACE).await;
+            let fading = this
+                .update(cx, |this, cx| {
+                    if !this.unfolded.contains(&id) || !this.thread_resolved(&id) {
+                        return false;
+                    }
+                    this.fading.insert(id.clone());
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !fading {
+                return;
+            }
+            cx.background_executor().timer(FOLD_FADE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.fading.remove(&id) {
+                    this.unfolded.remove(&id);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The marker's click: show the line's resolved cards, or fold them
+    /// away again. Session state only; the review file knows nothing of it.
+    fn toggle_folded(&mut self, ids: &[String], unfold: bool, cx: &mut Context<Self>) {
+        for id in ids {
+            self.fading.remove(id);
+            if unfold {
+                self.unfolded.insert(id.clone());
+            } else {
+                self.unfolded.remove(id);
+            }
+        }
+        cx.notify();
     }
 
     fn delete_comment(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -2380,6 +2495,7 @@ impl ReviewApp {
 
     fn snapshot(&self, cx: &App) -> Snapshot {
         let mut threads = Vec::new();
+        let mut resolved_markers: Vec<ResolvedMarker> = Vec::new();
         if let Some(set) = &self.reviews {
             let set_threads = set.threads();
             let show_author = set_threads.iter().any(|thread| !thread.mine);
@@ -2393,6 +2509,33 @@ impl ReviewApp {
                 };
                 if placed.earlier() && !self.show_other_revisions {
                     continue;
+                }
+                // A resolved thread folds into its line's gutter marker;
+                // the marker stays while the card is open too, as the way
+                // to fold it again. Unfolding is session state only.
+                if thread.resolved() {
+                    let unfolded = self.unfolded.contains(&thread.comment.id);
+                    let marker = resolved_markers.iter_mut().find(|marker| {
+                        marker.path == placed.path
+                            && marker.side == placed.side
+                            && marker.line == placed.line
+                    });
+                    match marker {
+                        Some(marker) => {
+                            marker.ids.push(thread.comment.id.clone());
+                            marker.folded |= !unfolded;
+                        }
+                        None => resolved_markers.push(ResolvedMarker {
+                            path: placed.path.clone(),
+                            side: placed.side,
+                            line: placed.line,
+                            ids: vec![thread.comment.id.clone()],
+                            folded: !unfolded,
+                        }),
+                    }
+                    if !unfolded {
+                        continue;
+                    }
                 }
                 let reactions = ReactionKind::ALL
                     .into_iter()
@@ -2475,6 +2618,7 @@ impl ReviewApp {
                         );
                         self.diff.read(cx).focused_ranges() == std::slice::from_ref(&mark)
                     },
+                    fading: self.fading.contains(&thread.comment.id),
                 });
             }
         }
@@ -2592,6 +2736,8 @@ impl ReviewApp {
             threads,
             files,
             draft,
+            resolved_markers,
+            hovered_line: self.hovered_line.clone(),
         }
     }
 
@@ -3901,7 +4047,7 @@ impl ReviewApp {
             .chain(search_spans)
             .collect();
 
-        Diff::new(&self.diff)
+        let mut diff = Diff::new(&self.diff)
             .size_full()
             .soft_wrap(self.wrap)
             // The decorations below paint richer added and removed fills than
@@ -4238,8 +4384,40 @@ impl ReviewApp {
                             )
                     })
                     .into_any_element()
-            })
-            .into_any_element()
+            });
+        // The marker lane carries the resolved threads' toggles. It is set
+        // only when some exist, so a review without verdicts keeps the
+        // mockup's tight gutter.
+        if !snapshot.resolved_markers.is_empty() {
+            let markers: Vec<DiffGutterMarker> = snapshot
+                .resolved_markers
+                .iter()
+                .map(|marker| {
+                    DiffGutterMarker::new(
+                        ElementId::from(SharedString::from(format!(
+                            "resolved-{}-{}-{}",
+                            marker.path,
+                            marker.line,
+                            matches!(marker.side, Side::New),
+                        ))),
+                        DiffLinePosition::new(
+                            SharedString::from(marker.path.clone()),
+                            diff_side(marker.side),
+                            marker.line,
+                        ),
+                    )
+                    .with_label(resolved_marker_label(marker))
+                })
+                .collect();
+            let for_markers = (snapshot.clone(), owner.clone());
+            diff = diff
+                .gutter_markers(markers)
+                .render_gutter_marker(move |marker, _, cx| {
+                    let (snapshot, owner) = &for_markers;
+                    render_resolved_marker(marker, snapshot, owner.clone(), cx)
+                });
+        }
+        diff.into_any_element()
     }
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4321,6 +4499,56 @@ impl ReviewApp {
         bar.child(div().flex_1())
             .when_some(position, |bar, position| bar.child(position))
     }
+}
+
+fn resolved_marker_label(marker: &ResolvedMarker) -> String {
+    let what = if marker.ids.len() == 1 {
+        "1 resolved comment".to_string()
+    } else {
+        format!("{} resolved comments", marker.ids.len())
+    };
+    if marker.folded {
+        format!("{what} - click to show")
+    } else {
+        format!("{what} - click to fold away")
+    }
+}
+
+/// The quiet mark a resolved thread folds into: a checked comment bubble
+/// beside the line number, faint until the pointer is on its line, full
+/// strength while its cards are open. A click toggles the cards, for
+/// this session only.
+fn render_resolved_marker(
+    marker: &DiffGutterMarker,
+    snapshot: &Snapshot,
+    owner: WeakEntity<ReviewApp>,
+    cx: &mut App,
+) -> AnyElement {
+    let Some(fold) = snapshot.resolved_markers.iter().find(|fold| {
+        marker.position().path().as_ref() == fold.path
+            && marker.position().side() == diff_side(fold.side)
+            && marker.position().line() == fold.line
+    }) else {
+        return div().into_any_element();
+    };
+    let hovered = snapshot
+        .hovered_line
+        .as_ref()
+        .is_some_and(|line| line == marker.position());
+    let ids = fold.ids.clone();
+    let unfold = fold.folded;
+    let quiet = fold.folded && !hovered;
+    Button::new(marker.id().clone())
+        .ghost()
+        .xsmall()
+        .icon(Icon::new(Lucide::MessageSquareCheck))
+        .text_color(cx.theme().muted_foreground)
+        .tooltip(marker.label().clone())
+        .when(quiet, |button| button.opacity(0.35))
+        .on_click(move |_, _, cx| {
+            let _ = owner.update(cx, |this, cx| this.toggle_folded(&ids, unfold, cx));
+        })
+        .into_any_element()
 }
 
 fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App) -> AnyElement {
@@ -4736,7 +4964,19 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
             )
         });
 
-    div().w_full().px_2().py_1().child(card).into_any_element()
+    let wrapped = div().w_full().px_2().py_1().child(card);
+    if thread.fading {
+        // The fold's last moment: the card fades, then the snapshot stops
+        // emitting it and only the line marker remains.
+        return wrapped
+            .with_animation(
+                ElementId::from(SharedString::from(format!("fold-fade-{}", thread.id))),
+                Animation::new(FOLD_FADE),
+                |card, delta| card.opacity(1. - delta),
+            )
+            .into_any_element();
+    }
+    wrapped.into_any_element()
 }
 
 fn render_draft(snapshot: &Snapshot, owner: WeakEntity<ReviewApp>, cx: &mut App) -> AnyElement {
@@ -5067,6 +5307,14 @@ impl Render for ReviewApp {
                                 .upgrade()
                                 .and_then(|app| app.read(cx).pending_comment.clone());
                             let text = payload.as_ref().and_then(|(_, text)| text.clone());
+                            // The line under the right-click, for a fresh
+                            // line comment with no selection - the way to
+                            // start a new thread on a line whose marker
+                            // owns the gutter's +.
+                            let line = owner
+                                .upgrade()
+                                .and_then(|app| app.read(cx).hovered_line.clone());
+                            let line_owner = owner.clone();
                             let comment_owner = owner.clone();
                             menu.item(
                                 PopupMenuItem::new("Copy")
@@ -5092,6 +5340,25 @@ impl Render for ReviewApp {
                                             this.pending_comment = None;
                                             this.text_lines = None;
                                             this.start_comment(range, selection, window, cx);
+                                        });
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new("Comment line")
+                                    .icon(Icon::new(Lucide::MessageSquare))
+                                    .disabled(line.is_none())
+                                    .on_click(move |_, window, cx| {
+                                        let Some(position) = line.clone() else {
+                                            return;
+                                        };
+                                        let _ = line_owner.update(cx, |this, cx| {
+                                            let range = DiffLineRange::new(
+                                                position.path().clone(),
+                                                position.side(),
+                                                position.line(),
+                                                position.line(),
+                                            );
+                                            this.start_comment(range, None, window, cx);
                                         });
                                     }),
                             )
