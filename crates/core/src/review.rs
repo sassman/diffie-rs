@@ -1695,7 +1695,10 @@ mod tests {
             "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -5,1 +5,1 @@\n five\n@@ -40,1 +40,1 @@\n forty\n"
         );
         let b = patches.iter().find(|(path, _)| path == "src/b.rs").unwrap();
-        assert_eq!(b.1, "diff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1,1 +1,1 @@\n one\n");
+        assert_eq!(
+            b.1,
+            "diff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1,1 +1,1 @@\n one\n"
+        );
     }
 
     #[test]

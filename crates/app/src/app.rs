@@ -4618,74 +4618,76 @@ impl ReviewApp {
                         )
                     })
                     // An orphan snippet entry is not reviewable: no tick.
-                    .when(!view.is_some_and(|view| view.orphan), |row| row.child({
-                        // A ticked file should read as done at a glance: box
-                        // and label turn the theme's light blue. The Kit's
-                        // labeled Checkbox hard-codes both colors, so this is
-                        // the base checkbox plus its own label.
-                        let blue = cx.theme().blue_light;
-                        let box_owner = owner.clone();
-                        let box_path = path.clone();
-                        let label_path = path.clone();
-                        h_flex()
-                            .flex_none()
-                            .gap(px(5.))
-                            .child(
-                                // The base checkbox is unstyled by design;
-                                // box, border and check mark are drawn here.
-                                gpui_kit::base::Checkbox::new(SharedString::from(format!(
-                                    "reviewed-{path}"
-                                )))
-                                .checked(reviewed)
-                                .w(px(13.))
-                                .h(px(13.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(3.))
-                                .border_1()
-                                .border_color(muted)
-                                .cursor_pointer()
-                                .styles(|styles| {
-                                    styles.checked(|state| state.bg(blue).border_color(blue))
-                                })
-                                .when(reviewed, |checkbox| {
-                                    checkbox.child(
-                                        Icon::new(IconName::Check)
-                                            .xsmall()
-                                            .text_color(cx.theme().background),
-                                    )
-                                })
-                                .accessibility_label("Reviewed")
-                                .on_change(
-                                    move |state, _, _, cx| {
-                                        let checked =
-                                            state == gpui_kit::base::CheckboxState::Checked;
-                                        let _ = box_owner.update(cx, |this, cx| {
-                                            this.set_reviewed(&box_path, checked, cx)
-                                        });
-                                    },
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("reviewed-label-{path}")))
+                    .when(!view.is_some_and(|view| view.orphan), |row| {
+                        row.child({
+                            // A ticked file should read as done at a glance: box
+                            // and label turn the theme's light blue. The Kit's
+                            // labeled Checkbox hard-codes both colors, so this is
+                            // the base checkbox plus its own label.
+                            let blue = cx.theme().blue_light;
+                            let box_owner = owner.clone();
+                            let box_path = path.clone();
+                            let label_path = path.clone();
+                            h_flex()
+                                .flex_none()
+                                .gap(px(5.))
+                                .child(
+                                    // The base checkbox is unstyled by design;
+                                    // box, border and check mark are drawn here.
+                                    gpui_kit::base::Checkbox::new(SharedString::from(format!(
+                                        "reviewed-{path}"
+                                    )))
+                                    .checked(reviewed)
+                                    .w(px(13.))
+                                    .h(px(13.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(3.))
+                                    .border_1()
+                                    .border_color(muted)
                                     .cursor_pointer()
-                                    .map(|label| {
-                                        if reviewed {
-                                            label.text_color(blue).font_medium()
-                                        } else {
-                                            label.text_color(muted)
-                                        }
+                                    .styles(|styles| {
+                                        styles.checked(|state| state.bg(blue).border_color(blue))
                                     })
-                                    .on_click(move |_, _, cx| {
-                                        let _ = owner.update(cx, |this, cx| {
-                                            this.set_reviewed(&label_path, !reviewed, cx)
-                                        });
+                                    .when(reviewed, |checkbox| {
+                                        checkbox.child(
+                                            Icon::new(IconName::Check)
+                                                .xsmall()
+                                                .text_color(cx.theme().background),
+                                        )
                                     })
-                                    .child("Reviewed"),
-                            )
-                    }))
+                                    .accessibility_label("Reviewed")
+                                    .on_change(
+                                        move |state, _, _, cx| {
+                                            let checked =
+                                                state == gpui_kit::base::CheckboxState::Checked;
+                                            let _ = box_owner.update(cx, |this, cx| {
+                                                this.set_reviewed(&box_path, checked, cx)
+                                            });
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("reviewed-label-{path}")))
+                                        .cursor_pointer()
+                                        .map(|label| {
+                                            if reviewed {
+                                                label.text_color(blue).font_medium()
+                                            } else {
+                                                label.text_color(muted)
+                                            }
+                                        })
+                                        .on_click(move |_, _, cx| {
+                                            let _ = owner.update(cx, |this, cx| {
+                                                this.set_reviewed(&label_path, !reviewed, cx)
+                                            });
+                                        })
+                                        .child("Reviewed"),
+                                )
+                        })
+                    })
                     .into_any_element()
             });
         // The marker lane carries the resolved threads' toggles. It is set
