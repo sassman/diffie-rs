@@ -64,6 +64,7 @@ Be exact about this when you report further work.
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 | Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Pull-request menu (title-bar icon in a `--pr` review): open in the browser, publish comments, approve with and without comments; the link icon on published cards; the status-bar line after a publish | Core covered by tests: what a publish sends and records (`forge.rs`, against a fake forge) and the exact gh calls, the file-level fallback and the pending-review cleanup (`github.rs`, against a stand-in gh script, Unix only). The GraphQL input and enum names were checked read-only against GitHub's live schema by introspection. The status query (`gh pr view --json state,reviewDecision,statusCheckRollup` with the app's jq) was run read-only against a real merged PR and its lines match what `fold_checks` parses. **Nothing was ever posted to a real pull request**, and the window was not run: the menu, the state icon and its red tint, the busy state, the link icon and whether a pending-review comment's URL still opens after the submit are all unseen |
+| Count badges showing open threads only (file tree, file header and its tooltip breakdown, commit picker) once a thread is resolved | Compiled, clippy-clean; not seen on screen - the window was not run |
 | User settings (`settings.rs`): split/unified and window bounds persisted to `~/.config/diffie/settings.toml`, restored at startup | Round trip, defaults on missing or broken files and future-key tolerance are unit-tested; the live flow (bounds observer, coalesced writes, startup placement) compiled, clippy-clean, not seen on screen - the window was not run |
 | Comment cards capped at the viewport in unwrapped unified view (Kit fork commit `b97451f2`: the annotation wrapper takes the viewport's width and cancels the strip's offset, as the pinned file header does) | Verified on macOS on 2026-11-16 by screenshot: a demo repository with a 2378-character changed line and a hand-written review comment; the card ends at the viewport's edge with its actions row visible. The offset-cancel while scrolled sideways was not exercised (synthetic wheel events did not reach the scroll mask); split view unaffected (owner looked at it) |
 
@@ -425,7 +426,7 @@ actually exercised):
 - Scope bar: icon buttons for back, forward and reload leading it
   (tooltips name the shortcuts; back and forward disable with empty
   stacks), then segmented scopes; the commit picker with search, group
-  checkboxes, skipped markers, comment badges, Show-more rows, shift-click
+  checkboxes, skipped markers, open-comment badges, Show-more rows, shift-click
   runs and Space on the hovered row; in an uncommitted review an
   "Uncommitted changes" row leads "New since your review" so the working
   tree can be excluded like a commit (files carrying its changes say
@@ -467,7 +468,8 @@ actually exercised):
   across all commits"); stepping onto an out-of-view hit switches the
   scope to Whole branch and lands there after the reload.
 - File panel: a tree with folder rows, coloured status letters, split +/−
-  counts, comment badges, reviewed ticks, "generated"; truncation that keeps
+  counts, open-comment badges, reviewed ticks, "generated"; truncation that
+  keeps
   badges inside the panel; resizable by dragging its edge; Hide in its
   header, and a "Files" button in the status bar while hidden. Folder rows
   fold their subtree, and the diff follows: a shut folder collapses its

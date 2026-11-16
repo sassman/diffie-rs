@@ -1585,11 +1585,25 @@ impl ReviewApp {
         cx.notify();
     }
 
+    /// Ids of threads a verdict has closed. Walks and count badges skip
+    /// them: they fold away in the diff, and a number that kept ticking
+    /// after "Done" would nag about nothing.
+    fn resolved_ids(&self) -> HashSet<&str> {
+        self.reviews
+            .as_ref()
+            .map(|set| {
+                set.threads()
+                    .iter()
+                    .filter(|thread| thread.resolved())
+                    .map(|thread| thread.comment.id.as_str())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Comments in reading order: files as the diff sorts them, then line,
-    /// the old side before the new. Resolved threads count - the walk is
-    /// for reading, and must not die with the last verdict. Comments hidden
-    /// with the other revisions' toggle are skipped; a jump must land on
-    /// something visible.
+    /// the old side before the new. Comments hidden with the other
+    /// revisions' toggle are skipped; a jump must land on something visible.
     fn comment_stops(&self) -> Vec<(String, String, Side, usize)> {
         let order: HashMap<&str, usize> = self
             .files
@@ -1600,17 +1614,7 @@ impl ReviewApp {
         // The walk is for working through what is still open - done is
         // done (owner, 2026-11-16, reversing the resolved-included walk of
         // 2026-11-13: folded cards are reachable by their line markers).
-        let resolved: HashSet<&str> = self
-            .reviews
-            .as_ref()
-            .map(|set| {
-                set.threads()
-                    .iter()
-                    .filter(|thread| thread.resolved())
-                    .map(|thread| thread.comment.id.as_str())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let resolved = self.resolved_ids();
         let mut stops: Vec<(String, String, Side, usize)> = self
             .placed
             .iter()
@@ -2770,7 +2774,13 @@ impl ReviewApp {
             changed_since: usize,
         }
         let mut tallies: HashMap<&str, Tally> = HashMap::new();
+        let resolved = self.resolved_ids();
         for placed in &self.placed {
+            // The header count is what still wants attention; a resolved
+            // thread sits folded behind its marker, not in the number.
+            if resolved.contains(placed.id.as_str()) {
+                continue;
+            }
             let tally = tallies.entry(placed.path.as_str()).or_default();
             tally.comments += 1;
             tally.other_revision += usize::from(placed.other_revision);
@@ -3477,6 +3487,10 @@ impl ReviewApp {
             self.reviews.as_ref().map_or_else(HashMap::new, |set| {
                 let mut counts = HashMap::new();
                 for thread in set.threads() {
+                    // A commit's badge matches the tree's: open threads only.
+                    if thread.resolved() {
+                        continue;
+                    }
                     *counts.entry(thread.comment.commit.clone()).or_insert(0) += 1;
                 }
                 counts
@@ -3850,7 +3864,13 @@ impl ReviewApp {
             )
     }
 
-    fn render_file_row(&self, index: usize, depth: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn render_file_row(
+        &self,
+        index: usize,
+        depth: usize,
+        comments: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let file = &self.files[index];
         let muted = cx.theme().muted_foreground;
         let mono = cx.theme().mono_font_family.clone();
@@ -3865,11 +3885,6 @@ impl ReviewApp {
             FileStatus::Modified => ("M", cx.theme().warning),
             FileStatus::Renamed => ("R", cx.theme().blue_light),
         };
-        let comments = self
-            .placed
-            .iter()
-            .filter(|placed| placed.path == file.path)
-            .count();
         let state = self.review_state(&file.path);
         let unchanged = file.state == FileState::UnchangedSinceReview;
         let quiet = state == ReviewState::Reviewed || unchanged || is_generated(&file.path);
@@ -3997,6 +4012,16 @@ impl ReviewApp {
             previous = folders;
         }
         let rows = Rc::new(rows);
+        // Counted up front, open threads only: the badge mirrors the gutter,
+        // where a verdict folds the card away.
+        let resolved = self.resolved_ids();
+        let mut open: HashMap<String, usize> = HashMap::new();
+        for placed in &self.placed {
+            if !resolved.contains(placed.id.as_str()) {
+                *open.entry(placed.path.clone()).or_default() += 1;
+            }
+        }
+        let open = Rc::new(open);
 
         v_flex()
             .w_full()
@@ -4094,7 +4119,11 @@ impl ReviewApp {
                                         .into_any_element()
                                 }
                                 TreeRow::File { index, depth } => {
-                                    this.render_file_row(*index, *depth, cx)
+                                    let comments = open
+                                        .get(this.files[*index].path.as_str())
+                                        .copied()
+                                        .unwrap_or(0);
+                                    this.render_file_row(*index, *depth, comments, cx)
                                 }
                             })
                             .collect::<Vec<_>>()

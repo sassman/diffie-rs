@@ -217,7 +217,7 @@ Assumed:
 - The picker groups commits under "New since your review" and "Already
   reviewed". Each heading has a checkbox for the whole group.
 - The picker has a search field (message, hash, author) and marks skipped
-  commits. Commits that carry comments show a count.
+  commits. Commits that carry open comments show a count.
 - Shift-click checks a run of commits; Space toggles one.
 - A non-contiguous selection is shown as one combined diff: only the checked
   commits are replayed onto the starting point. When a skipped commit touched
@@ -271,8 +271,8 @@ Decided:
 - The file panel is condensed, not spacious.
 
 Assumed: generated files such as lockfiles start collapsed; the tree shows a
-status letter, comment count, added and removed lines, and a tick for reviewed
-files.
+status letter, open-comment count, added and removed lines, and a tick for
+reviewed files.
 
 Decided: a hide-whitespace toggle (the pilcrow icon in the title bar)
 reloads the diff with `--ignore-all-space`; a file whose changes are all
@@ -287,7 +287,12 @@ it landed); a click reveals the lines, another folds them back (owner,
 edit worth seeing - and needs at least 20 alphanumeric characters, the
 `git --color-moved` bar that keeps lone braces from pairing up. Moves
 with edits in flight stay ordinary removals and additions for now; the
-SemanticDiff-style "show only the in-flight edits" view is future work.## 8. Layout
+SemanticDiff-style "show only the in-flight edits" view is future work.
+Superseding decision (owner, 2026-11-14, not yet shipped): moves will pair
+by token hash, so a re-indented move folds too, with the re-indentation
+named in the fold's label - worth seeing, not worth seeing first; see
+`docs/superpowers/specs/mechanical-changes-spec.md`. Rewrite this item when
+that lands.## 8. Layout
 
 Decided: each split panel is half the window and scrolls its long lines on
 its own (owner, 2026-11-12; the Kit strip that scrolled both as one canvas
@@ -355,6 +360,12 @@ Decided:
   the full record: question, answers and respond box. Because the marker
   claims the line, the context menu gains "Comment line" to start a
   fresh thread on such a line without a selection.
+- Resolved threads leave every count badge (owner, 2026-11-16): the file
+  tree's orange number, the file header's "n comments" and its tooltip
+  breakdown, and the commit picker's per-commit count all show open
+  threads only, matching the scope bar's open-comments count. A folded
+  thread is reachable by its marker; a badge that kept counting it would
+  nag about finished work.
 - A comment whose code was rewritten since follows the rewrite instead of
   vanishing: blame loses the line, the diff from the comment's commit to the
   view's new side carries it to the replacement, and the card sits there
