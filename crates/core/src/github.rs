@@ -307,8 +307,9 @@ impl Forge for GitHubCli {
                 Verdict::Approve => self
                     .graphql(pull, APPROVE, &opening, review_id)
                     .map(|_| Vec::new()),
-                // GitHub refuses a comment review that says nothing.
-                Verdict::Comment => Ok(Vec::new()),
+                // GitHub refuses a comment review that says nothing, and a
+                // request for changes without comments is never sent.
+                Verdict::Comment | Verdict::RequestChanges => Ok(Vec::new()),
             };
         }
         let pending = self.graphql(pull, ADD_REVIEW, &opening, review_id)?;
@@ -322,9 +323,11 @@ impl Forge for GitHubCli {
             .map(|comment| self.post(pull, pending, comment))
             .collect();
         let submitted = match (review.verdict, first_refusal_if_all(&postings)) {
-            // Every thread was refused, and GitHub refuses a comment
-            // review that says nothing: the refusal is the answer.
-            (Verdict::Comment, Some(refusal)) => Err(ForgeError::Refused(refusal.to_string())),
+            // Every thread was refused, and a review that needs comments
+            // has none left to carry: the refusal is the answer.
+            (verdict, Some(refusal)) if verdict.needs_comments() => {
+                Err(ForgeError::Refused(refusal.to_string()))
+            }
             (verdict, _) => self
                 .graphql(
                     pull,
@@ -336,6 +339,7 @@ impl Forge for GitHubCli {
                             match verdict {
                                 Verdict::Comment => "COMMENT",
                                 Verdict::Approve => "APPROVE",
+                                Verdict::RequestChanges => "REQUEST_CHANGES",
                             },
                         ),
                     ],
@@ -955,6 +959,39 @@ esac
             .submit_review(&github(), &draft(Verdict::Approve, vec![on_line(12, 1)]))
             .unwrap();
         assert!(gh.calls()[2].contains("-f event=APPROVE"));
+    }
+
+    #[test]
+    fn requesting_changes_submits_that_event() {
+        let gh = FakeGh::new("");
+        gh.forge()
+            .submit_review(
+                &github(),
+                &draft(Verdict::RequestChanges, vec![on_line(12, 1)]),
+            )
+            .unwrap();
+        assert!(gh.calls()[2].contains("-f event=REQUEST_CHANGES"));
+    }
+
+    #[test]
+    fn a_request_for_changes_whose_comments_are_all_refused_is_discarded() {
+        let gh = FakeGh::new(r#"  *addPullRequestReviewThread*) echo "boom" >&2; exit 1 ;;"#);
+        let error = gh
+            .forge()
+            .submit_review(
+                &github(),
+                &draft(Verdict::RequestChanges, vec![on_line(12, 1)]),
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "boom");
+        let calls = gh.calls();
+        assert!(
+            calls
+                .iter()
+                .all(|call| !call.contains("submitPullRequestReview")),
+            "{calls:#?}"
+        );
+        assert!(calls.last().unwrap().contains("deletePullRequestReview"));
     }
 
     #[test]

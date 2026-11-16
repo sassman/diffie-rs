@@ -180,11 +180,16 @@ fn publish_summary(outcome: &Outcome, number: u64) -> (String, bool) {
         0 => sent,
         moved => format!("{sent} ({moved} on the file, no line took it)"),
     });
-    let landed = match (outcome.approved, sent) {
-        (true, Some(sent)) => Some(format!("approved #{number} with {sent}")),
-        (true, None) => Some(format!("approved #{number}")),
-        (false, Some(sent)) => Some(format!("published {sent} to #{number}")),
-        (false, None) => None,
+    let verdict = match outcome.verdict {
+        Some(Verdict::Approve) => Some("approved"),
+        Some(Verdict::RequestChanges) => Some("requested changes on"),
+        Some(Verdict::Comment) | None => None,
+    };
+    let landed = match (verdict, sent) {
+        (Some(verdict), Some(sent)) => Some(format!("{verdict} #{number} with {sent}")),
+        (Some(verdict), None) => Some(format!("{verdict} #{number}")),
+        (None, Some(sent)) => Some(format!("published {sent} to #{number}")),
+        (None, None) => None,
     };
     let complaint = outcome.error.as_ref().map(|error| match outcome.refused {
         0 => format!("failed: {error}"),
@@ -373,7 +378,7 @@ impl ReviewApp {
         let hint = if !in_view {
             Some("Swap back to the pull request's direction to send")
         } else if !open {
-            Some("Only an open pull request can be approved")
+            Some("Only an open pull request takes a verdict")
         } else {
             None
         };
@@ -477,6 +482,21 @@ impl ReviewApp {
                             .icon(Icon::new(Lucide::Check))
                             .disabled(busy || !open || !in_view)
                             .on_click(send(Verdict::Approve, false)),
+                    )
+                    .item(
+                        // Edits and reactions alone do not count: the
+                        // request must say what to change, in a comment
+                        // this very review publishes. The greyed label
+                        // says so, since a menu item has no tooltip.
+                        PopupMenuItem::new(match &sent {
+                            Some(sent) if pending.comments > 0 => {
+                                format!("Request changes with {sent}")
+                            }
+                            _ => "Request changes - needs a new comment".to_string(),
+                        })
+                        .icon(Icon::new(Lucide::MessageSquareWarning))
+                        .disabled(busy || !open || pending.comments == 0)
+                        .on_click(send(Verdict::RequestChanges, true)),
                     );
                 match hint {
                     Some(hint) => menu.separator().label(hint),
@@ -616,7 +636,7 @@ mod tests {
             publish_summary(&outcome, 17),
             ("nothing to publish to #17".to_string(), false)
         );
-        outcome.approved = true;
+        outcome.verdict = Some(Verdict::Approve);
         assert_eq!(
             publish_summary(&outcome, 17),
             ("approved #17".to_string(), false)
@@ -626,7 +646,15 @@ mod tests {
             publish_summary(&outcome, 17),
             ("approved #17, but failed: locked".to_string(), true)
         );
-        outcome.approved = false;
+        outcome.verdict = Some(Verdict::RequestChanges);
+        assert_eq!(
+            publish_summary(&outcome, 17),
+            (
+                "requested changes on #17, but failed: locked".to_string(),
+                true
+            )
+        );
+        outcome.verdict = None;
         assert_eq!(
             publish_summary(&outcome, 17),
             ("nothing reached #17, failed: locked".to_string(), true)

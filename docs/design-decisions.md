@@ -605,7 +605,11 @@ Decided (owner, 2026-11-16):
   only then: no other entry point guesses one.
 - A pull-request icon in the title bar opens a menu: open the pull request
   in the browser, publish the comments to it, approve it with comments,
-  approve it without.
+  approve it without, request changes with comments.
+- Requesting changes insists on comments (owner, 2026-11-16): it is only
+  offered while at least one new comment of the reviewer's would be
+  published with it. Edits and reactions alone do not count, and the core
+  refuses the verdict without a comment even if asked.
 - Publishing keeps the forge's comment id and URL with the comment in the
   reviewer's own file, so a comment is never posted twice, and every
   published card carries a link icon that opens it on the forge.
@@ -627,8 +631,10 @@ Assumed (working defaults - none of these were spelled out):
   fixed rows, State, Review and Checks, each with an icon and a value in
   its colour; the tooltip says the same in words. A failed refresh keeps
   the older answer and adds a line saying so.
-- **Menu order**: standing, pages to open, publish, then approve - apart
-  from the rest, because it is the one verdict.
+- **Menu order**: standing, pages to open, publish, then the verdicts -
+  the approvals and the request for changes - apart from the rest.
+- A request for changes whose every comment the forge refuses is not
+  sent: it would block the merge without saying why.
 - **CI verdict**: one failed check makes it failing, even while others
   still run; otherwise one unfinished check makes it running. A check
   word the app does not know counts as running, never as passing.

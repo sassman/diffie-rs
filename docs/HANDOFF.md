@@ -521,8 +521,11 @@ actually exercised):
   "Open latest CI run", both with the external-link mark; the latter
   disabled without a run), then "Publish 2 comments, 1 edit" (naming what
   would go, disabled with nothing new), "Approve with ..." and "Approve
-  without comments" (both only for an open pull request), set apart by
-  separators because the approval is the one verdict. A closing hint
+  without comments" and "Request changes with ..." (all only for an open
+  pull request), set apart by separators because they are verdicts.
+  Request changes is offered only while a new comment would be published
+  with it (`Verdict::needs_comments`; greyed, its label says "needs a new
+  comment"), and `publish_review` refuses it without one. A closing hint
   line says why the sending items are grey when the label cannot. Swapping the
   direction disables the sending items, and a running publish disables
   swap. A published comment's card gains a link icon that opens it on the
@@ -629,7 +632,9 @@ In this order, each one small enough to show the owner:
   that is not inside a diff hunk (it should refuse, and the comment should
   land on the file), whether a comment URL from the pending review still
   opens after the submit, and what gh prints when the user already has a
-  pending review on that pull request. Two known gaps: gh calls have no
+  pending review on that pull request, and whether GitHub takes a
+  request for changes that has line threads but no review body (the app
+  sends none). Two known gaps: gh calls have no
   timeout, and a submit whose answer is lost is reported as a failure
   although the review may have landed - the next publish then posts the
   comments a second time.

@@ -66,6 +66,19 @@ pub enum Verdict {
     /// Comments only; says nothing about merging.
     Comment,
     Approve,
+    /// Blocks the merge until answered. Only ever sent with comments: a
+    /// refusal that does not say what to change helps nobody.
+    RequestChanges,
+}
+
+impl Verdict {
+    /// The review must carry at least one comment to be sent at all.
+    pub fn needs_comments(self) -> bool {
+        match self {
+            Verdict::Comment | Verdict::RequestChanges => true,
+            Verdict::Approve => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -398,7 +411,9 @@ pub struct Outcome {
     reacted: Vec<(String, ReactionKind)>,
     /// Comments the forge would not take; they stay unpublished.
     pub refused: usize,
-    pub approved: bool,
+    /// The verdict the forge took, when the review carried one beyond its
+    /// comments: an approval or a request for changes.
+    pub verdict: Option<Verdict>,
     /// The first failure, in the forge's words.
     pub error: Option<String>,
 }
@@ -424,7 +439,7 @@ impl Outcome {
     /// Whether the edits and reactions may follow. Not behind a failed
     /// review: one click never half-publishes around it.
     pub fn review_landed(&self) -> bool {
-        self.error.is_none() || !self.published.is_empty() || self.approved
+        self.error.is_none() || !self.published.is_empty() || self.verdict.is_some()
     }
 
     /// Folds a later step's outcome into this one; the first error stays.
@@ -433,7 +448,7 @@ impl Outcome {
         self.edited.extend(later.edited);
         self.reacted.extend(later.reacted);
         self.refused += later.refused;
-        self.approved |= later.approved;
+        self.verdict = self.verdict.or(later.verdict);
         if self.error.is_none() {
             self.error = later.error;
         }
@@ -454,13 +469,20 @@ pub fn publish(forge: &dyn Forge, pull: &PullRequest, plan: &Plan) -> Outcome {
 /// First step: the review with its comments and verdict, in one call.
 pub fn publish_review(forge: &dyn Forge, pull: &PullRequest, plan: &Plan) -> Outcome {
     let mut outcome = Outcome::default();
-    let approve = plan.review.verdict == Verdict::Approve;
-    if !approve && plan.review.comments.is_empty() {
+    let verdict = plan.review.verdict;
+    if verdict.needs_comments() && plan.review.comments.is_empty() {
+        // The menu never offers this; a caller that asks anyway hears why
+        // instead of seeing a silent nothing.
+        if verdict == Verdict::RequestChanges {
+            outcome.error =
+                Some("requesting changes needs at least one new comment to publish".into());
+        }
         return outcome;
     }
+    let landed = (verdict != Verdict::Comment).then_some(verdict);
     match forge.submit_review(pull, &plan.review) {
         Ok(postings) if postings.len() == plan.comments.len() => {
-            outcome.approved = approve;
+            outcome.verdict = landed;
             for ((id, body), posting) in plan.comments.iter().zip(postings) {
                 match posting {
                     Posting::Posted(posted) => {
@@ -482,7 +504,7 @@ pub fn publish_review(forge: &dyn Forge, pull: &PullRequest, plan: &Plan) -> Out
                 postings.len(),
                 plan.comments.len()
             ));
-            outcome.approved = approve;
+            outcome.verdict = landed;
         }
         Err(error) => outcome.error = Some(error.to_string()),
     }
@@ -927,7 +949,7 @@ mod tests {
         let forge = FakeForge::default();
         let outcome = publish(&forge, &pull(), &plan_all(&set));
         assert_eq!(outcome.error, None);
-        assert!(!outcome.approved);
+        assert_eq!(outcome.verdict, None);
         assert!(set.mine.record(&outcome));
         let published = set.mine.comments[0].published.clone().unwrap();
         assert_eq!(
@@ -1042,9 +1064,55 @@ mod tests {
         assert!(!plan.is_empty());
         let forge = FakeForge::default();
         let outcome = publish(&forge, &pull(), &plan);
-        assert!(outcome.approved);
+        assert_eq!(outcome.verdict, Some(Verdict::Approve));
         assert_eq!(forge.calls(), vec!["review Approve x0"]);
         assert!(!set.mine.record(&outcome));
+    }
+
+    #[test]
+    fn requesting_changes_carries_its_comments() {
+        let mut set = reviews();
+        set.mine
+            .add_comment(comment("src/a.rs", 1, "this must change"));
+        let plan = plan(
+            &set,
+            &Oid::new(HEAD),
+            Verdict::RequestChanges,
+            true,
+            shifted(0),
+        );
+        let forge = FakeForge::default();
+        let outcome = publish(&forge, &pull(), &plan);
+        assert_eq!(outcome.verdict, Some(Verdict::RequestChanges));
+        assert_eq!(outcome.error, None);
+        assert_eq!(forge.calls(), vec!["review RequestChanges x1"]);
+        assert!(set.mine.record(&outcome));
+    }
+
+    #[test]
+    fn requesting_changes_without_a_new_comment_is_refused_unsent() {
+        let mut set = reviews();
+        // An edit and a reaction are owed, but no comment is new.
+        let id = set.mine.add_comment(comment("src/a.rs", 1, "one"));
+        set.mine
+            .record(&publish(&FakeForge::default(), &pull(), &plan_all(&set)));
+        set.mine.edit_comment(&id, "edited".into());
+        set.mine.toggle_reaction(&id, ReactionKind::Seen);
+
+        let plan = plan(
+            &set,
+            &Oid::new(HEAD),
+            Verdict::RequestChanges,
+            true,
+            shifted(0),
+        );
+        let forge = FakeForge::default();
+        let outcome = publish(&forge, &pull(), &plan);
+        assert_eq!(outcome.verdict, None);
+        assert!(outcome.error.as_deref().unwrap().contains("new comment"));
+        // Nothing went out, the owed edit and reaction included: they are
+        // not what the reviewer clicked for.
+        assert!(forge.calls().is_empty());
     }
 
     #[test]
@@ -1054,7 +1122,7 @@ mod tests {
         let plan = plan(&set, &Oid::new(HEAD), Verdict::Approve, true, shifted(0));
         let forge = FakeForge::default();
         let outcome = publish(&forge, &pull(), &plan);
-        assert!(outcome.approved);
+        assert_eq!(outcome.verdict, Some(Verdict::Approve));
         assert_eq!(forge.calls(), vec!["review Approve x1"]);
         assert_eq!(outcome.done().comments, 1);
     }
