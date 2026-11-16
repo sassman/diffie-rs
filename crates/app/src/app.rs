@@ -1661,10 +1661,10 @@ impl ReviewApp {
         // hides them instead of dying silently: first the earlier-comments
         // toggle, then - like a search hit outside the view - the scope.
         if stops.is_empty() && !self.show_other_revisions {
-            self.show_other_revisions = true;
+            self.set_other_revisions(true, cx);
             stops = self.comment_stops();
             if stops.is_empty() {
-                self.show_other_revisions = false;
+                self.set_other_revisions(false, cx);
             }
         }
         if stops.is_empty() {
@@ -1974,7 +1974,42 @@ impl ReviewApp {
     }
 
     fn toggle_other_revisions(&mut self, cx: &mut Context<Self>) {
-        self.show_other_revisions = !self.show_other_revisions;
+        self.set_other_revisions(!self.show_other_revisions, cx);
+    }
+
+    /// Flip the earlier-comments toggle. Orphan snippet files exist only
+    /// while it is on, and `set_files` resets the viewport, so the top line
+    /// is put back - the toggle must not lose the reader's place.
+    fn set_other_revisions(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.show_other_revisions == on {
+            return;
+        }
+        self.show_other_revisions = on;
+        if !self.orphan_files.is_empty() {
+            let orphans: HashSet<&str> = self
+                .orphan_files
+                .iter()
+                .map(|file| file.path().as_ref())
+                .collect();
+            let state = self.diff.read(cx);
+            let top = state.top_line();
+            let mut files: Vec<DiffFile> = state
+                .files()
+                .iter()
+                .filter(|file| !orphans.contains(file.path().as_ref()))
+                .cloned()
+                .collect();
+            if on {
+                files.extend(self.orphan_files.iter().cloned());
+                files.sort_by(|a, b| tree_order(a.path().as_ref(), b.path().as_ref()));
+            }
+            self.diff.update(cx, |state, cx| {
+                state.set_files(files, cx);
+                if let Some(top) = top {
+                    state.scroll_to_line(top, cx);
+                }
+            });
+        }
         cx.notify();
     }
 
