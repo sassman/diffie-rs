@@ -13,6 +13,9 @@ path = "src/main.rs"
 [dependencies]
 diffie-core.workspace = true
 gpui-kit.workspace = true
+serde.workspace = true
+toml.workspace = true
+dirs-lite.workspace = true
 # Decodes the embedded window icon. `WindowOptions::icon` wants this crate's
 # `RgbaImage` and neither Kit nor GPUI re-exports the crate, so we name it
 # ourselves; `0.25` unifies with GPUI's own requirement instead of pulling a
@@ -41,3 +44,6 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSObject",
     "NSString",
 ] }
+
+[dev-dependencies]
+tempfile = "3"

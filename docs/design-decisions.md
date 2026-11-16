@@ -564,3 +564,29 @@ Ask the owner; do not decide these silently.
     remains a placeholder.
 12. **Scale.** The commit picker is not virtualized (the file panel is).
     Fine for dozens, not for thousands.
+
+## 17. User settings
+
+Decided (owner, 2026-11-16):
+
+- Machine-wide settings live in one TOML file under the user's config
+  directory: `~/.config/diffie/settings.toml` on Linux and macOS alike
+  (`dirs-lite` with `favor-xdg-style`; Windows: `%APPDATA%\diffie`).
+  Distinct from the review files, which travel with the reviewed
+  repository and are shared.
+- TOML over KDL, for the mature serde support - the same call the review
+  file made.
+- Stored so far: the manual split-or-unified choice (the narrow-window
+  fallback is a fallback, never stored) and the window's windowed bounds
+  in global coordinates - position, size, and through the origin the
+  screen. Maximized and fullscreen keep the last windowed bounds instead
+  of overwriting them.
+- Missing or unreadable settings are the defaults, logged, never fatal.
+  Unknown keys are ignored and missing ones default, so older and newer
+  builds share the file.
+
+Assumed:
+
+- Writes coalesce behind a half-second pause (a window drag reports every
+  frame) and run in a background task, like the review file's.
+- Panel width and other layout details join the file as the need shows.

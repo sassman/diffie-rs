@@ -15,6 +15,8 @@ use diffie_core::review::{
     ReviewState, Side, as_prompt, map_line, place,
 };
 use diffie_core::search::{SearchHit, search_patch};
+
+use crate::settings::{LayoutMode, Settings, WindowSettings};
 use diffie_core::time::ago;
 use diffie_core::{
     BlameLine, ChangedRegion, Commit, Comparison, FileState, FileStatus, FileSummary, NewSide, Oid,
@@ -50,7 +52,7 @@ use gpui_kit::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClipboardItem, Context,
     ElementId, Entity, FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
     KeyBinding, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, WeakEntity, Window, deferred, div,
+    Styled as _, Subscription, Task, WeakEntity, Window, WindowBounds, deferred, div,
     prelude::FluentBuilder as _, px, rgb,
 };
 
@@ -132,6 +134,10 @@ const REVIEW: Option<&str> = Some("Review");
 /// marker - three seconds from verdict to quiet.
 const FOLD_GRACE: std::time::Duration = std::time::Duration::from_millis(2500);
 const FOLD_FADE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The pause before a settings write, long enough to turn a window
+/// drag's stream of bounds into one write.
+const SETTINGS_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// The application's themes, embedded so every platform ships them. The
 /// owner's default dark theme is Gruvbox; Midnight is the mockup's palette.
@@ -813,6 +819,11 @@ pub struct ReviewApp {
     /// The reviewer's own split-or-unified choice. The view falls back to
     /// Unified while the window is too narrow for a split, without losing it.
     manual_mode: DiffMode,
+    /// The machine-wide settings file's state, kept current and written
+    /// behind `persist_settings`'s coalescing delay.
+    settings: Settings,
+    settings_pending: bool,
+    settings_running: bool,
     /// Soft-wrap long lines instead of scrolling the diff horizontally.
     wrap: bool,
     /// Hide changes in amount of whitespace. The diff is rebuilt with
@@ -914,6 +925,7 @@ impl ReviewApp {
         repository: SharedString,
         worktree: Option<SharedString>,
         comparison: Comparison,
+        settings: Settings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -922,12 +934,35 @@ impl ReviewApp {
             None => format!("{repository} — review"),
         });
         Theme::change(ThemeMode::Dark, Some(window), cx);
-        let diff = cx.new(|cx| DiffState::new([], cx).with_mode(DiffMode::Split));
+        let mode = match settings.mode {
+            Some(LayoutMode::Unified) => DiffMode::Unified,
+            _ => DiffMode::Split,
+        };
+        let diff = cx.new(|cx| DiffState::new([], cx).with_mode(mode));
         let picker_query =
             cx.new(|cx| InputState::new(window, cx).placeholder("Message, hash or author"));
         let search_query =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search the changeset"));
         let subscriptions = vec![
+            // Fires on every move and resize tick; the settings writer
+            // coalesces behind its delay. Maximized and fullscreen report
+            // their restore bounds, which would overwrite the remembered
+            // windowed ones, so only windowed bounds are taken.
+            cx.observe_window_bounds(window, |this, window, cx| {
+                let WindowBounds::Windowed(bounds) = window.window_bounds() else {
+                    return;
+                };
+                let window = WindowSettings {
+                    x: f32::from(bounds.origin.x),
+                    y: f32::from(bounds.origin.y),
+                    width: f32::from(bounds.size.width),
+                    height: f32::from(bounds.size.height),
+                };
+                if this.settings.window != Some(window) {
+                    this.settings.window = Some(window);
+                    this.persist_settings(cx);
+                }
+            }),
             cx.observe(&diff, |_, _, cx| cx.notify()),
             cx.subscribe(&diff, |this, _, event: &DiffEvent, cx| {
                 if let DiffEvent::SelectionChanged(Some(range)) = event {
@@ -970,7 +1005,10 @@ impl ReviewApp {
             review_path: PathBuf::new(),
             placed: Vec::new(),
             diff,
-            manual_mode: DiffMode::Split,
+            manual_mode: mode,
+            settings,
+            settings_pending: false,
+            settings_running: false,
             wrap: false,
             ignore_whitespace: false,
             comment_cursor: None,
@@ -1780,6 +1818,50 @@ impl ReviewApp {
     fn set_manual_mode(&mut self, mode: DiffMode, cx: &mut Context<Self>) {
         self.manual_mode = mode;
         self.diff.update(cx, |state, cx| state.set_mode(mode, cx));
+        let stored = match mode {
+            DiffMode::Unified => LayoutMode::Unified,
+            _ => LayoutMode::Split,
+        };
+        if self.settings.mode != Some(stored) {
+            self.settings.mode = Some(stored);
+            self.persist_settings(cx);
+        }
+    }
+
+    /// Settings writes ride the review file's pattern - a dirty flag and
+    /// one writer - plus a pause before each write, because a window drag
+    /// reports every frame and the file deserves one write per gesture,
+    /// not one per pixel. The state is read after the pause, so the write
+    /// carries the newest of everything.
+    fn persist_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_pending = true;
+        self.write_settings(cx);
+    }
+
+    fn write_settings(&mut self, cx: &mut Context<Self>) {
+        if self.settings_running || !self.settings_pending {
+            return;
+        }
+        self.settings_running = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SETTINGS_DELAY).await;
+            let Ok(settings) = this.update(cx, |this, _| {
+                this.settings_pending = false;
+                this.settings.clone()
+            }) else {
+                return;
+            };
+            let result = cx.background_spawn(async move { settings.save() }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.settings_running = false;
+                if let Err(error) = result {
+                    this.notice = Some(format!("settings not saved: {error}").into());
+                    cx.notify();
+                }
+                this.write_settings(cx);
+            });
+        })
+        .detach();
     }
 
     fn toggle_mode(&mut self, cx: &mut Context<Self>) {

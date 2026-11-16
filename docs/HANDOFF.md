@@ -61,6 +61,7 @@ Be exact about this when you report further work.
 | Jump-back and forward (Cmd/Ctrl+[ and ]): the two stacks, the exact restore, the hint-bar entry and the Go > Back and Forward items | The Kit's `scroll_to_top_line`/`top_line` round trip is covered by a Kit integration test (`scroll_to_top_line_restores_what_top_line_read`); the app side compiled, clippy-clean, not seen on screen - the window was not run |
 | Other-revision cards keeping the full actions row, Edit and Delete disabled with explaining tooltips | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
+| User settings (`settings.rs`): split/unified and window bounds persisted to `~/.config/diffie/settings.toml`, restored at startup | Round trip, defaults on missing or broken files and future-key tolerance are unit-tested; the live flow (bounds observer, coalesced writes, startup placement) compiled, clippy-clean, not seen on screen - the window was not run |
 
 ## Build, run, test
 
@@ -126,6 +127,8 @@ crates/core/tests/git_cli.rs  backend tests against a throwaway repository
 crates/app/src/
   main.rs                     arguments, window
   app.rs                      ReviewApp: all state, loading, rendering
+  settings.rs                 machine-wide settings (~/.config/diffie),
+                              TOML; layout mode and window bounds
 assets/                       brand mark (logo.svg) and app icon (icon.svg)
 docs/
   design-decisions.md         product behaviour, with Decided/Assumed/Open
@@ -501,7 +504,7 @@ Not implemented or not possible, against the mockup and the design document:
 | Selections inside a line | Design question 7 |
 | "Branch has moved since this review" warning | Header data is stored |
 | Importing a colleague's file from the UI | Works by dropping the file in the folder |
-| Persisted window and UI settings | Layout choice and panel width live only in the session |
+| Persisted panel width | The split/unified choice and the window's bounds persist in `~/.config/diffie/settings.toml` (design document section 17; `settings.rs`); panel width still lives only in the session |
 | "File N of M · change x of y" following the viewport | The Diff exposes no viewport position; the file part follows the current file, the change part is absent |
 
 ## Suggested next steps

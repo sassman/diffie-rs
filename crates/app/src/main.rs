@@ -1,10 +1,13 @@
 mod app;
+mod settings;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use diffie_core::{CompareMode, Comparison, GitCli, ReviewBackend as _};
-use gpui_kit::{AppContext as _, WindowBounds, WindowOptions, component::TitleBar, px, size};
+use gpui_kit::{
+    AppContext as _, Bounds, WindowBounds, WindowOptions, component::TitleBar, point, px, size,
+};
 
 const USAGE: &str = "\
 Usage: diffie [-C <path>] [<revision> [<revision>]] [--every-difference]
@@ -510,8 +513,20 @@ fn main() {
                     ),
                 }
             }
+            // The remembered place and size, in global coordinates, so the
+            // window also returns to the screen it was left on; first runs
+            // center a default. A remembered screen that is gone leaves
+            // the window to the OS's own clamping.
+            let settings = settings::load();
+            let window_bounds = match settings.window {
+                Some(window) => WindowBounds::Windowed(Bounds::new(
+                    point(px(window.x), px(window.y)),
+                    size(px(window.width), px(window.height)),
+                )),
+                None => WindowBounds::centered(size(px(1440.), px(900.)), cx),
+            };
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(1440.), px(900.)), cx)),
+                window_bounds: Some(window_bounds),
                 window_min_size: Some(size(px(900.), px(560.))),
                 app_id: Some("diff-review".into()),
                 icon,
@@ -534,6 +549,7 @@ fn main() {
                         name.into(),
                         worktree.map(Into::into),
                         comparison,
+                        settings,
                         window,
                         cx,
                     )
