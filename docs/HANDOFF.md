@@ -58,6 +58,7 @@ Be exact about this when you report further work.
 | Navigation focus marker and viewport re-anchoring for `]`/`[`/`n`/`p` | Marking, stepping from a visible mark and viewport re-anchoring are covered by a Kit integration test (`change_keys_mark_the_reached_group_and_step_from_a_visible_mark`); the comment-jump mirror compiles and is clippy-clean; not seen on screen - the window was not run |
 | Archive action on own comments: `take_comment` + `ArchiveFile::append` in the core, Archive button and background write in the app | Core rules covered by unit tests (move out of the live file, append dedupe, invisibility to discovery and `--reply`); the button and the write flow compiled, clippy-clean, not seen on screen - the window was not run |
 | `r` ticking the file the focus mark is in after `]`/`[` (`follow_mark` pulls `current_file` from the Kit's mark; `n`/`p` and search jumps already set it) | Compiled, clippy-clean; not seen on screen - the window was not run |
+| Jump-back and forward (Cmd/Ctrl+[ and ]): the two stacks, the exact restore, the hint-bar entry and the Go > Back and Forward items | The Kit's `scroll_to_top_line`/`top_line` round trip is covered by a Kit integration test (`scroll_to_top_line_restores_what_top_line_read`); the app side compiled, clippy-clean, not seen on screen - the window was not run |
 
 ## Build, run, test
 
@@ -418,8 +419,22 @@ actually exercised):
   clear on the next success; the full-screen `error` page is reserved for
   load failures.
 - Shortcuts: `]` `[` `}` `{` `s` `o` `t` `n` `p` `1` `2` `3` `zM` `zR` `c`
-  `r`, Escape, Cmd/Ctrl+Enter, Cmd/Ctrl+R, Cmd/Ctrl+Q, Space in the commit
-  list.
+  `r`, Escape, Cmd/Ctrl+Enter, Cmd/Ctrl+R, Cmd/Ctrl+Q, Cmd/Ctrl+[ and ],
+  Space in the commit list.
+- Jump-back and forward: Cmd/Ctrl+[ and Cmd/Ctrl+] (also Go > Back and
+  Forward, and a status-bar hint) walk the jump history. Every jump -
+  change keys, `n`/`p`, the file stepper, tree clicks,
+  `reveal_first_comment`, search hits - calls `remember_position` before
+  scrolling, which pushes the viewport's top row (`top_line`) onto
+  `back_stack` and clears `forward_stack` (forward dies with new
+  navigation, as in a browser); plain scrolling pushes nothing, so the
+  spot being read before an accidental jump is what comes back.
+  `step_history` pops one stack and pushes the page being left onto the
+  other, skips entries whose file left the comparison, restores with the
+  Kit's `scroll_to_top_line` (the exact counterpart of `top_line`;
+  centering `scroll_to_line` would land half a viewport off) and sets
+  `current_file` so `r` acts on the restored page. The stacks survive
+  reloads and are capped at 100.
 - Navigation focus marker: `]`/`[` and `n`/`p` mark where they land (the
   Kit fork's focus marker - a primary edge bar, a translucent wash and a
   tinted gutter on the marked rows -
@@ -495,9 +510,11 @@ In this order, each one small enough to show the owner:
   `Cargo.toml` names the current branch, each branch stacking on the last:
   `bulk-file-collapse` (`set_files_collapsed`, one rebuild for any number
   of files), `split-panel-scroll` (per-panel horizontal scrolling),
-  `pinned-file-headers`, and `folded-ranges` (`DiffFold` +
+  `pinned-file-headers`, `folded-ranges` (`DiffFold` +
   `DiffState::set_folds`, the labeled click-to-reveal rows the moved-code
-  feature renders). Drop the patch when upstream ships them.
+  feature renders), and `scroll_to_top_line` (the exact counterpart of
+  `top_line`, which the jump-back restore rides on). Drop the patch when
+  upstream ships them.
 - **Moved-code folds.** `diffie_core::moved::moved_blocks(&patch.text)`
   pairs whole verbatim-moved runs - a complete removal run whose full
   content reappears as a complete addition run (exact match, at least 20

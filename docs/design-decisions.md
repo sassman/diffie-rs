@@ -287,8 +287,7 @@ it landed); a click reveals the lines, another folds them back (owner,
 edit worth seeing - and needs at least 20 alphanumeric characters, the
 `git --color-moved` bar that keeps lone braces from pairing up. Moves
 with edits in flight stay ordinary removals and additions for now; the
-SemanticDiff-style "show only the in-flight edits" view is future work.
-## 8. Layout
+SemanticDiff-style "show only the in-flight edits" view is future work.## 8. Layout
 
 Decided: each split panel is half the window and scrolls its long lines on
 its own (owner, 2026-11-12; the Kit strip that scrolled both as one canvas
@@ -478,6 +477,15 @@ Assumed key map (the mockup's hint bar):
 | Cmd/Ctrl+K | command palette |
 
 Single-letter keys must never fire while the reviewer types in a comment box.
+
+Decided (owner, 2026-11-16): Cmd/Ctrl+[ goes back to the position the last
+jump left, and Cmd/Ctrl+] forward again, as in editors and browsers. Every
+jump - change keys, comment walk, file stepper, tree click, search hit -
+remembers the page it tears the reader away from, by its top row; plain
+scrolling remembers nothing, so an accidental `n` off a scrolled-to spot
+still comes back to it. The restore is exact (the page's top row returns to
+the top, not the viewport's middle), repeated presses walk further, and a
+fresh jump clears the forward trail, as in a browser.
 
 ## 14. Per-file commit stepper
 

@@ -77,6 +77,8 @@ mod commands {
             CancelDraft,
             SubmitDraft,
             MarkReviewed,
+            JumpBack,
+            JumpForward,
             Refresh,
             Quit
         ]
@@ -105,6 +107,8 @@ mod commands {
             MenuPreviousFile,
             MenuNextComment,
             MenuPreviousComment,
+            MenuJumpBack,
+            MenuJumpForward,
             MenuScopeNewForMe,
             MenuScopeWholeBranch,
             MenuScopeCustom
@@ -161,10 +165,10 @@ pub fn init(cx: &mut App) {
     });
 
     let is_mac = cx.platform_info().is_mac();
-    let (submit, refresh, quit) = if is_mac {
-        ("cmd-enter", "cmd-r", "cmd-q")
+    let (submit, refresh, quit, back, forward) = if is_mac {
+        ("cmd-enter", "cmd-r", "cmd-q", "cmd-[", "cmd-]")
     } else {
-        ("ctrl-enter", "ctrl-r", "ctrl-q")
+        ("ctrl-enter", "ctrl-r", "ctrl-q", "ctrl-[", "ctrl-]")
     };
     cx.bind_keys([
         KeyBinding::new("]", NextChange, DIFF),
@@ -183,6 +187,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("r", MarkReviewed, DIFF),
         KeyBinding::new("n", NextComment, DIFF),
         KeyBinding::new("p", PreviousComment, DIFF),
+        KeyBinding::new(back, JumpBack, DIFF),
+        KeyBinding::new(forward, JumpForward, DIFF),
         KeyBinding::new("/", OpenSearch, DIFF),
         KeyBinding::new("space", PickerToggle, Some("CommitList")),
         KeyBinding::new("escape", CancelDraft, REVIEW),
@@ -247,6 +253,9 @@ fn install_menus(cx: &mut App) {
             MenuItem::action("Previous file", MenuPreviousFile),
             MenuItem::action("Next comment", MenuNextComment),
             MenuItem::action("Previous comment", MenuPreviousComment),
+            MenuItem::separator(),
+            MenuItem::action("Back", MenuJumpBack),
+            MenuItem::action("Forward", MenuJumpForward),
             MenuItem::separator(),
             MenuItem::action("New for me", MenuScopeNewForMe),
             MenuItem::action("Whole branch", MenuScopeWholeBranch),
@@ -785,6 +794,12 @@ pub struct ReviewApp {
     /// The comment `n`/`p` last jumped to, so the walk continues from
     /// there instead of restarting at the top.
     comment_cursor: Option<String>,
+    /// Pages left behind by jumps, each keyed by its top row, newest last.
+    /// Cmd/Ctrl+[ pops back through them; plain scrolling never pushes.
+    back_stack: Vec<DiffLinePosition>,
+    /// Pages left by going back, so Cmd/Ctrl+] retraces them. A fresh
+    /// jump clears it: forward dies with new navigation, as in a browser.
+    forward_stack: Vec<DiffLinePosition>,
     search_open: bool,
     search_query: Entity<InputState>,
     /// Extend the search past the picked commits to the whole branch.
@@ -926,6 +941,8 @@ impl ReviewApp {
             wrap: false,
             ignore_whitespace: false,
             comment_cursor: None,
+            back_stack: Vec::new(),
+            forward_stack: Vec::new(),
             search_open: false,
             search_query,
             search_all: false,
@@ -1423,6 +1440,7 @@ impl ReviewApp {
         };
         let side = diff_side(placed.side);
         let position = DiffLinePosition::new(placed.path.clone(), side, placed.line);
+        self.remember_position(cx);
         self.diff
             .update(cx, |state, cx| state.scroll_to_line(position, cx));
         self.current_file = Some(path.clone());
@@ -1556,6 +1574,7 @@ impl ReviewApp {
         let side = diff_side(side);
         self.comment_cursor = Some(id);
         let path = SharedString::from(path);
+        self.remember_position(cx);
         self.diff.update(cx, |state, cx| {
             state.set_file_collapsed(&path, false, cx);
             // The focus marker shows where the jump landed, as the change
@@ -1565,6 +1584,78 @@ impl ReviewApp {
         });
         self.current_file = Some(path);
         cx.notify();
+    }
+
+    /// Every jump calls this before it scrolls: the page being left goes
+    /// onto the back stack, so an accidental `n` or `]` - or any jump off
+    /// a spot reached by plain scrolling - can be taken back. The spot a
+    /// jump lands on is remembered only when the next jump leaves it, so
+    /// the stack holds pages the reader was at, not every stop passed.
+    fn remember_position(&mut self, cx: &mut Context<Self>) {
+        // A fresh jump orphans the forward trail, as in a browser: forward
+        // only ever retraces back steps.
+        self.forward_stack.clear();
+        if let Some(top) = self.diff.read(cx).top_line() {
+            Self::push_page(&mut self.back_stack, top);
+        }
+    }
+
+    /// Newest page last, deduped against the top. Bounded so a day-long
+    /// review cannot grow a stack without end; nobody steps back a
+    /// hundred times.
+    fn push_page(stack: &mut Vec<DiffLinePosition>, page: DiffLinePosition) {
+        if stack.last() == Some(&page) {
+            return;
+        }
+        stack.push(page);
+        if stack.len() > 100 {
+            stack.remove(0);
+        }
+    }
+
+    /// Cmd/Ctrl+[: return to the page the last jump tore the reader away
+    /// from, exactly as it stood (the Kit's `scroll_to_top_line` restores
+    /// what `top_line` read). The page being left goes onto the forward
+    /// stack, so Cmd/Ctrl+] retraces the steps.
+    fn jump_back(&mut self, cx: &mut Context<Self>) {
+        self.step_history(true, cx);
+    }
+
+    fn jump_forward(&mut self, cx: &mut Context<Self>) {
+        self.step_history(false, cx);
+    }
+
+    /// Pops `back`'s stack and pushes the page being left onto the other,
+    /// so the two keys walk one history. Entries whose file left the
+    /// comparison are skipped, never guessed at; `current_file` follows
+    /// so `r` acts on the page come back to.
+    fn step_history(&mut self, back: bool, cx: &mut Context<Self>) {
+        let top = self.diff.read(cx).top_line();
+        let paths: Vec<SharedString> = self
+            .diff
+            .read(cx)
+            .files()
+            .iter()
+            .map(|file| file.path().clone())
+            .collect();
+        let (from, to) = if back {
+            (&mut self.back_stack, &mut self.forward_stack)
+        } else {
+            (&mut self.forward_stack, &mut self.back_stack)
+        };
+        while let Some(position) = from.pop() {
+            if !paths.iter().any(|path| path == position.path()) {
+                continue;
+            }
+            if let Some(top) = top.clone() {
+                Self::push_page(to, top);
+            }
+            self.current_file = Some(position.path().clone());
+            self.diff
+                .update(cx, |state, cx| state.scroll_to_top_line(position, cx));
+            cx.notify();
+            return;
+        }
     }
 
     /// `r` and the file stepper act on `current_file`, but a change key
@@ -1579,6 +1670,7 @@ impl ReviewApp {
     }
 
     fn reveal_file(&mut self, path: SharedString, cx: &mut Context<Self>) {
+        self.remember_position(cx);
         self.diff.update(cx, |state, cx| {
             let was = state.is_file_collapsed(&path);
             state.set_file_collapsed(&path, false, cx);
@@ -2038,6 +2130,7 @@ impl ReviewApp {
     fn show_hit(&mut self, path: &str, side: Side, line: usize, cx: &mut Context<Self>) {
         let side = diff_side(side);
         let path = SharedString::from(path.to_string());
+        self.remember_position(cx);
         self.diff.update(cx, |state, cx| {
             state.set_file_collapsed(&path, false, cx);
             // A line inside a moved-code fold has no row until the fold is
@@ -4138,6 +4231,11 @@ impl ReviewApp {
         let muted = cx.theme().muted_foreground;
         let mono = cx.theme().mono_font_family.clone();
         // Only shortcuts that exist; each new binding earns its hint here.
+        let back = if cx.platform_info().is_mac() {
+            "⌘[ ⌘]"
+        } else {
+            "ctrl [ ]"
+        };
         let hints: &[(&str, &str)] = &[
             ("] [", "change"),
             ("} {", "file"),
@@ -4145,6 +4243,7 @@ impl ReviewApp {
             ("r", "mark reviewed"),
             ("c", "comment"),
             ("n p", "comments"),
+            (back, "back, forward"),
             ("/", "search"),
             ("s", "split / unified"),
             ("o", "earlier comments"),
@@ -4796,6 +4895,7 @@ impl Render for ReviewApp {
                 },
             ))
             .on_action(cx.listener(|this, _: &NextChange, _, cx| {
+                this.remember_position(cx);
                 this.diff.update(cx, |state, cx| state.next_change(cx));
                 this.follow_mark(cx);
             }))
@@ -4807,6 +4907,7 @@ impl Render for ReviewApp {
                 this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PreviousChange, _, cx| {
+                this.remember_position(cx);
                 this.diff.update(cx, |state, cx| state.previous_change(cx));
                 this.follow_mark(cx);
             }))
@@ -4865,6 +4966,8 @@ impl Render for ReviewApp {
                     this.set_reviewed(&path, true, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &JumpBack, _, cx| this.jump_back(cx)))
+            .on_action(cx.listener(|this, _: &JumpForward, _, cx| this.jump_forward(cx)))
             .on_action(cx.listener(|this, _: &Refresh, _, cx| this.reload(cx)))
             .on_action(|_: &Quit, _, cx| cx.quit())
             // The menu stand-ins (see `commands`) reuse the shortcut
@@ -4886,13 +4989,17 @@ impl Render for ReviewApp {
                 this.toggle_other_revisions(cx)
             }))
             .on_action(cx.listener(|this, _: &MenuNextChange, _, cx| {
+                this.remember_position(cx);
                 this.diff.update(cx, |state, cx| state.next_change(cx));
                 this.follow_mark(cx);
             }))
             .on_action(cx.listener(|this, _: &MenuPreviousChange, _, cx| {
+                this.remember_position(cx);
                 this.diff.update(cx, |state, cx| state.previous_change(cx));
                 this.follow_mark(cx);
             }))
+            .on_action(cx.listener(|this, _: &MenuJumpBack, _, cx| this.jump_back(cx)))
+            .on_action(cx.listener(|this, _: &MenuJumpForward, _, cx| this.jump_forward(cx)))
             .on_action(cx.listener(|this, _: &MenuNextFile, _, cx| this.move_file(1, cx)))
             .on_action(cx.listener(|this, _: &MenuPreviousFile, _, cx| this.move_file(-1, cx)))
             .on_action(cx.listener(|this, _: &MenuNextComment, _, cx| this.jump_comment(true, cx)))
