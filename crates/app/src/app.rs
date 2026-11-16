@@ -11,8 +11,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use diffie_core::review::{
-    NewComment, Placement, ReactionKind, ReviewFile, ReviewInput, ReviewSet, ReviewState, Side,
-    as_prompt, map_line, place,
+    ArchiveFile, NewComment, Placement, ReactionKind, ReviewFile, ReviewInput, ReviewSet,
+    ReviewState, Side, as_prompt, map_line, place,
 };
 use diffie_core::search::{SearchHit, search_patch};
 use diffie_core::time::ago;
@@ -2196,6 +2196,45 @@ impl ReviewApp {
         }
     }
 
+    /// Move one of the reviewer's own threads into the archive file, out
+    /// of every view for good. The archive write lands first and the live
+    /// file forgets the comment only on its success, so a failed write
+    /// never loses the thread - it stays on screen with a notice instead.
+    fn archive_comment(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(set) = self.reviews.as_ref() else {
+            return;
+        };
+        let Some(taken) = set.mine.clone().take_comment(id) else {
+            return;
+        };
+        let path = ArchiveFile::path_for(&self.review_path);
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    ArchiveFile::append(&path, taken).map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Err(error) => {
+                        this.notice = Some(format!("comment not archived: {error}").into());
+                    }
+                    Ok(()) => {
+                        if let Some(set) = this.reviews.as_mut()
+                            && set.mine.take_comment(&id).is_some()
+                        {
+                            this.placed.retain(|placed| placed.id != id);
+                            this.save_review(cx);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn copy_comment_as_prompt(&self, id: &str, cx: &mut Context<Self>) {
         if let Some(set) = &self.reviews
             && let Some(thread) = set
@@ -4297,6 +4336,16 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
             .on_click(move |_, _, cx| {
                 let _ = owner.update(cx, |this, cx| this.copy_comment_as_prompt(&id, cx));
             }),
+        );
+    }
+    if thread.mine {
+        let (owner, id) = (owner.clone(), id.clone());
+        actions = actions.child(
+            text_button(SharedString::from(format!("archive-{id}")), "Archive")
+                .tooltip("Moves the thread into the archive file, out of every view - no restore")
+                .on_click(move |_, _, cx| {
+                    let _ = owner.update(cx, |this, cx| this.archive_comment(&id, cx));
+                }),
         );
     }
     if thread.mine {

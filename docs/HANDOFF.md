@@ -56,6 +56,7 @@ Be exact about this when you report further work.
 | Removed-file header: danger-coloured name, D badge tooltip with the deleting commit (newest in-scope commit touching the path; plain fallback for a worktree deletion) | Compiled, clippy-clean, core tests pass; not seen on screen - the window was not run |
 | Reload semantics: pinned CLI target across Cmd/Ctrl+R, new commits extending an all-picked custom scope, View > Reload menu item | Compiled, clippy-clean; the one-revision CLI reading (`diffie HEAD~1` = `git diff HEAD~1`) is covered by a core test (`one_revision_reads_like_git_diff`); the reload flow itself not seen on screen - the window was not run |
 | Navigation focus marker and viewport re-anchoring for `]`/`[`/`n`/`p` | Marking, stepping from a visible mark and viewport re-anchoring are covered by a Kit integration test (`change_keys_mark_the_reached_group_and_step_from_a_visible_mark`); the comment-jump mirror compiles and is clippy-clean; not seen on screen - the window was not run |
+| Archive action on own comments: `take_comment` + `ArchiveFile::append` in the core, Archive button and background write in the app | Core rules covered by unit tests (move out of the live file, append dedupe, invisibility to discovery and `--reply`); the button and the write flow compiled, clippy-clean, not seen on screen - the window was not run |
 
 ## Build, run, test
 
@@ -190,6 +191,12 @@ can only expand context that the patch supplies.
 their own file, reactions point at comment ids, `ReviewSet` overlays
 colleagues' files read-only, `place()` positions a comment from a blame, and
 `as_prompt()` renders comments for an AI agent. The TOML format is version 1.
+Archiving (`take_comment` + `ArchiveFile::append`) moves a finished thread
+into `archive/<author>.toml` beside the live file - the `archive/` folder
+keeps it out of colleague discovery, which reads every `*.toml` in the
+review folder. Nothing reads the archive back; the app writes the archive
+first and only then drops the comment from the live file, so a failed
+write never loses the thread.
 
 `pr.rs` is command-line plumbing, not part of `ReviewBackend`: it parses the
 `--pr` value (a number, or a pull-request URL kept verbatim so gh keeps the
@@ -371,7 +378,9 @@ actually exercised):
   generated, unchanged-reviewed and removed files as collapsed headers, `Simple` hunk bands,
   auto-unified when the window is too narrow with the manual choice kept.
 - Comments: cards in the mockup's style with hash and line label, reaction
-  chips and the smile-plus picker, Edit, per-comment Copy as prompt, Delete;
+  chips and the smile-plus picker, Edit, per-comment Copy as prompt, Archive
+  (own comments only: the thread moves into the archive file and out of
+  every view, no restore - `archive_comment`), Delete;
   other-revision comments dashed and quiet. A comment whose code was
   rewritten since follows the rewrite (blame misses, `changed_regions` +
   `map_line` carry it to the replacement) and sits there dashed in the

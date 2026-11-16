@@ -288,7 +288,6 @@ edit worth seeing - and needs at least 20 alphanumeric characters, the
 `git --color-moved` bar that keeps lone braces from pairing up. Moves
 with edits in flight stay ordinary removals and additions for now; the
 SemanticDiff-style "show only the in-flight edits" view is future work.
-
 ## 8. Layout
 
 Decided: each split panel is half the window and scrolls its long lines on
@@ -359,6 +358,13 @@ Decided:
 - The status bar names open comments no row can show ("n not in this
   comparison"), so the open count never promises more than the window
   delivers.
+- Archive, on the reviewer's own comments (owner, 2026-11-16): moves the
+  whole thread - comment plus the owner's reactions and replies - out of
+  the live review file into `archive/<author>.toml` beside it. Final: the
+  app never reads the archive back and there is no restore; the file is
+  only the record. An archived comment is gone from every view, count and
+  prompt, as if it was never written. Colleagues' reactions to it stay in
+  their files and simply stop resolving anything.
 - An open comment is "new for me" by definition: in the New-for-me scope a
   ticked-unchanged file that carries open comments keeps its branch diff
   (header note "no new changes - shown for its open comments") instead of
@@ -383,8 +389,8 @@ Assumed:
 - Each comment stores the commented lines as a snippet, so it stays readable
   after a rebase removes its commit.
 - A comment on a removed line belongs to the commit that removed it.
-- Actions per comment: edit, copy as prompt, delete. Only the author can edit
-  or delete.
+- Actions per comment: edit, copy as prompt, archive, delete. Only the author
+  can edit, archive or delete.
 
 ## 10. Reactions
 

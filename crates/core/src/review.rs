@@ -5,6 +5,8 @@
 //! - A reaction to someone else's comment lives in the reactor's file and
 //!   points at the comment's id.
 //! - Several files are overlaid read-only by [`ReviewSet`].
+//! - Archiving moves a finished thread into [`ArchiveFile`], a cold record
+//!   nothing reads back: the comment leaves every view for good.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -261,13 +263,7 @@ impl ReviewFile {
         self.review.updated = now_rfc3339();
         let text = toml::to_string_pretty(self)
             .map_err(|error| ReviewFileError::Serialize(error.to_string()))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let temporary = path.with_extension("toml.tmp");
-        std::fs::write(&temporary, text)?;
-        std::fs::rename(&temporary, path)?;
-        Ok(())
+        write_atomic(path, &text)
     }
 
     /// `<review_dir>/<source>/<author>.toml`, with both names made file-safe.
@@ -394,6 +390,29 @@ impl ReviewFile {
         self.comments.len() != before
     }
 
+    /// Pull one of the reviewer's own comments out of the live file, with
+    /// the reviewer's own reactions and replies to it, ready for
+    /// [`ArchiveFile::append`]. Returns `None` when the comment is not in
+    /// this file: someone else's thread cannot be archived from here.
+    /// Colleagues' reactions stay in their files and simply stop resolving.
+    pub fn take_comment(&mut self, id: &str) -> Option<ArchivedThread> {
+        let index = self.comments.iter().position(|comment| comment.id == id)?;
+        let comment = self.comments.remove(index);
+        let reactions = self
+            .reactions
+            .extract_if(.., |reaction| reaction.comment == id)
+            .collect();
+        let replies = self
+            .replies
+            .extract_if(.., |reply| reply.comment == id)
+            .collect();
+        Some(ArchivedThread {
+            comment,
+            reactions,
+            replies,
+        })
+    }
+
     /// Add the reaction, or remove it if this reviewer already gave it.
     /// Returns true when the reaction is now present.
     pub fn toggle_reaction(&mut self, comment_id: &str, kind: ReactionKind) -> bool {
@@ -446,6 +465,96 @@ impl ReviewFile {
             })
             .collect()
     }
+}
+
+/// What [`ReviewFile::take_comment`] pulled out: the comment and the
+/// owner's own reactions and replies to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArchivedThread {
+    pub comment: Comment,
+    pub reactions: Vec<Reaction>,
+    pub replies: Vec<Reply>,
+}
+
+/// Comments the reviewer is finished with, moved out of the live review
+/// file. It sits in an `archive/` folder beside the review files, because
+/// discovery treats every `*.toml` in the review folder as a colleague's
+/// review. Nothing reads it back: archiving is final, the file is only
+/// the record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveFile {
+    pub version: u32,
+    #[serde(default, rename = "comment", skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<Comment>,
+    #[serde(default, rename = "reaction", skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<Reaction>,
+    #[serde(default, rename = "reply", skip_serializing_if = "Vec::is_empty")]
+    pub replies: Vec<Reply>,
+}
+
+impl ArchiveFile {
+    /// The archive belonging to a review file: `archive/<author>.toml`
+    /// beside it, derived from the live path so the two can never drift.
+    pub fn path_for(review_path: &Path) -> PathBuf {
+        let name = review_path.file_name().unwrap_or_default();
+        match review_path.parent() {
+            Some(parent) => parent.join("archive").join(name),
+            None => Path::new("archive").join(name),
+        }
+    }
+
+    /// Move `taken` into the archive at `path`: load or start the file,
+    /// add the thread, write atomically. Call before removing the thread
+    /// from the live file, so a failed write never loses it; a comment
+    /// already archived under the same id is replaced, so the retry after
+    /// a crash between the two writes never duplicates.
+    pub fn append(path: &Path, taken: ArchivedThread) -> Result<(), ReviewFileError> {
+        let mut archive = match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let archive: Self =
+                    toml::from_str(&text).map_err(|error| ReviewFileError::Parse {
+                        path: path.to_path_buf(),
+                        message: error.to_string(),
+                    })?;
+                if archive.version != FORMAT_VERSION {
+                    return Err(ReviewFileError::Version {
+                        path: path.to_path_buf(),
+                        found: archive.version,
+                    });
+                }
+                archive
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self {
+                version: FORMAT_VERSION,
+                comments: Vec::new(),
+                reactions: Vec::new(),
+                replies: Vec::new(),
+            },
+            Err(error) => return Err(error.into()),
+        };
+        let id = taken.comment.id.clone();
+        archive.comments.retain(|comment| comment.id != id);
+        archive.reactions.retain(|reaction| reaction.comment != id);
+        archive.replies.retain(|reply| reply.comment != id);
+        archive.comments.push(taken.comment);
+        archive.reactions.extend(taken.reactions);
+        archive.replies.extend(taken.replies);
+        let text = toml::to_string_pretty(&archive)
+            .map_err(|error| ReviewFileError::Serialize(error.to_string()))?;
+        write_atomic(path, &text)
+    }
+}
+
+/// Atomic file write shared by the live review file and the archive: a
+/// crash never leaves a half-written file.
+fn write_atomic(path: &Path, text: &str) -> Result<(), ReviewFileError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("toml.tmp");
+    std::fs::write(&temporary, text)?;
+    std::fs::rename(&temporary, path)?;
+    Ok(())
 }
 
 /// A comment together with who wrote it, every reaction and every reply.
@@ -1164,6 +1273,77 @@ mod tests {
         assert!(mine.edit_comment(&id, "clearer".into()));
         assert!(mine.comments[0].edited.is_some());
         assert!(mine.delete_comment(&id));
+    }
+
+    #[test]
+    fn archiving_moves_the_thread_out_of_the_live_file() {
+        let mut mine = ReviewFile::new("Ada", &resolved());
+        let id = mine.add_comment(comment("a3f9c1e0000", 45));
+        let kept = mine.add_comment(comment("b4e8d2f0000", 9));
+        mine.toggle_reaction(&id, ReactionKind::Seen);
+        mine.add_reply(&id, "fixed in 698c1af", None);
+
+        // Someone else's file cannot give the comment up.
+        let mut theirs = ReviewFile::new("Grace", &resolved());
+        assert_eq!(theirs.take_comment(&id), None);
+
+        let taken = mine.take_comment(&id).unwrap();
+        assert_eq!(taken.comment.id, id);
+        assert_eq!(taken.reactions.len(), 1);
+        assert_eq!(taken.replies.len(), 1);
+        assert_eq!(mine.comments.len(), 1);
+        assert_eq!(mine.comments[0].id, kept);
+        assert!(mine.reactions.is_empty());
+        assert!(mine.replies.is_empty());
+        assert!(mine.take_comment(&id).is_none(), "already taken");
+    }
+
+    #[test]
+    fn the_archive_accumulates_and_never_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive").join("Ada.toml");
+        let mut mine = ReviewFile::new("Ada", &resolved());
+        let first = mine.add_comment(comment("a3f9c1e0000", 45));
+        let second = mine.add_comment(comment("b4e8d2f0000", 9));
+        mine.toggle_reaction(&first, ReactionKind::Done);
+
+        let taken = mine.take_comment(&first).unwrap();
+        ArchiveFile::append(&path, taken.clone()).unwrap();
+        // The retry after a crash between archive and live write.
+        ArchiveFile::append(&path, taken).unwrap();
+        ArchiveFile::append(&path, mine.take_comment(&second).unwrap()).unwrap();
+
+        let archive: ArchiveFile =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(archive.version, FORMAT_VERSION);
+        let ids: Vec<&str> = archive
+            .comments
+            .iter()
+            .map(|comment| comment.id.as_str())
+            .collect();
+        assert_eq!(ids, vec![first.as_str(), second.as_str()]);
+        assert_eq!(archive.reactions.len(), 1);
+    }
+
+    #[test]
+    fn the_archive_is_invisible_to_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let review_dir = dir.path();
+        let mut mine = ReviewFile::new("Ada", &resolved());
+        let id = mine.add_comment(comment("a3f9c1e0000", 45));
+        let live = ReviewFile::path_in(review_dir, "feature", "Ada");
+
+        let archive = ArchiveFile::path_for(&live);
+        assert!(archive.ends_with("feature/archive/Ada.toml"));
+        ArchiveFile::append(&archive, mine.take_comment(&id).unwrap()).unwrap();
+        mine.save(&live).unwrap();
+
+        // The archived comment is gone from the prompt and unaddressable:
+        // as if it was never written.
+        let (_, text) = prompt(review_dir, Some("feature"), true).unwrap();
+        assert_eq!(text, "No open review comments.\n");
+        let error = reply(review_dir, &id[..8], "x", "Claude", None).unwrap_err();
+        assert!(error.to_string().starts_with("No comment starts with"));
     }
 
     #[test]
