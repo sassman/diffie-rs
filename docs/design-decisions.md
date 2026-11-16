@@ -620,10 +620,15 @@ Assumed (working defaults - none of these were spelled out):
 - **When the state is read**: at startup, with every reload (Cmd/Ctrl+R,
   and the reloads a scope change triggers) and after every publish. No
   timer polls the forge.
-- **How it shows**: the menu's first line and the icon's tooltip say it in
-  words ("open · approved · checks failing"); the icon follows the state
-  (open, merged, closed) and turns red only for failing checks or
-  requested changes. A failed refresh keeps the older answer and says so.
+- **How it shows**: the title-bar button reads icon plus number; the
+  icon's shape follows the state (open, merged, closed) and a dot carries
+  the loudest news - red for failing checks or requested changes, amber
+  for running checks, green for passing ones. The menu opens with three
+  fixed rows, State, Review and Checks, each with an icon and a value in
+  its colour; the tooltip says the same in words. A failed refresh keeps
+  the older answer and adds a line saying so.
+- **Menu order**: standing, pages to open, publish, then approve - apart
+  from the rest, because it is the one verdict.
 - **CI verdict**: one failed check makes it failing, even while others
   still run; otherwise one unfinished check makes it running. A check
   word the app does not know counts as running, never as passing.

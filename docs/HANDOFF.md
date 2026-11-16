@@ -136,6 +136,9 @@ crates/core/tests/git_cli.rs  backend tests against a throwaway repository
 crates/app/src/
   main.rs                     arguments, window
   app.rs                      ReviewApp: all state, loading, rendering
+  app/pull.rs                 the connected pull request: its standing,
+                              the title-bar menu, publishing (a child of
+                              `app`, so it reaches ReviewApp's state)
   settings.rs                 machine-wide settings (~/.config/diffie),
                               TOML; layout mode and window bounds
 assets/                       brand mark (logo.svg) and app icon (icon.svg)
@@ -504,14 +507,23 @@ actually exercised):
   the collapsed headers leading the list are not being read - before
   that, `r` did nothing until the reader had navigated somewhere.
 - Pull request (only in a `--pr` review): a pull-request icon leads the
-  title bar's controls (it spins while a publish runs). The icon follows
-  the pull request's state (open, merged, closed) and turns red for
-  failing checks or requested changes; its tooltip and the menu's first
-  line say the standing in words ("#17 open · approved · checks
-  failing"). The menu holds "Open #n in the browser", "Open latest CI
-  run" (disabled without one), "Publish 2 comments, 1 edit" (naming what
+  title bar's controls as icon plus "#17" (it spins while a publish
+  runs). The icon's shape follows the state (open, merged, closed), and a
+  small dot beside the number carries the loudest news: red for failing
+  checks or requested changes, amber for running checks, green for
+  passing ones, none when there is nothing to report (`trigger_tone`; a
+  merely required review never paints it). The tooltip says the standing
+  in words. The menu is the Kit's `PopupMenu` (`dropdown_menu`), read top
+  down the way the reviewer decides: a heading ("#17 · topic going into
+  main"), three status rows that are always there - State, Review, Checks,
+  each an icon and a value in its tone's colour (`status_rows`, `Tone`),
+  "…" until the forge answers - then the pages ("Open pull request",
+  "Open latest CI run", both with the external-link mark; the latter
+  disabled without a run), then "Publish 2 comments, 1 edit" (naming what
   would go, disabled with nothing new), "Approve with ..." and "Approve
-  without comments" (both only for an open pull request). Swapping the
+  without comments" (both only for an open pull request), set apart by
+  separators because the approval is the one verdict. A closing hint
+  line says why the sending items are grey when the label cannot. Swapping the
   direction disables the sending items, and a running publish disables
   swap. A published comment's card gains a link icon that opens it on the
   pull request; edited since, its tooltip says a publish will update it.
