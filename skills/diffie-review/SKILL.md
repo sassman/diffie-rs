@@ -1,111 +1,76 @@
 ---
 name: diffie-review
-description: Drive a code review through the diffie app (native git diff review GUI) and read the review back. Use when asked to review uncommitted changes, a worktree, or a branch before push or merge ("review my changes", "open a review", "review before push/main"), and when asked to read, apply, or address diffie review comments ("address the review", "what did I comment", like a pasted "Copy all as prompt").
+description: Use when asked to review uncommitted changes, a worktree, a branch or a GitHub pull request before push or merge ("review my changes", "open a review", "review PR 12", "review before push/main"), or to read, address or answer diffie review comments ("address the review", "what did I comment", a pasted "Copy all as prompt").
 ---
 
 # diffie review
 
-`diffie` (assume it is on PATH) opens a native review window for a git
-comparison: file tree, split/unified diff, line and selection comments,
-reviewed ticks. The review itself happens in the app, by the human. This
-skill covers two jobs: **launching the right comparison** and **reading the
-finished review back** so the comments can be acted on in the session.
+`diffie` is a native review GUI for a git comparison. The human reviews in
+the window; you launch the right comparison, then read the comments back
+and act on them.
 
-## Launching the right comparison
+## Launch
 
-Revisions read in the merge direction, source first; the window shows
-"`source` going into `target`". Pick by what the user wants to review:
+Source first: the window shows "`source` going into `target`".
 
-| Ask | Command |
+| Review | Command |
 | --- | --- |
-| uncommitted changes (worktree vs checked-out branch) | `diffie` |
-| everything the working tree adds over a branch | `diffie main` |
-| current branch before pushing into main | `diffie HEAD..main` |
-| before pushing, against the remote state | `diffie HEAD..o/main` (remotes are named `o`) |
-| one branch into another | `diffie feature..main` (`...` works the same; both resolve the merge base) |
+| uncommitted changes | `diffie` |
+| working tree, uncommitted included, into a branch | `diffie main` |
+| committed work only, before pushing | `diffie HEAD..main`, or the upstream: `diffie HEAD..origin/main` (use the repo's remote name) |
 | a single commit | `diffie HEAD..HEAD~1` |
-| another project | add `-C /path/to/repo` (never pass the folder as a positional) |
+| a GitHub pull request | `diffie --pr 42` (or its URL; needs `gh`) |
+| another repository | add `-C <path>`, never a positional |
 
-A revision the repository does not have fails before the window opens; a
-branch that exactly one remote has is substituted automatically (`o/x`
-stands in for `x`, and the review names it), several candidates are listed
-and refused.
+**The branch has a PR** (`gh pr view --json number,url` succeeds): offer
+both, recommend `--pr` - its window can publish the comments to the PR and
+approve it. It shows only the PR's pushed commits; local or unpushed work
+needs a row above. Asked for a PR outright: go straight to `--pr`.
 
-Launch it detached so the session is not blocked - it is a GUI app:
-
-```bash
-diffie -C /path/to/repo HEAD..main >/dev/null 2>&1 &
-```
-
-Then stop: tell the user the window is up and that you will read the review
-back when they say they are done. Do not poll, do not screenshot, do not try
-to drive the app.
-
-## Reading the review back
-
-The app writes review files (TOML, one per reviewer) under
-`$(git rev-parse --git-common-dir)/review/<source>/`. Do not parse them -
-diffie itself renders them exactly like the app's "Copy all as prompt"
-button, without opening a window:
+It is a GUI, so launch detached and keep the errors:
 
 ```bash
-diffie --prompt -C /path/to/repo
+diffie --pr 42 >/tmp/diffie.log 2>&1 &
 ```
 
-- No name needed when the repository holds a single review. With several,
-  diffie lists them and exits without guessing: name one
-  (`diffie --prompt feature`, `diffie --prompt uncommitted`).
-- Only open comments are printed. A Done or Won't fix reaction from any
-  reviewer closes a comment; `--all` includes closed ones marked `[resolved]`.
-- Output format, same as a pasted prompt:
+A bad revision, or a PR commit that is not fetched, exits at once: read the
+log (it names the `git fetch` to run). Otherwise say the window is up and
+stop until the user is done. No polling, screenshots or driving the app.
 
-  ```
-  Review comments to address:
-
-  1. src/index/cache.rs:45 at a3f9c1e
-  ```(fenced snippet of the commented lines)```
-  About `selection`: the comment body
-  Suggested replacement:
-  ```(fenced replacement)```
-  ```
-
-Treat that output as the user's own review feedback: work through the
-numbered items like a pasted "Copy all as prompt" message - fix what each
-one asks at the given `path:line`, using the snippet to find the spot even
-if lines have shifted, and apply `Suggested replacement` blocks verbatim
-unless they conflict with something newer. Report per item what was done.
-
-## Answering back
-
-Each comment's header ends in its short id (`#89fe6a0c`). After addressing
-an item - or to answer a question that needs no code change - thread a
-reply under it:
+## Read back
 
 ```bash
-diffie -C /path/to/repo --reply '#89fe6a0c' "renamed in 698c1af - it counts comments on rewritten code" --session "<your session id>"
+diffie --prompt        # open comments, as "Copy all as prompt"
 ```
 
-- One short sentence saying what was done and where (name the commit), or
-  the answer itself. `Reply (Claude): ...` lines in later `--prompt` output
-  are answers already given - do not repeat them.
-- Pass your session id when you know it (it appears in your transcript and
-  scratchpad paths; `$CLAUDE_SESSION_ID` is read automatically when set).
-  The app then shows the answer with a robot badge whose click hands the
-  reviewer `claude --resume <id>` to dig into the reasoning.
-- Replies are conversation, never verdict: resolving a comment stays the
-  human's reaction in the app. Never mark anything done.
-- The id finds its comment across all reviews here; an ambiguous or
-  unknown prefix is refused, never guessed.
+With several reviews it lists them and exits: name one
+(`diffie --prompt feature`). `--all` adds resolved comments.
+
+Treat the output as the user's own feedback. Per numbered item: fix it at
+`path:line`, locating the spot by the snippet if lines shifted; apply
+`Suggested replacement` verbatim unless newer work conflicts; report what
+was done. The hash is the commit that wrote the line - not something to
+check out.
+
+## Answer
+
+Each header ends in a short id. After addressing an item, or to answer a
+question, thread one sentence saying what was done and where (name the
+commit):
+
+```bash
+diffie --reply '#89fe6a0c' "renamed in 698c1af" --session "<your session id>"
+```
+
+- `--session` lets the reviewer resume your conversation from the answer;
+  `$CLAUDE_SESSION_ID` is the default.
+- `Reply (Claude): ...` lines in `--prompt` output are already given - do
+  not repeat them.
 
 ## Rules
 
-- **Never edit review files or the reviewed repository's git dir.** The
-  app owns `<git-common-dir>/review/`; reviewers own their files. The one
-  sanctioned write is `diffie --reply`, which writes the agent's own
-  reviewer file through diffie itself - never touch the TOML directly.
-- The comment's hash is the commit that wrote the line (7 chars), not a
-  branch tip - do not try to check it out to "see the comment".
-- `diffie <rev>` compares the **working tree** (uncommitted edits included)
-  against `<rev>`; use the `A..B` form when only committed work should count.
-- If `diffie` is not on PATH: `cargo install --path crates/app` from the
-  diffie repo, or ask the user.
+- Never resolve or mark anything done: that is the human's reaction.
+- Never edit review files (`<git-common-dir>/review/`); `--reply` is the
+  only write.
+- `diffie` missing: `cargo install --path crates/app` in the diffie repo,
+  or ask.

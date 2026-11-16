@@ -91,15 +91,24 @@ folder.
 
 ## Agent skill
 
-`skills/diffie-review/` teaches a coding agent (Claude Code and compatible)
-to open the right comparison for a review request and to read the finished
-review back through `diffie --prompt`, which prints the open comments
-exactly like the app's "Copy all as prompt" button, and to answer each
-one through `diffie --reply`, threading under the comment in the app.
-Install from this repository:
+`skills/diffie-review/` lets a coding agent (Claude Code and compatible) run
+the review loop with you: it opens the right comparison (or `--pr <number>`
+when the branch has a pull request), reads your comments back through
+`diffie --prompt` and answers each one through `diffie --reply`.
+
+The skill calls `diffie`, so put the binary on the PATH first, then add the
+skill:
 
 ```sh
+cargo install --path crates/app
 npx skills add sassman/diffie-rs
-# or by hand:
-cp -r skills/diffie-review ~/.claude/skills/
 ```
+
+Working from a checkout, link it instead so `git pull` updates it:
+
+```sh
+ln -s "$PWD/skills/diffie-review" ~/.claude/skills/diffie-review
+```
+
+Then ask the agent to "review my changes", and "address the review" once
+you are done commenting.
