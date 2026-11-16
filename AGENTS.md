@@ -23,6 +23,12 @@ Windows and Linux.
    owner's fork (`sassman/gpui-kit` - v0.9.1 plus the fork's stacked diff
    features; `Cargo.toml` names the current branch) until the upstream PRs
    land; the patch dies with the next Kit release that carries them.
+   When a change needs the Kit itself, the fork is checked out one
+   directory above this repository (`../gpui-kit`): commit there on the
+   branch `Cargo.toml` names, push to `o`, then run
+   `cargo update gpui-kit gpui-component gpui-base gpui-kit-assets` here so
+   the lock picks up the new revision - the patch pulls from GitHub, never
+   from the local checkout.
 3. **Use Kit components before writing your own.** In particular the diff view
    is `gpui_kit::component::diff::Diff`. Do not hand-roll diff rendering,
    virtualization, selection or annotations.
@@ -125,8 +131,6 @@ Linux build dependencies are listed in `README.md`.
 
 ## Before you finish a change
 
-- `cargo fmt --all`, `cargo clippy --workspace --all-targets` and
-  `cargo test -p diffie-core` are clean.
-- `cargo check -p diffie` has no warnings.
+- `just ci-check` is clean and not warnings / errors.
 - `docs/HANDOFF.md` reflects the new state if you changed what exists or what
   is next.
