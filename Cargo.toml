@@ -6,6 +6,10 @@ members = ["crates/core", "crates/app"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
+repository = "https://github.com/sassman/diffie-rs"
+homepage = "https://github.com/sassman/diffie-rs"
+# Releases ship as GitHub Release binaries and a Homebrew formula, not
+# through crates.io.
 publish = false
 
 [workspace.dependencies]
@@ -40,3 +44,8 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 2
 debug = false
+
+# What `dist` builds release binaries with.
+[profile.dist]
+inherits = "release"
+lto = "thin"

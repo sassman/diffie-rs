@@ -1,0 +1,60 @@
+# git-cliff configuration: how CHANGELOG.md is rendered from the
+# conventional commits. `just release-prepare <version>` runs it, and the
+# release workflow lifts the tagged version's section into the GitHub Release.
+
+[changelog]
+header = """
+# Changelog
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+"""
+body = """
+## [{{ version | trim_start_matches(pat="v") }}]{%- if release_link -%}({{ release_link }}){% endif %} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% set breaking = commits | filter(attribute="breaking", value=true) -%}
+{% if breaking | length > 0 %}
+### ⚠ Breaking changes
+{% for commit in breaking %}
+- **{{ commit.message | upper_first }}**{%- if commit.remote.pr_number %} by @{{ commit.remote.username }} in [#{{ commit.remote.pr_number }}](https://github.com/sassman/diffie-rs/pull/{{ commit.remote.pr_number }}){%- endif %}
+{%- if commit.body %}
+
+{{ commit.body | trim | indent(prefix="  ", first=true) }}
+{%- endif %}
+{% endfor %}
+{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | upper_first }}{% if commit.breaking %} [breaking]{% endif %}{%- if commit.remote.pr_number %} by @{{ commit.remote.username }} in [#{{ commit.remote.pr_number }}](https://github.com/sassman/diffie-rs/pull/{{ commit.remote.pr_number }}){%- endif %}
+{%- if commit.body %}
+
+{{ commit.body | trim | indent(prefix="  ", first=true) }}
+{%- endif %}
+{% endfor %}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+protect_breaking_commits = false
+sort_commits = "newest"
+commit_parsers = [
+    # Drop release commits and dependency bumps
+    { message = "^chore: release v[0-9]", skip = true },
+    { message = "^chore\\(release\\)", skip = true },
+    { message = "^chore\\(deps.*\\)", skip = true },
+    # Group everything else
+    { message = "^feat", group = "Features" },
+    { message = "^fix", group = "Bug Fixes" },
+    { message = "^doc", group = "Documentation" },
+    { message = "^perf", group = "Performance" },
+    { message = "^refactor", group = "Refactor" },
+    { message = "^style", group = "Styling" },
+    { message = "^test", group = "Testing" },
+    { message = "^(chore|update)", group = "Miscellaneous Tasks" },
+    { body = ".*security", group = "Security" },
+]

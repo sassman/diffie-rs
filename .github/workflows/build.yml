@@ -1,0 +1,73 @@
+name: Build
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "skills/**"
+      - "**.md"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "skills/**"
+      - "**.md"
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
+jobs:
+  # The same gate as on a developer machine: `just ci-check` is the one
+  # definition of clean, so CI and local runs cannot drift apart.
+  ci-check:
+    name: ci-check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: setup | linux packages
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gcc g++ clang libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libasound2-dev
+      - name: setup | rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-deny,cargo-shear
+      - run: just ci-check
+
+  # Platform-neutral checks ran above; here only what a platform can break.
+  platform:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["macos-latest", "windows-latest"]
+    runs-on: ${{ matrix.os }}
+    env:
+      # sccache spawns rustc without cargo's argfile fallback, and the Kit's
+      # command line exceeds what Windows accepts (os error 206).
+      RUSTC_WRAPPER: ${{ matrix.os != 'windows-latest' && 'sccache' || '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: setup | rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        if: matrix.os != 'windows-latest'
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.os == 'windows-latest'
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --locked

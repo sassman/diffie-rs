@@ -4,6 +4,8 @@ description = "Fast diff review tool"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish.workspace = true
 
 [[bin]]
@@ -47,3 +49,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 
 [dev-dependencies]
 tempfile = "3"
+
+# `publish = false` hides the binary from dist; it is the one thing released.
+[package.metadata.dist]
+dist = true
