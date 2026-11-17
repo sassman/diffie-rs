@@ -104,6 +104,17 @@ pub trait ReviewBackend: Send + Sync {
     fn worktree_blob_ids(&self, paths: &[String])
     -> Result<std::collections::HashMap<String, Oid>>;
 
+    /// The content of each of `ids`, in one pass. An id git does not hold,
+    /// or one that names no blob, is absent from the map. Symbol navigation
+    /// reads a whole tree's sources through this, so one subprocess per
+    /// file is not an option.
+    fn blobs(&self, ids: &[Oid]) -> Result<std::collections::HashMap<Oid, Vec<u8>>>;
+
+    /// The working tree's content of `path`, or `None` when it is not a
+    /// file there. The uncommitted side of an uncommitted review reads
+    /// sources through this, since they are in no object yet.
+    fn worktree_file(&self, path: &str) -> Result<Option<Vec<u8>>>;
+
     /// The reviewer's name as git knows it (`user.name`).
     fn author_name(&self) -> Result<String>;
 

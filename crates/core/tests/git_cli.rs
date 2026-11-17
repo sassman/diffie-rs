@@ -1110,3 +1110,62 @@ fn one_revision_reads_like_git_diff() {
         "the committed run and the uncommitted layer both show"
     );
 }
+
+#[test]
+fn blobs_reads_many_objects_in_one_pass() {
+    let fixture = Fixture::new();
+    let backend = fixture.backend();
+    let tree = backend.blob_ids(&fixture.commits[4]).unwrap();
+    let a = tree.get("a.txt").unwrap().clone();
+    let b = tree.get("b.txt").unwrap().clone();
+    // An id git does not hold is left out, never an error.
+    let absent = Oid::new("0123456789012345678901234567890123456789");
+
+    let blobs = backend
+        .blobs(&[a.clone(), absent.clone(), b.clone()])
+        .unwrap();
+
+    assert_eq!(blobs.len(), 2);
+    assert_eq!(
+        blobs.get(&a).map(Vec::as_slice),
+        Some(lines(&[(2, "TWO"), (9, "NINE")]).as_bytes())
+    );
+    assert_eq!(blobs.get(&b).map(Vec::as_slice), Some(&b"hello\n"[..]));
+    assert!(backend.blobs(&[]).unwrap().is_empty());
+}
+
+#[test]
+fn blobs_keeps_bytes_that_are_not_text() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    // Invalid UTF-8 ahead of a second object: a lossy read would shift
+    // every later object's byte offsets.
+    let raw: &[u8] = &[0xff, 0xfe, b'\n', 0x00, 0xc3];
+    std::fs::write(root.join("raw.bin"), raw).unwrap();
+    git(root, &["add", "raw.bin"]);
+    git(root, &["commit", "-q", "-m", "raw"]);
+    let backend = fixture.backend();
+    let head = Oid::new(git(root, &["rev-parse", "HEAD"]));
+    let tree = backend.blob_ids(&head).unwrap();
+    let raw_id = tree.get("raw.bin").unwrap().clone();
+    let b = tree.get("b.txt").unwrap().clone();
+
+    let blobs = backend.blobs(&[raw_id.clone(), b.clone()]).unwrap();
+
+    assert_eq!(blobs.get(&raw_id).map(Vec::as_slice), Some(raw));
+    assert_eq!(blobs.get(&b).map(Vec::as_slice), Some(&b"hello\n"[..]));
+}
+
+#[test]
+fn worktree_file_reads_what_is_on_disk() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    std::fs::write(root.join("a.txt"), "not committed\n").unwrap();
+    let backend = fixture.backend();
+
+    assert_eq!(
+        backend.worktree_file("a.txt").unwrap().as_deref(),
+        Some(&b"not committed\n"[..])
+    );
+    assert_eq!(backend.worktree_file("missing.txt").unwrap(), None);
+}

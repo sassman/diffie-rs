@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/app"]
+members = ["crates/core", "crates/symbols", "crates/app"]
 
 [workspace.package]
 version = "0.2.0"
@@ -14,6 +14,12 @@ publish = false
 
 [workspace.dependencies]
 diffie-core = { path = "crates/core" }
+diffie-symbols = { path = "crates/symbols" }
+# The versions the Kit builds its own highlighting on, so the lock holds
+# one copy once that feature is switched on. The Kit does not re-export
+# `tree_sitter`, hence the direct dependency.
+tree-sitter = "0.26.13"
+tree-sitter-rust = "0.24.0"
 # GPUI Kit re-exports GPUI and pins the matching GPUI snapshot itself.
 # Pin exactly: every Kit release may move to a GPUI snapshot with API changes.
 gpui-kit = { version = "=0.9.1", features = ["syntect"] }
