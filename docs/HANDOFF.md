@@ -67,6 +67,9 @@ Be exact about this when you report further work.
 | Count badges showing open threads only (file tree, file header and its tooltip breakdown, commit picker) once a thread is resolved | Compiled, clippy-clean; not seen on screen - the window was not run |
 | User settings (`settings.rs`): split/unified and window bounds persisted to `~/.config/diffie/settings.toml`, restored at startup | Round trip, defaults on missing or broken files and future-key tolerance are unit-tested; the live flow (bounds observer, coalesced writes, startup placement) compiled, clippy-clean, not seen on screen - the window was not run |
 | Comment cards capped at the viewport in unwrapped unified view (Kit fork commit `b97451f2`: the annotation wrapper takes the viewport's width and cancels the strip's offset, as the pinned file header does) | Verified on macOS on 2026-11-16 by screenshot: a demo repository with a 2378-character changed line and a hand-written review comment; the card ends at the viewport's edge with its actions row visible. The offset-cancel while scrolled sideways was not exercised (synthetic wheel events did not reach the scroll mask); split view unaffected (owner looked at it) |
+| Orphan comments as snippet files: entry with note and comment badge in diff and panel, addition rows at stored lines, dashed card tagged "not in this comparison" with plain "lines n-m" header, scope bar "1 open comment" with the orphan outside "0 of 0 files reviewed", `o` hiding entry and card in both diff and panel while "1 not in this comparison" appears, `n` turning the toggle back on and landing on the card with the focus marker, scope untouched | Verified on macOS on 2026-11-17 by screenshot against a demo repository with a hand-written stale comment on a path the repository never had (uncommitted comparison, empty diff) |
+| The same orphan flow's mouse paths: the count click (same `jump_comment` as `n`), the card's Archive click and the reload that removes the emptied snippet file, resolve folding an orphan card | Compiled, clippy-clean; not seen on screen - synthetic clicks never reached the handlers (CGEvent `postToPid` mouse events are ignored where its key events work), and real HID clicks were abandoned to keep hands off the owner's live session |
+| First paint of a freshly opened occluded window lays the file header out at content width (the file name starves before the note truncates); the first real repaint fixes it. Pre-existing, surfaced by narrow snippet files; the name cluster now keeps its content basis (`flex_auto`) and the note truncates, so the name survives | Seen on screen on 2026-11-17 (the artifact and that it clears); the flex change itself judged only in the healthy layout |
 
 ## Build, run, test
 
@@ -498,8 +501,19 @@ actually exercised):
   warning tint, tagged "code changed", header "was line n", the stored
   snippet quoted above the body, actions kept so the reviewer can react
   Done to approve the fix; file headers count these as "on changed code"
-  and the status bar names open comments nothing can show ("n not in this
-  comparison"). Replies thread under the comment body (author plus
+  and the status bar names open comments no row currently shows ("n not
+  in this comparison"). An open thread whose file is in no comparison at
+  all - outside the whole branch, or unplaceable even there because a
+  rebase dropped its commit - gets a synthetic snippet file
+  (`FileState::NotInComparison`, `orphan_patches` in the core): the
+  stored snippet as addition rows at its stored lines (pure context
+  folded away and hid the card), header note "not in this comparison -
+  shown for its open comments", card tagged the same, full out-of-scope
+  action row with archive as the disposal. The entries ride the
+  earlier-comments toggle (`set_other_revisions` swaps the Diff's file
+  set and restores the top line, since `set_files` resets the viewport),
+  stay out of the reviewed progress and carry no tick; archiving an
+  orphan's thread reloads so no empty snippet file lingers. Replies thread under the comment body (author plus
   markdown, left-bordered). Resolving changes nothing but the reaction -
   the thread stays the full record - but its card folds away: a 3 s
   grace (the last 500 ms a fade, `FOLD_GRACE`/`FOLD_FADE`), then only a
