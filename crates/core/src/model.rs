@@ -131,6 +131,10 @@ pub enum FileState {
     /// the checked commits (a skipped commit touches the same lines). The
     /// file's diff in the patch stops at the last checked commit.
     UncommittedNotCombined,
+    /// In no comparison at all: the entry is synthesized from its open
+    /// comments' stored snippets ([`orphan_patches`](crate::review::orphan_patches))
+    /// so the threads stay readable and disposable.
+    NotInComparison,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

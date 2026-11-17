@@ -13,7 +13,7 @@ use std::sync::Arc;
 use diffie_core::pr::PullStatus;
 use diffie_core::review::{
     ArchiveFile, NewComment, Placement, ReactionKind, ReviewFile, ReviewInput, ReviewSet,
-    ReviewState, Side, as_prompt, map_line, place,
+    ReviewState, Side, as_prompt, map_line, orphan_patches, place,
 };
 use diffie_core::search::{SearchHit, search_patch};
 
@@ -706,6 +706,9 @@ struct Loaded {
     placed: Vec<Placed>,
     /// Blocks the patch moves verbatim; the diff folds them behind labels.
     moved: Vec<diffie_core::moved::MovedBlock>,
+    /// Synthetic snippet files for orphaned threads; joined to the Diff's
+    /// set only while the earlier-comments toggle is on.
+    orphan_files: Vec<DiffFile>,
 }
 
 /// What annotation and header callbacks may read. They receive an `App`, not
@@ -755,6 +758,8 @@ struct ThreadView {
     body: SharedString,
     selection: Option<SharedString>,
     other_revision: bool,
+    /// On a synthetic snippet file: the comment's file is in no comparison.
+    orphan: bool,
     /// On code rewritten since the comment; shown with the stored snippet
     /// so the reviewer can compare it with the fix and react.
     changed_since: bool,
@@ -817,6 +822,8 @@ struct FileView {
     other_revision: usize,
     /// How many of the comments sit on code rewritten since they were made.
     changed_code_comments: usize,
+    /// A synthetic snippet entry for orphaned threads: nothing to tick.
+    orphan: bool,
 }
 
 pub struct ReviewApp {
@@ -859,6 +866,9 @@ pub struct ReviewApp {
     reviews: Option<ReviewSet>,
     review_path: PathBuf,
     placed: Vec<Placed>,
+    /// Synthetic snippet files for orphaned threads, kept apart from the
+    /// Diff's set so toggle flips can join or withhold them.
+    orphan_files: Vec<DiffFile>,
     diff: Entity<DiffState>,
     /// The reviewer's own split-or-unified choice. The view falls back to
     /// Unified while the window is too narrow for a split, without losing it.
@@ -1059,6 +1069,7 @@ impl ReviewApp {
             reviews: None,
             review_path: PathBuf::new(),
             placed: Vec::new(),
+            orphan_files: Vec::new(),
             diff,
             manual_mode: mode,
             settings,
@@ -1207,9 +1218,10 @@ impl ReviewApp {
                     .iter()
                     .filter(|file| {
                         let blob = loaded.blobs.get(&file.path).and_then(Option::as_ref);
-                        // A kept file is ticked too, but its open comments
-                        // are the point of showing it: never collapse it.
+                        // A kept or orphan file carries open comments, and
+                        // those are the point of showing it: never collapse.
                         file.state != FileState::KeptForComments
+                            && file.state != FileState::NotInComparison
                             && (file.state == FileState::UnchangedSinceReview
                                 || loaded.reviews.mine.review_state(&file.path, blob)
                                     == ReviewState::Reviewed)
@@ -1232,8 +1244,14 @@ impl ReviewApp {
                     .filter(|file| file.status == FileStatus::Deleted)
                     .map(|file| file.path.clone())
                     .collect();
+                self.orphan_files = loaded.orphan_files;
+                let mut diff_files = loaded.files;
+                if self.show_other_revisions && !self.orphan_files.is_empty() {
+                    diff_files.extend(self.orphan_files.iter().cloned());
+                    diff_files.sort_by(|a, b| tree_order(a.path().as_ref(), b.path().as_ref()));
+                }
                 self.diff.update(cx, |state, cx| {
-                    state.set_files(loaded.files, cx);
+                    state.set_files(diff_files, cx);
                     // One rebuild; collapsing one by one froze a review
                     // with thousands of ticked or generated files.
                     state.set_files_collapsed(
@@ -1619,6 +1637,12 @@ impl ReviewApp {
     /// the old side before the new. Comments hidden with the other
     /// revisions' toggle are skipped; a jump must land on something visible.
     fn comment_stops(&self) -> Vec<(String, String, Side, usize)> {
+        self.comment_stops_showing(self.show_other_revisions)
+    }
+
+    /// The stops as they would be with the earlier-comments toggle in the
+    /// given state, so a jump can probe before flipping anything.
+    fn comment_stops_showing(&self, earlier_shown: bool) -> Vec<(String, String, Side, usize)> {
         let order: HashMap<&str, usize> = self
             .files
             .iter()
@@ -1632,7 +1656,7 @@ impl ReviewApp {
         let mut stops: Vec<(String, String, Side, usize)> = self
             .placed
             .iter()
-            .filter(|placed| self.show_other_revisions || !placed.earlier())
+            .filter(|placed| earlier_shown || !placed.earlier())
             .filter(|placed| !resolved.contains(placed.id.as_str()))
             .map(|placed| {
                 (
@@ -1659,10 +1683,12 @@ impl ReviewApp {
         // hides them instead of dying silently: first the earlier-comments
         // toggle, then - like a search hit outside the view - the scope.
         if stops.is_empty() && !self.show_other_revisions {
-            self.show_other_revisions = true;
-            stops = self.comment_stops();
-            if stops.is_empty() {
-                self.show_other_revisions = false;
+            // Probe before flipping: the flip rebuilds the Diff's file set
+            // when orphan entries exist, too heavy for a jump to nowhere.
+            let revealed = self.comment_stops_showing(true);
+            if !revealed.is_empty() {
+                self.set_other_revisions(true, cx);
+                stops = revealed;
             }
         }
         if stops.is_empty() {
@@ -1972,7 +1998,44 @@ impl ReviewApp {
     }
 
     fn toggle_other_revisions(&mut self, cx: &mut Context<Self>) {
-        self.show_other_revisions = !self.show_other_revisions;
+        self.set_other_revisions(!self.show_other_revisions, cx);
+    }
+
+    /// Flip the earlier-comments toggle. Orphan snippet files exist only
+    /// while it is on, and `set_files` resets the viewport, so the top line
+    /// is put back - the toggle must not lose the reader's place.
+    fn set_other_revisions(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.show_other_revisions == on {
+            return;
+        }
+        self.show_other_revisions = on;
+        if !self.orphan_files.is_empty() {
+            let orphans: HashSet<&str> = self
+                .orphan_files
+                .iter()
+                .map(|file| file.path().as_ref())
+                .collect();
+            let state = self.diff.read(cx);
+            let top = state.top_line();
+            let mut files: Vec<DiffFile> = state
+                .files()
+                .iter()
+                .filter(|file| !orphans.contains(file.path().as_ref()))
+                .cloned()
+                .collect();
+            if on {
+                files.extend(self.orphan_files.iter().cloned());
+                files.sort_by(|a, b| tree_order(a.path().as_ref(), b.path().as_ref()));
+            }
+            self.diff.update(cx, |state, cx| {
+                state.set_files(files, cx);
+                // The exact-restore pair of top_line; scroll_to_line would
+                // re-center the row and shift the page by half a screen.
+                if let Some(top) = top {
+                    state.scroll_to_top_line(top, cx);
+                }
+            });
+        }
         cx.notify();
     }
 
@@ -2608,8 +2671,20 @@ impl ReviewApp {
                         if let Some(set) = this.reviews.as_mut()
                             && set.mine.take_comment(&id).is_some()
                         {
+                            // An orphan's file exists only for its threads:
+                            // reload, or an empty snippet entry lingers.
+                            let orphan = this.placed.iter().any(|placed| {
+                                placed.id == id
+                                    && this
+                                        .orphan_files
+                                        .iter()
+                                        .any(|file| file.path().as_ref() == placed.path)
+                            });
                             this.placed.retain(|placed| placed.id != id);
                             this.save_review(cx);
+                            if orphan {
+                                this.reload(cx);
+                            }
                         }
                     }
                 }
@@ -2730,6 +2805,10 @@ impl ReviewApp {
                     body: thread.comment.body.trim_end().to_string().into(),
                     selection: thread.comment.selection.clone().map(Into::into),
                     other_revision: placed.other_revision,
+                    orphan: self
+                        .orphan_files
+                        .iter()
+                        .any(|file| file.path().as_ref() == placed.path),
                     changed_since: placed.changed_since,
                     // The code the snippet quotes is gone from the view, so
                     // the card must carry it; elsewhere the diff row shows it.
@@ -2817,6 +2896,9 @@ impl ReviewApp {
                     _ if file.state == FileState::KeptForComments => {
                         Some("no new changes - shown for its open comments".into())
                     }
+                    _ if file.state == FileState::NotInComparison => {
+                        Some("not in this comparison - shown for its open comments".into())
+                    }
                     _ if file.state == FileState::UnchangedSinceReview => {
                         Some("no changes since your review".into())
                     }
@@ -2870,6 +2952,7 @@ impl ReviewApp {
                         comments: tally.map_or(0, |tally| tally.comments),
                         other_revision: tally.map_or(0, |tally| tally.other_revision),
                         changed_code_comments: tally.map_or(0, |tally| tally.changed_since),
+                        orphan: file.state == FileState::NotInComparison,
                     },
                 )
             })
@@ -3640,17 +3723,26 @@ impl ReviewApp {
         // here, even ones the other-revisions toggle hides.
         let open = threads.iter().filter(|thread| !thread.resolved()).count();
         let any = !threads.is_empty();
-        // Open comments no row can show - their file is not in this
-        // comparison. Named, so the count never promises more than the
-        // window can deliver.
+        // Open comments no row currently shows - their file is not in this
+        // comparison, or it is an orphan entry the earlier-comments toggle
+        // hides. Named, so the count never promises more than the window
+        // delivers.
+        let orphans: HashSet<&str> = self
+            .orphan_files
+            .iter()
+            .map(|file| file.path().as_ref())
+            .collect();
         let unplaced = threads
             .iter()
+            .filter(|thread| !thread.resolved())
             .filter(|thread| {
-                !thread.resolved()
-                    && !self
-                        .placed
-                        .iter()
-                        .any(|placed| placed.id == thread.comment.id)
+                let placed = self
+                    .placed
+                    .iter()
+                    .any(|placed| placed.id == thread.comment.id);
+                !placed
+                    || (!self.show_other_revisions
+                        && orphans.contains(thread.comment.path.as_str()))
             })
             .count();
         let bar = match (any, open) {
@@ -3682,12 +3774,19 @@ impl ReviewApp {
                     )
                 }),
         };
-        let progress = if self.files.is_empty() {
+        // Orphan snippet entries only carry comments; they are not files
+        // to review and stay out of the progress.
+        let reviewable = self
+            .files
+            .iter()
+            .filter(|file| file.state != FileState::NotInComparison)
+            .count();
+        let progress = if reviewable == 0 {
             0.
         } else {
-            reviewed as f32 * 100. / self.files.len() as f32
+            reviewed as f32 * 100. / reviewable as f32
         };
-        bar.child(format!("{reviewed} of {} files reviewed", self.files.len()))
+        bar.child(format!("{reviewed} of {reviewable} files reviewed"))
             .child(
                 Progress::new("files-reviewed")
                     .value(progress)
@@ -3901,6 +4000,7 @@ impl ReviewApp {
         };
         let state = self.review_state(&file.path);
         let unchanged = file.state == FileState::UnchangedSinceReview;
+        let orphan = file.state == FileState::NotInComparison;
         let quiet = state == ReviewState::Reviewed || unchanged || is_generated(&file.path);
         let selected = self.current_file.as_ref() == Some(&path);
         let target = path.clone();
@@ -3929,18 +4029,33 @@ impl ReviewApp {
             .cursor_pointer()
             .children(indent_guides(depth, cx))
             .when(selected, |row| row.bg(cx.theme().accent))
-            .when(quiet, |row| row.text_color(muted))
+            .when(quiet || orphan, |row| row.text_color(muted))
             .hover(|row| row.bg(cx.theme().list_hover))
             .on_click(cx.listener(move |this, _, _, cx| this.reveal_file(target.clone(), cx)))
-            .child(
-                div()
-                    .flex_none()
-                    .font_family(mono.clone())
-                    .text_size(px(10.5))
-                    .font_medium()
-                    .text_color(status_color)
-                    .child(status),
-            )
+            // An orphan entry is in no changeset: no status letter to claim
+            // one. The dashed bubble is the earlier-comments toggle's icon,
+            // naming what the row is here for and what hides it.
+            .when(orphan, |row| {
+                let tip: SharedString =
+                    "not in this comparison - shown for its open comments".into();
+                row.child(
+                    Icon::new(Lucide::MessageSquareDashed)
+                        .xsmall()
+                        .text_color(muted),
+                )
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            })
+            .when(!orphan, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .font_family(mono.clone())
+                        .text_size(px(10.5))
+                        .font_medium()
+                        .text_color(status_color)
+                        .child(status),
+                )
+            })
             .child(div().flex_1().min_w_0().truncate().child(name.to_string()))
             .when(comments > 0, |row| row.child(comment_badge(comments, cx)))
             .when(state == ReviewState::Reviewed, |row| {
@@ -3993,6 +4108,11 @@ impl ReviewApp {
         let mut rows = Vec::new();
         let mut previous: Vec<String> = Vec::new();
         for (index, file) in self.files.iter().enumerate() {
+            // Orphan entries follow the earlier-comments toggle, as in the
+            // Diff, so panel and main content stay in step.
+            if file.state == FileState::NotInComparison && !self.show_other_revisions {
+                continue;
+            }
             let mut folders: Vec<String> = file.path.split('/').map(String::from).collect();
             folders.pop();
             let common = previous
@@ -4059,7 +4179,10 @@ impl ReviewApp {
                             .text_color(muted)
                             .child(format!(
                                 "FILES · {} · {reviewed} REVIEWED",
-                                self.files.len()
+                                self.files
+                                    .iter()
+                                    .filter(|file| file.state != FileState::NotInComparison)
+                                    .count()
                             )),
                     )
                     .child(
@@ -4171,7 +4294,13 @@ impl ReviewApp {
                 .child("Reading the repository")
                 .into_any_element();
         }
-        if self.files.is_empty() {
+        // Orphan entries hidden by the earlier-comments toggle leave nothing
+        // on screen; without this the view was a blank sheet, not a message.
+        let visible = self
+            .files
+            .iter()
+            .any(|file| file.state != FileState::NotInComparison || self.show_other_revisions);
+        if !visible {
             return h_flex()
                 .size_full()
                 .justify_center()
@@ -4412,7 +4541,10 @@ impl ReviewApp {
                     .gap_2()
                     .child(
                         h_flex()
-                            .flex_1()
+                            // Basis auto, not 0: in a narrow file block (an
+                            // orphan snippet entry) flex_1 starved the name
+                            // to nothing before the metadata gave an inch.
+                            .flex_auto()
                             .min_w_0()
                             .gap_1()
                             // The tree's status letter rides along so a
@@ -4529,7 +4661,11 @@ impl ReviewApp {
                     .when_some(note, |row, note| {
                         row.child(
                             div()
-                                .flex_none()
+                                // Shrinkable, unlike the other metadata: in a
+                                // narrow file block (an orphan snippet entry)
+                                // a rigid note squeezed the file name out.
+                                .min_w_0()
+                                .truncate()
                                 .map(|element| {
                                     if alert {
                                         element.text_color(warning).font_medium()
@@ -4540,73 +4676,76 @@ impl ReviewApp {
                                 .child(note),
                         )
                     })
-                    .child({
-                        // A ticked file should read as done at a glance: box
-                        // and label turn the theme's light blue. The Kit's
-                        // labeled Checkbox hard-codes both colors, so this is
-                        // the base checkbox plus its own label.
-                        let blue = cx.theme().blue_light;
-                        let box_owner = owner.clone();
-                        let box_path = path.clone();
-                        let label_path = path.clone();
-                        h_flex()
-                            .flex_none()
-                            .gap(px(5.))
-                            .child(
-                                // The base checkbox is unstyled by design;
-                                // box, border and check mark are drawn here.
-                                gpui_kit::base::Checkbox::new(SharedString::from(format!(
-                                    "reviewed-{path}"
-                                )))
-                                .checked(reviewed)
-                                .w(px(13.))
-                                .h(px(13.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(3.))
-                                .border_1()
-                                .border_color(muted)
-                                .cursor_pointer()
-                                .styles(|styles| {
-                                    styles.checked(|state| state.bg(blue).border_color(blue))
-                                })
-                                .when(reviewed, |checkbox| {
-                                    checkbox.child(
-                                        Icon::new(IconName::Check)
-                                            .xsmall()
-                                            .text_color(cx.theme().background),
-                                    )
-                                })
-                                .accessibility_label("Reviewed")
-                                .on_change(
-                                    move |state, _, _, cx| {
-                                        let checked =
-                                            state == gpui_kit::base::CheckboxState::Checked;
-                                        let _ = box_owner.update(cx, |this, cx| {
-                                            this.set_reviewed(&box_path, checked, cx)
-                                        });
-                                    },
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("reviewed-label-{path}")))
+                    // An orphan snippet entry is not reviewable: no tick.
+                    .when(!view.is_some_and(|view| view.orphan), |row| {
+                        row.child({
+                            // A ticked file should read as done at a glance: box
+                            // and label turn the theme's light blue. The Kit's
+                            // labeled Checkbox hard-codes both colors, so this is
+                            // the base checkbox plus its own label.
+                            let blue = cx.theme().blue_light;
+                            let box_owner = owner.clone();
+                            let box_path = path.clone();
+                            let label_path = path.clone();
+                            h_flex()
+                                .flex_none()
+                                .gap(px(5.))
+                                .child(
+                                    // The base checkbox is unstyled by design;
+                                    // box, border and check mark are drawn here.
+                                    gpui_kit::base::Checkbox::new(SharedString::from(format!(
+                                        "reviewed-{path}"
+                                    )))
+                                    .checked(reviewed)
+                                    .w(px(13.))
+                                    .h(px(13.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(3.))
+                                    .border_1()
+                                    .border_color(muted)
                                     .cursor_pointer()
-                                    .map(|label| {
-                                        if reviewed {
-                                            label.text_color(blue).font_medium()
-                                        } else {
-                                            label.text_color(muted)
-                                        }
+                                    .styles(|styles| {
+                                        styles.checked(|state| state.bg(blue).border_color(blue))
                                     })
-                                    .on_click(move |_, _, cx| {
-                                        let _ = owner.update(cx, |this, cx| {
-                                            this.set_reviewed(&label_path, !reviewed, cx)
-                                        });
+                                    .when(reviewed, |checkbox| {
+                                        checkbox.child(
+                                            Icon::new(IconName::Check)
+                                                .xsmall()
+                                                .text_color(cx.theme().background),
+                                        )
                                     })
-                                    .child("Reviewed"),
-                            )
+                                    .accessibility_label("Reviewed")
+                                    .on_change(
+                                        move |state, _, _, cx| {
+                                            let checked =
+                                                state == gpui_kit::base::CheckboxState::Checked;
+                                            let _ = box_owner.update(cx, |this, cx| {
+                                                this.set_reviewed(&box_path, checked, cx)
+                                            });
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("reviewed-label-{path}")))
+                                        .cursor_pointer()
+                                        .map(|label| {
+                                            if reviewed {
+                                                label.text_color(blue).font_medium()
+                                            } else {
+                                                label.text_color(muted)
+                                            }
+                                        })
+                                        .on_click(move |_, _, cx| {
+                                            let _ = owner.update(cx, |this, cx| {
+                                                this.set_reviewed(&label_path, !reviewed, cx)
+                                            });
+                                        })
+                                        .child("Reviewed"),
+                                )
+                        })
                     })
                     .into_any_element()
             });
@@ -5011,7 +5150,13 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
                 .border_1()
                 .border_color(quiet_border)
                 .rounded(px(3.))
-                .child("other revision"),
+                // An orphan is beyond "other revision": its file is in no
+                // comparison at all, and the tag says so.
+                .child(if thread.orphan {
+                    "not in this comparison"
+                } else {
+                    "other revision"
+                }),
         );
     }
     if thread.changed_since {
@@ -5041,7 +5186,7 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
         header = header.child(div().font_medium().child(thread.author.clone()));
     }
     header = header.child(div().font_family(mono.clone()).child(thread.commit.clone()));
-    header = header.child(if thread.other_revision {
+    header = header.child(if thread.other_revision && !thread.orphan {
         format!("{}, unchanged since", thread.line_label)
     } else {
         thread.line_label.to_string()
@@ -5352,6 +5497,7 @@ impl Render for ReviewApp {
         let reviewed = self
             .files
             .iter()
+            .filter(|file| file.state != FileState::NotInComparison)
             .filter(|file| self.review_state(&file.path) == ReviewState::Reviewed)
             .count();
         v_flex()
@@ -5787,7 +5933,7 @@ fn load(
         Scope::Commits { picked, .. } => picked.iter().cloned().collect(),
         _ => commits.iter().map(|commit| commit.id.clone()).collect(),
     };
-    let placed = place_all(
+    let mut placed = place_all(
         backend,
         &reviews,
         &patch,
@@ -5795,6 +5941,72 @@ fn load(
         resolved.comparison.uncommitted,
     )
     .map_err(text)?;
+    // Open threads no row can show and no scope widening could reach: their
+    // path is outside the whole branch, or the scope is already Whole branch
+    // and placement still failed (a rebase dropped the commit). Their stored
+    // snippets become synthetic files so the threads stay readable and
+    // disposable; archive is the way out.
+    let (orphan_files, orphan_placed) = {
+        let placed_ids: HashSet<&str> = placed.iter().map(|placed| placed.id.as_str()).collect();
+        let whole_branch = matches!(scope, Scope::WholeBranch);
+        let branch_paths: HashSet<&str> = branch.iter().map(|(path, _)| path.as_str()).collect();
+        // A path with an entry in the comparison must never get a second,
+        // synthetic one: an unplaceable thread on a shown file stays
+        // unplaced and keeps the status-bar label instead.
+        let shown_paths: HashSet<&str> =
+            patch.files.iter().map(|file| file.path.as_str()).collect();
+        let threads = reviews.threads();
+        let orphans: Vec<&diffie_core::review::Comment> = threads
+            .iter()
+            .filter(|thread| !thread.resolved())
+            .filter(|thread| !placed_ids.contains(thread.comment.id.as_str()))
+            .filter(|thread| !shown_paths.contains(thread.comment.path.as_str()))
+            .filter(|thread| whole_branch || !branch_paths.contains(thread.comment.path.as_str()))
+            .map(|thread| thread.comment)
+            .collect();
+        let mut files = Vec::new();
+        let mut parsed_paths: HashSet<String> = HashSet::new();
+        for (path, text) in orphan_patches(orphans.iter().copied()) {
+            // A snippet that does not parse loses its rows, not the review:
+            // its threads stay unplaced and keep the status-bar label.
+            let Ok(parsed) = DiffFile::parse(&text) else {
+                continue;
+            };
+            files.extend(parsed);
+            parsed_paths.insert(path.clone());
+            patch.files.push(diffie_core::FileSummary {
+                path,
+                status: FileStatus::Modified,
+                additions: 0,
+                deletions: 0,
+                state: FileState::NotInComparison,
+                binary: false,
+            });
+        }
+        let orphan_placed: Vec<Placed> = orphans
+            .into_iter()
+            .filter(|comment| parsed_paths.contains(&comment.path))
+            .map(|comment| Placed {
+                id: comment.id.clone(),
+                path: comment.path.clone(),
+                // The snippet rows are emitted as additions, which exist on
+                // the new side only - old-side comments anchor there too.
+                side: Side::New,
+                // The last row the synthesis emits: a snippet taller than
+                // its stored line sits shifted down from the file top.
+                line: comment.line.max(comment.snippet.lines().count().max(1)),
+                lines: comment.lines,
+                selection: comment.selection.is_some(),
+                // The earlier-round machinery gates the card and the jump
+                // stop behind the toggle; orphans ride it.
+                other_revision: true,
+                changed_since: false,
+            })
+            .collect();
+        (files, orphan_placed)
+    };
+    placed.extend(orphan_placed);
+    patch.files.sort_by(|a, b| tree_order(&a.path, &b.path));
     let moved = diffie_core::moved::moved_blocks(&patch.text);
 
     Ok(Loaded {
@@ -5813,6 +6025,7 @@ fn load(
         completed_cleared,
         placed,
         moved,
+        orphan_files,
     })
 }
 
@@ -5826,7 +6039,11 @@ fn place_all(
     let shown: HashSet<&str> = patch
         .files
         .iter()
-        .filter(|file| file.state != FileState::UnchangedSinceReview)
+        // Orphan entries are anchored by snippet synthesis, never by blame.
+        .filter(|file| {
+            file.state != FileState::UnchangedSinceReview
+                && file.state != FileState::NotInComparison
+        })
         .map(|file| file.path.as_str())
         .collect();
     let mut blames: HashMap<String, Vec<BlameLine>> = HashMap::new();

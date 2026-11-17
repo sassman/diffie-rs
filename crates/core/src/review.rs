@@ -8,7 +8,7 @@
 //! - Archiving moves a finished thread into [`ArchiveFile`], a cold record
 //!   nothing reads back: the comment leaves every view for good.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -774,6 +774,58 @@ pub fn place(comment: &Comment, in_scope: &HashSet<Oid>, blame: &[BlameLine]) ->
         },
         None => Placement::NotInView,
     }
+}
+
+/// Patch text for open threads no comparison can show, one patch per file:
+/// the stored snippets as hunks at their stored lines, so each card has
+/// rows to anchor on. The rows are emitted as additions - a quote being
+/// shown, not lines the comparison carries - because pure context folds
+/// away as "unchanged lines" and would hide the card. Overlapping snippets
+/// merge; where two disagree about a line's text the later comment wins.
+pub fn orphan_patches<'a>(
+    comments: impl IntoIterator<Item = &'a Comment>,
+) -> Vec<(String, String)> {
+    // path -> line -> text; BTreeMaps keep files and lines ordered.
+    let mut files: BTreeMap<&str, BTreeMap<usize, &str>> = BTreeMap::new();
+    for comment in comments {
+        let lines: Vec<&str> = comment.snippet.lines().collect();
+        let count = lines.len().max(1);
+        let start = comment.line.saturating_sub(count - 1).max(1);
+        let file = files.entry(comment.path.as_str()).or_default();
+        if lines.is_empty() {
+            // An empty snippet still needs a row for the card to sit on.
+            file.entry(start).or_insert("");
+        }
+        for (offset, text) in lines.into_iter().enumerate() {
+            file.insert(start + offset, text);
+        }
+    }
+    files
+        .into_iter()
+        .map(|(path, lines)| {
+            // The hunk parser insists on the old and new file headers.
+            let mut patch = format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n");
+            let mut run: Vec<(usize, &str)> = Vec::new();
+            let flush = |run: &mut Vec<(usize, &str)>, patch: &mut String| {
+                if let Some(&(start, _)) = run.first() {
+                    patch.push_str(&format!("@@ -{start},0 +{start},{} @@\n", run.len()));
+                }
+                for (_, text) in run.drain(..) {
+                    patch.push('+');
+                    patch.push_str(text);
+                    patch.push('\n');
+                }
+            };
+            for (line, text) in lines {
+                if run.last().is_some_and(|&(last, _)| line != last + 1) {
+                    flush(&mut run, &mut patch);
+                }
+                run.push((line, text));
+            }
+            flush(&mut run, &mut patch);
+            (path.to_string(), patch)
+        })
+        .collect()
 }
 
 /// All comments rendered as one prompt for an AI agent ("Copy all as prompt").
@@ -1583,5 +1635,81 @@ mod tests {
     fn ids_are_unique() {
         let ids: HashSet<String> = (0..1000).map(|_| new_id()).collect();
         assert_eq!(ids.len(), 1000);
+    }
+
+    /// A review file holding snippets at given places, for orphan tests.
+    fn snippets(entries: &[(&str, usize, usize, &str)]) -> ReviewFile {
+        let mut file = ReviewFile::new("Ada", &resolved());
+        for (path, line, lines, snippet) in entries {
+            file.add_comment(NewComment {
+                commit: Oid::new("c".repeat(40)),
+                path: (*path).into(),
+                side: Side::New,
+                line: *line,
+                lines: *lines,
+                selection: None,
+                snippet: (*snippet).into(),
+                body: "b".into(),
+                suggestion: None,
+            });
+        }
+        file
+    }
+
+    #[test]
+    fn orphan_patch_single_comment() {
+        let file = snippets(&[("src/a.rs", 12, 2, "let x = 1;\nlet y = 2;")]);
+        let patches = orphan_patches(file.comments.iter());
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].0, "src/a.rs");
+        assert_eq!(
+            patches[0].1,
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -11,0 +11,2 @@\n+let x = 1;\n+let y = 2;\n"
+        );
+    }
+
+    #[test]
+    fn orphan_patch_merges_overlapping_snippets_in_one_file() {
+        let file = snippets(&[
+            ("src/a.rs", 11, 2, "ten\neleven"),
+            ("src/a.rs", 12, 2, "eleven\ntwelve"),
+        ]);
+        let patches = orphan_patches(file.comments.iter());
+        assert_eq!(patches.len(), 1);
+        assert_eq!(
+            patches[0].1,
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -10,0 +10,3 @@\n+ten\n+eleven\n+twelve\n"
+        );
+    }
+
+    #[test]
+    fn orphan_patch_separate_files_and_hunks_ascend() {
+        let file = snippets(&[
+            ("src/a.rs", 40, 1, "forty"),
+            ("src/a.rs", 5, 1, "five"),
+            ("src/b.rs", 1, 1, "one"),
+        ]);
+        let patches = orphan_patches(file.comments.iter());
+        assert_eq!(patches.len(), 2);
+        let a = patches.iter().find(|(path, _)| path == "src/a.rs").unwrap();
+        assert_eq!(
+            a.1,
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -5,0 +5,1 @@\n+five\n@@ -40,0 +40,1 @@\n+forty\n"
+        );
+        let b = patches.iter().find(|(path, _)| path == "src/b.rs").unwrap();
+        assert_eq!(
+            b.1,
+            "diff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1,0 +1,1 @@\n+one\n"
+        );
+    }
+
+    #[test]
+    fn orphan_patch_empty_snippet_still_yields_a_row() {
+        let file = snippets(&[("src/a.rs", 3, 1, "")]);
+        let patches = orphan_patches(file.comments.iter());
+        assert_eq!(
+            patches[0].1,
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -3,0 +3,1 @@\n+\n"
+        );
     }
 }

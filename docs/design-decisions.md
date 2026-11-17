@@ -404,8 +404,9 @@ Decided:
 - Orphaned open threads - file in no comparison at all, even Whole branch -
   render as synthetic snippet files in the Diff, behind the earlier-comments
   toggle: a file entry with the note "not in this comparison - shown for its
-  open comments" whose content is each comment's stored snippet as a
-  context-only hunk, the card anchored there with the out-of-scope action
+  open comments" whose content is each comment's stored snippet as addition
+  rows (pure context folds away as "unchanged lines" and hides the card),
+  the card anchored there with the out-of-scope action
   row, archive as the disposal (owner, 2026-11-17; before this such threads
   counted as open but had no card anywhere, the count-click dead-ended
   after flipping the scope, and the only disposal was hand-editing the
