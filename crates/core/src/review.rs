@@ -776,10 +776,12 @@ pub fn place(comment: &Comment, in_scope: &HashSet<Oid>, blame: &[BlameLine]) ->
     }
 }
 
-/// Context-only patch text for open threads no comparison can show, one
-/// patch per file: the stored snippets as hunks at their stored lines, so
-/// each card has rows to anchor on. Overlapping snippets merge; where two
-/// disagree about a line's text the later comment wins.
+/// Patch text for open threads no comparison can show, one patch per file:
+/// the stored snippets as hunks at their stored lines, so each card has
+/// rows to anchor on. The rows are emitted as additions - a quote being
+/// shown, not lines the comparison carries - because pure context folds
+/// away as "unchanged lines" and would hide the card. Overlapping snippets
+/// merge; where two disagree about a line's text the later comment wins.
 pub fn orphan_patches<'a>(
     comments: impl IntoIterator<Item = &'a Comment>,
 ) -> Vec<(String, String)> {
@@ -806,10 +808,10 @@ pub fn orphan_patches<'a>(
             let mut run: Vec<(usize, &str)> = Vec::new();
             let flush = |run: &mut Vec<(usize, &str)>, patch: &mut String| {
                 if let Some(&(start, _)) = run.first() {
-                    patch.push_str(&format!("@@ -{start},{0} +{start},{0} @@\n", run.len()));
+                    patch.push_str(&format!("@@ -{start},0 +{start},{} @@\n", run.len()));
                 }
                 for (_, text) in run.drain(..) {
-                    patch.push(' ');
+                    patch.push('+');
                     patch.push_str(text);
                     patch.push('\n');
                 }
@@ -1662,7 +1664,7 @@ mod tests {
         assert_eq!(patches[0].0, "src/a.rs");
         assert_eq!(
             patches[0].1,
-            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -11,2 +11,2 @@\n let x = 1;\n let y = 2;\n"
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -11,0 +11,2 @@\n+let x = 1;\n+let y = 2;\n"
         );
     }
 
@@ -1676,7 +1678,7 @@ mod tests {
         assert_eq!(patches.len(), 1);
         assert_eq!(
             patches[0].1,
-            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -10,3 +10,3 @@\n ten\n eleven\n twelve\n"
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -10,0 +10,3 @@\n+ten\n+eleven\n+twelve\n"
         );
     }
 
@@ -1692,12 +1694,12 @@ mod tests {
         let a = patches.iter().find(|(path, _)| path == "src/a.rs").unwrap();
         assert_eq!(
             a.1,
-            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -5,1 +5,1 @@\n five\n@@ -40,1 +40,1 @@\n forty\n"
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -5,0 +5,1 @@\n+five\n@@ -40,0 +40,1 @@\n+forty\n"
         );
         let b = patches.iter().find(|(path, _)| path == "src/b.rs").unwrap();
         assert_eq!(
             b.1,
-            "diff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1,1 +1,1 @@\n one\n"
+            "diff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1,0 +1,1 @@\n+one\n"
         );
     }
 
@@ -1707,7 +1709,7 @@ mod tests {
         let patches = orphan_patches(file.comments.iter());
         assert_eq!(
             patches[0].1,
-            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -3,1 +3,1 @@\n \n"
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -3,0 +3,1 @@\n+\n"
         );
     }
 }

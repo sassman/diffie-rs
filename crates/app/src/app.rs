@@ -746,6 +746,8 @@ struct ThreadView {
     body: SharedString,
     selection: Option<SharedString>,
     other_revision: bool,
+    /// On a synthetic snippet file: the comment's file is in no comparison.
+    orphan: bool,
     /// On code rewritten since the comment; shown with the stored snippet
     /// so the reviewer can compare it with the fix and react.
     changed_since: bool,
@@ -2779,6 +2781,10 @@ impl ReviewApp {
                     body: thread.comment.body.trim_end().to_string().into(),
                     selection: thread.comment.selection.clone().map(Into::into),
                     other_revision: placed.other_revision,
+                    orphan: self
+                        .orphan_files
+                        .iter()
+                        .any(|file| file.path().as_ref() == placed.path),
                     changed_since: placed.changed_since,
                     // The code the snippet quotes is gone from the view, so
                     // the card must carry it; elsewhere the diff row shows it.
@@ -4248,7 +4254,13 @@ impl ReviewApp {
                 .child("Reading the repository")
                 .into_any_element();
         }
-        if self.files.is_empty() {
+        // Orphan entries hidden by the earlier-comments toggle leave nothing
+        // on screen; without this the view was a blank sheet, not a message.
+        let visible = self
+            .files
+            .iter()
+            .any(|file| file.state != FileState::NotInComparison || self.show_other_revisions);
+        if !visible {
             return h_flex()
                 .size_full()
                 .justify_center()
@@ -4489,7 +4501,10 @@ impl ReviewApp {
                     .gap_2()
                     .child(
                         h_flex()
-                            .flex_1()
+                            // Basis auto, not 0: in a narrow file block (an
+                            // orphan snippet entry) flex_1 starved the name
+                            // to nothing before the metadata gave an inch.
+                            .flex_auto()
                             .min_w_0()
                             .gap_1()
                             // The tree's status letter rides along so a
@@ -4606,7 +4621,11 @@ impl ReviewApp {
                     .when_some(note, |row, note| {
                         row.child(
                             div()
-                                .flex_none()
+                                // Shrinkable, unlike the other metadata: in a
+                                // narrow file block (an orphan snippet entry)
+                                // a rigid note squeezed the file name out.
+                                .min_w_0()
+                                .truncate()
                                 .map(|element| {
                                     if alert {
                                         element.text_color(warning).font_medium()
@@ -5091,7 +5110,13 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
                 .border_1()
                 .border_color(quiet_border)
                 .rounded(px(3.))
-                .child("other revision"),
+                // An orphan is beyond "other revision": its file is in no
+                // comparison at all, and the tag says so.
+                .child(if thread.orphan {
+                    "not in this comparison"
+                } else {
+                    "other revision"
+                }),
         );
     }
     if thread.changed_since {
@@ -5121,7 +5146,7 @@ fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App
         header = header.child(div().font_medium().child(thread.author.clone()));
     }
     header = header.child(div().font_family(mono.clone()).child(thread.commit.clone()));
-    header = header.child(if thread.other_revision {
+    header = header.child(if thread.other_revision && !thread.orphan {
         format!("{}, unchanged since", thread.line_label)
     } else {
         thread.line_label.to_string()
@@ -5915,7 +5940,9 @@ fn load(
             .map(|comment| Placed {
                 id: comment.id.clone(),
                 path: comment.path.clone(),
-                side: comment.side,
+                // The snippet rows are emitted as additions, which exist on
+                // the new side only - old-side comments anchor there too.
+                side: Side::New,
                 line: comment.line.max(1),
                 lines: comment.lines,
                 selection: comment.selection.is_some(),
