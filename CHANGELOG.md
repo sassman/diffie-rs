@@ -4,6 +4,103 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-17
+
+
+### Bug Fixes
+
+- Resolved threads still counted in tree, header and picker badges
+
+  The cards fold away on a verdict, but the orange numbers kept ticking,
+  nagging about finished work. Every count badge now shows open threads
+  only, matching the scope bar's open-comments count.
+
+- Stop long diff lines stretching comment cards in unified view
+
+  The unwrapped unified strip is as wide as its longest line, and the
+  annotation wrapper filled it. The Kit fork now pins line annotation
+  cards to the viewport's width and offset, the same treatment the pinned
+  file header gets; this bump picks that revision up. Verified on screen
+  on a demo repository; split view is untouched.
+
+
+### Documentation
+
+- Settle how open comments outside every comparison surface and die
+
+  A thread whose file is in no comparison counted as open but had no card,
+  so no resolve and no archive - the count-click dead-ended after flipping
+  the scope. Settled: synthetic snippet files behind the earlier-comments
+  toggle, archive as the disposal.
+
+- Update the review skill to offer --pr and cost fewer tokens
+
+  - a branch with a pull request now gets both ways offered, --pr
+    recommended: its window publishes comments to the PR and approves it
+  - the skill loads at roughly half the size; what `diffie --prompt`
+    shows anyway is no longer spelled out
+  - a failed launch keeps its message, so the `git fetch` a PR commit
+    needs is not lost to /dev/null
+  - the upstream example says origin/main, not the author's own remote name
+  - the README says how to install binary and skill, and how to link the
+    skill from a checkout so it follows `git pull`
+
+
+### Features
+
+- Surface open comments no comparison can show (#5) by @sassman in [#5](https://github.com/sassman/diffie-rs/pull/5)
+
+  - "n open comments" counted threads whose file is in no comparison,
+  while the click dead-ended and the only disposal was hand-editing the
+  review TOML
+  - such threads now render as synthetic snippet files (stored snippet as
+  addition rows), behind the earlier-comments toggle, with the full
+  out-of-scope action row - archive is the way out
+  - the count click and `n` land on them by clearing the toggle; the
+  label, reviewed progress and file tree treat the entries as what they
+  are: not part of the changeset
+  - design decision recorded in docs/design-decisions.md;
+  toggle/jump/label flows verified on screen, the archive click path only
+  compiled
+
+  ---------
+
+- Add a command palette so actions are reachable without the mouse (#4) by @sassman in [#4](https://github.com/sassman/diffie-rs/pull/4)
+
+  ## Why
+
+  Actions like approving a pull request sit behind menus. A palette on
+  Cmd/Ctrl+P makes them reachable from the keyboard and gives new commands
+  one place to join.
+
+  ## What changed
+
+  - Cmd/Ctrl+P (also View > Command palette) opens the Kit's `Command` in
+  a dialog.
+  - Commands: Reload, split or unified, and in a `--pr` review Approve
+  with / without comments, greyed by the same `can_approve` check the
+  title-bar menu now uses.
+  - Rows show their shortcut; keywords widen the search ("lgtm", "split").
+  - Focus returns to where it was on close; a reopened palette starts on
+  the first row.
+  - Gruvbox `accent.background` is one step lighter: it equalled the
+  popover colour, hiding the highlighted row.
+  - `docs/design-decisions.md` records Cmd/Ctrl+P (was Cmd/Ctrl+K) and the
+  palette rules; `docs/HANDOFF.md` is updated.
+
+  ## Verified
+
+  - On macOS by screenshot: open, key hints, keyword search, arrow keys,
+  Enter, focus return after Enter and Escape.
+  - Not seen: the approval rows and an approval going out (no `--pr`
+  review was run); Linux and Windows.
+  - `just ci-check` is clean.
+
+
+### Miscellaneous Tasks
+
+- Keep local superpowers notes out of the repo
+
 ## [0.1.0] - 2026-11-17
 
 
@@ -159,7 +256,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-- Add pull request actions behind a forge trait (#2)
+- Add pull request actions behind a forge trait (#2) by @sassman in [#2](https://github.com/sassman/diffie-rs/pull/2)
 
   - A `--pr` review is connected to its pull request; a title-bar icon
   opens it, publishes comments, and approves with or without them.
@@ -450,6 +547,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- Add a changelog for first release v0.1.0
+
 - Update the Kit pin so change navigation stops at the ends
 
   The fork's change keys no longer wrap past the terminal group, matching
@@ -591,7 +690,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Ci
 
-- Add checks for main and PRs, and a tag-driven release (#3)
+- Add checks for main and PRs, and a tag-driven release (#3) by @sassman in [#3](https://github.com/sassman/diffie-rs/pull/3)
 
   ## Why
 
