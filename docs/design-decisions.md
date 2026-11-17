@@ -516,9 +516,19 @@ Assumed key map (the mockup's hint bar):
 | `s` | split or unified |
 | `za` `zM` `zR` | fold file, collapse all, expand all |
 | `t` | file tree |
-| Cmd/Ctrl+K | command palette |
+| Cmd/Ctrl+P | command palette |
 
 Single-letter keys must never fire while the reviewer types in a comment box.
+
+Decided (owner, 2026-11-17): the command palette opens on Cmd/Ctrl+P (not
+the mockup's Cmd/Ctrl+K), also while a comment box has focus. It lists what
+the reviewer can do in the current state: a command that cannot run now
+stays in the list, greyed; the pull request's commands exist only in a
+review opened with `--pr`. Enter on an approval sends it at once, as the
+click in the title-bar menu does - choosing the command is the reviewer's
+click. Closing the palette, by a command or by Escape, returns focus to
+where it was. It starts with reload, split or unified, and approving with
+or without comments; every new command joins the one list in `palette.rs`.
 
 Decided (owner, 2026-11-16): Cmd/Ctrl+[ goes back to the position the last
 jump left, and Cmd/Ctrl+] forward again, as in editors and browsers. Every

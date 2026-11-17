@@ -57,6 +57,7 @@ use gpui_kit::{
     prelude::FluentBuilder as _, px, rgb,
 };
 
+mod palette;
 mod pull;
 pub use pull::Pull;
 
@@ -87,6 +88,7 @@ mod commands {
             JumpBack,
             JumpForward,
             Refresh,
+            OpenPalette,
             Quit
         ]
     );
@@ -182,10 +184,17 @@ pub fn init(cx: &mut App) {
     });
 
     let is_mac = cx.platform_info().is_mac();
-    let (submit, refresh, quit, back, forward) = if is_mac {
-        ("cmd-enter", "cmd-r", "cmd-q", "cmd-[", "cmd-]")
+    let (submit, refresh, quit, back, forward, palette) = if is_mac {
+        ("cmd-enter", "cmd-r", "cmd-q", "cmd-[", "cmd-]", "cmd-p")
     } else {
-        ("ctrl-enter", "ctrl-r", "ctrl-q", "ctrl-[", "ctrl-]")
+        (
+            "ctrl-enter",
+            "ctrl-r",
+            "ctrl-q",
+            "ctrl-[",
+            "ctrl-]",
+            "ctrl-p",
+        )
     };
     cx.bind_keys([
         KeyBinding::new("]", NextChange, DIFF),
@@ -211,6 +220,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", CancelDraft, REVIEW),
         KeyBinding::new(submit, SubmitDraft, REVIEW),
         KeyBinding::new(refresh, Refresh, REVIEW),
+        KeyBinding::new(palette, OpenPalette, REVIEW),
         KeyBinding::new(quit, Quit, REVIEW),
     ]);
 
@@ -251,6 +261,8 @@ fn install_menus(cx: &mut App) {
             MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
         ]),
         Menu::new("View").items([
+            MenuItem::action("Command palette", OpenPalette),
+            MenuItem::separator(),
             MenuItem::action("Reload", Refresh),
             MenuItem::separator(),
             MenuItem::action("Split | Unified", MenuSplitUnified),
@@ -877,6 +889,7 @@ pub struct ReviewApp {
     /// jump clears it: forward dies with new navigation, as in a browser.
     forward_stack: Vec<DiffLinePosition>,
     search_open: bool,
+    palette: Entity<palette::CommandState>,
     search_query: Entity<InputState>,
     /// Extend the search past the picked commits to the whole branch.
     search_all: bool,
@@ -1059,6 +1072,7 @@ impl ReviewApp {
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             search_open: false,
+            palette: cx.new(|cx| palette::CommandState::new(window, cx)),
             search_query,
             search_all: false,
             patch_text: Arc::default(),
@@ -5488,6 +5502,9 @@ impl Render for ReviewApp {
             .on_action(cx.listener(|this, _: &JumpBack, _, cx| this.jump_back(cx)))
             .on_action(cx.listener(|this, _: &JumpForward, _, cx| this.jump_forward(cx)))
             .on_action(cx.listener(|this, _: &Refresh, _, cx| this.reload(cx)))
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
+                this.open_palette(window, cx)
+            }))
             .on_action(|_: &Quit, _, cx| cx.quit())
             // The menu stand-ins (see `commands`) reuse the shortcut
             // handlers' methods.
