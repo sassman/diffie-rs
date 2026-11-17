@@ -60,6 +60,7 @@ Be exact about this when you report further work.
 | Archive action on own comments: `take_comment` + `ArchiveFile::append` in the core, Archive button and background write in the app | Core rules covered by unit tests (move out of the live file, append dedupe, invisibility to discovery and `--reply`); the button and the write flow compiled, clippy-clean, not seen on screen - the window was not run |
 | `r` ticking the file the focus mark is in after `]`/`[` (`follow_mark` pulls `current_file` from the Kit's mark; `n`/`p` and search jumps already set it), and ticking the first expanded, unticked file on a fresh load before any navigation | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Jump-back and forward (Cmd/Ctrl+[ and ]): the two stacks, the exact restore, the hint-bar entry and the Go > Back and Forward items | The Kit's `scroll_to_top_line`/`top_line` round trip is covered by a Kit integration test (`scroll_to_top_line_restores_what_top_line_read`); the app side compiled, clippy-clean, not seen on screen - the window was not run |
+| Command palette (Cmd/Ctrl+P): the list, key hints, keyword search, focus returning on close | Verified on macOS by screenshot, driven by System Events keys: Cmd+P opens it with Reload (Cmd+R hint) and the split/unified switch (`s` hint); "spl" finds the switch by keyword; Enter switched the layout and a following `s` switched it back (focus was on the diff again); the same after Escape; Down, Down (wraps) and Up move the highlight, and a reopened palette starts on the first row again (read off the row backgrounds in screenshots). The two approvals and their greying were not seen - no `--pr` review was run |
 | Other-revision cards keeping the full actions row, Edit and Delete disabled with explaining tooltips | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 | Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
@@ -162,6 +163,8 @@ crates/app/src/
   app/pull.rs                 the connected pull request: its standing,
                               the title-bar menu, publishing (a child of
                               `app`, so it reaches ReviewApp's state)
+  app/palette.rs              the command palette: the command list and
+                              running the chosen one
   settings.rs                 machine-wide settings (~/.config/diffie),
                               TOML; layout mode and window bounds
 assets/                       brand mark (logo.svg) and app icon (icon.svg)
@@ -584,7 +587,24 @@ actually exercised):
   load failures.
 - Shortcuts: `]` `[` `}` `{` `s` `o` `t` `n` `p` `1` `2` `3` `zM` `zR` `c`
   `r`, Escape, Cmd/Ctrl+Enter, Cmd/Ctrl+R, Cmd/Ctrl+Q, Cmd/Ctrl+[ and ],
-  Space in the commit list.
+  Cmd/Ctrl+P, Space in the commit list.
+- Command palette: Cmd/Ctrl+P (also View > Command palette) opens the
+  Kit's `Command` in a Kit dialog. `palette_entries` in `app/palette.rs`
+  is the one list - Reload, split or unified, and in a `--pr` review the
+  two approvals, greyed by the same `can_approve` the title-bar menu
+  uses. The confirmed row is mapped to a `PaletteCommand` and run by
+  `run_palette_command`, not through the item's Action: the dialog sits
+  outside the review view, so an Action dispatched from it would reach
+  no handler. Rows with a shortcut draw the hint themselves (`Kbd`),
+  looked up from the diff's focus handle: from the dialog's own focus no
+  binding resolves. The dialog returns focus to where it was on close.
+  Matching is the Kit's plain substring over label and keywords; no
+  ranking, no recently-used order. The `CommandState` lives as long as
+  the window, so `open_palette` clears the query and puts the highlight
+  back on the first row. The Kit paints the highlighted row with the
+  theme's `accent.background`: Gruvbox had it equal to the popover
+  colour, which made the highlight (here and in every menu) invisible,
+  so it is one Gruvbox step lighter now.
 - Jump-back and forward: Cmd/Ctrl+[ and Cmd/Ctrl+] (also Go > Back and
   Forward, and a status-bar hint) walk the jump history. Every jump -
   change keys, `n`/`p`, the file stepper, tree clicks,
@@ -643,7 +663,7 @@ Not implemented or not possible, against the mockup and the design document:
 | Per-file horizontal scrolling | Unified scrolls the whole list as one canvas (see the trap above). Scrolling is the default since 2026-11-11, with a wrap toggle in the title bar |
 | Per-file commit stepper | Removed as YAGNI on 2026-11-11 (it only ever rendered disabled); design document section 14 holds the idea, `commits_touching` still feeds the touched-by text |
 | Suggestions | "Suggest change" renders disabled; no flow behind it |
-| `j` `k` line cursor, `v`, `g`, `(` `)`, `e`, `za`, command palette | Design question 8 for the cursor |
+| `j` `k` line cursor, `v`, `g`, `(` `)`, `e`, `za` | Design question 8 for the cursor |
 | Selections inside a line | Design question 7 |
 | "Branch has moved since this review" warning | Header data is stored |
 | Importing a colleague's file from the UI | Works by dropping the file in the folder |

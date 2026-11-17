@@ -242,6 +242,34 @@ impl ReviewApp {
         });
     }
 
+    /// What a publish would send. Nothing while the view is swapped.
+    pub(super) fn pull_pending(&self) -> Pending {
+        self.reviews
+            .as_ref()
+            .filter(|_| self.pull_in_view())
+            .map(diffie_core::forge::pending)
+            .unwrap_or_default()
+    }
+
+    /// A merged or closed pull request still takes comments, but no
+    /// approval. Until the forge answers, the state read at startup
+    /// stands in.
+    pub(super) fn pull_state(&self, pull: &Pull) -> PrState {
+        self.pull_status
+            .as_ref()
+            .map_or(pull.request.state, |status| status.state)
+    }
+
+    /// Whether an approval can go out, and whether it has comments to
+    /// carry: the title-bar menu and the command palette grey the same
+    /// items.
+    pub(super) fn can_approve(&self, pull: &Pull, with_comments: bool) -> bool {
+        !self.publishing
+            && self.pull_in_view()
+            && self.pull_state(pull) == PrState::Open
+            && (!with_comments || pending_label(self.pull_pending()).is_some())
+    }
+
     /// Send the review to the pull request: the unpublished comments (with
     /// edits and reactions) when `with_comments`, under `verdict`. The
     /// forge's ids come back into the reviewer's own file through the one
@@ -340,20 +368,12 @@ impl ReviewApp {
         let owner = cx.weak_entity();
         let in_view = self.pull_in_view();
         let busy = self.publishing;
-        let pending = self
-            .reviews
-            .as_ref()
-            .filter(|_| in_view)
-            .map(diffie_core::forge::pending)
-            .unwrap_or_default();
+        let pending = self.pull_pending();
         let status = self.pull_status.clone();
-        // A merged or closed pull request still takes comments, but no
-        // approval. Until the forge answers, the state read at startup
-        // stands in.
-        let state = status
-            .as_ref()
-            .map_or(pull.request.state, |status| status.state);
+        let state = self.pull_state(pull);
         let open = state == PrState::Open;
+        let can_approve_with = self.can_approve(pull, true);
+        let can_approve_without = self.can_approve(pull, false);
         let rows = status_rows(state, status.as_ref());
         let error = self.pull_status_error.clone();
         let tooltip = match (&status, &error) {
@@ -474,13 +494,13 @@ impl ReviewApp {
                             None => "Approve with comments".to_string(),
                         })
                         .icon(Icon::new(Lucide::CheckCheck))
-                        .disabled(busy || !open || sent.is_none())
+                        .disabled(!can_approve_with)
                         .on_click(send(Verdict::Approve, true)),
                     )
                     .item(
                         PopupMenuItem::new("Approve without comments")
                             .icon(Icon::new(Lucide::Check))
-                            .disabled(busy || !open || !in_view)
+                            .disabled(!can_approve_without)
                             .on_click(send(Verdict::Approve, false)),
                     )
                     .item(
