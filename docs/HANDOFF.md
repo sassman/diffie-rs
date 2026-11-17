@@ -513,7 +513,10 @@ actually exercised):
   earlier-comments toggle (`set_other_revisions` swaps the Diff's file
   set and restores the top line, since `set_files` resets the viewport),
   stay out of the reviewed progress and carry no tick; archiving an
-  orphan's thread reloads so no empty snippet file lingers. Replies thread under the comment body (author plus
+  orphan's thread reloads so no empty snippet file lingers. In the file
+  tree the entry drops the status letter - it is in no changeset to have
+  one - for the earlier-comments toggle's dashed-bubble icon, a muted
+  name and a tooltip carrying the header's note. Replies thread under the comment body (author plus
   markdown, left-bordered). Resolving changes nothing but the reaction -
   the thread stays the full record - but its card folds away: a 3 s
   grace (the last 500 ms a fade, `FOLD_GRACE`/`FOLD_FADE`), then only a

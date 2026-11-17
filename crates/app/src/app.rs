@@ -3986,6 +3986,7 @@ impl ReviewApp {
         };
         let state = self.review_state(&file.path);
         let unchanged = file.state == FileState::UnchangedSinceReview;
+        let orphan = file.state == FileState::NotInComparison;
         let quiet = state == ReviewState::Reviewed || unchanged || is_generated(&file.path);
         let selected = self.current_file.as_ref() == Some(&path);
         let target = path.clone();
@@ -4014,18 +4015,33 @@ impl ReviewApp {
             .cursor_pointer()
             .children(indent_guides(depth, cx))
             .when(selected, |row| row.bg(cx.theme().accent))
-            .when(quiet, |row| row.text_color(muted))
+            .when(quiet || orphan, |row| row.text_color(muted))
             .hover(|row| row.bg(cx.theme().list_hover))
             .on_click(cx.listener(move |this, _, _, cx| this.reveal_file(target.clone(), cx)))
-            .child(
-                div()
-                    .flex_none()
-                    .font_family(mono.clone())
-                    .text_size(px(10.5))
-                    .font_medium()
-                    .text_color(status_color)
-                    .child(status),
-            )
+            // An orphan entry is in no changeset: no status letter to claim
+            // one. The dashed bubble is the earlier-comments toggle's icon,
+            // naming what the row is here for and what hides it.
+            .when(orphan, |row| {
+                let tip: SharedString =
+                    "not in this comparison - shown for its open comments".into();
+                row.child(
+                    Icon::new(Lucide::MessageSquareDashed)
+                        .xsmall()
+                        .text_color(muted),
+                )
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            })
+            .when(!orphan, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .font_family(mono.clone())
+                        .text_size(px(10.5))
+                        .font_medium()
+                        .text_color(status_color)
+                        .child(status),
+                )
+            })
             .child(div().flex_1().min_w_0().truncate().child(name.to_string()))
             .when(comments > 0, |row| row.child(comment_badge(comments, cx)))
             .when(state == ReviewState::Reviewed, |row| {
