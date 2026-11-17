@@ -1623,6 +1623,12 @@ impl ReviewApp {
     /// the old side before the new. Comments hidden with the other
     /// revisions' toggle are skipped; a jump must land on something visible.
     fn comment_stops(&self) -> Vec<(String, String, Side, usize)> {
+        self.comment_stops_showing(self.show_other_revisions)
+    }
+
+    /// The stops as they would be with the earlier-comments toggle in the
+    /// given state, so a jump can probe before flipping anything.
+    fn comment_stops_showing(&self, earlier_shown: bool) -> Vec<(String, String, Side, usize)> {
         let order: HashMap<&str, usize> = self
             .files
             .iter()
@@ -1636,7 +1642,7 @@ impl ReviewApp {
         let mut stops: Vec<(String, String, Side, usize)> = self
             .placed
             .iter()
-            .filter(|placed| self.show_other_revisions || !placed.earlier())
+            .filter(|placed| earlier_shown || !placed.earlier())
             .filter(|placed| !resolved.contains(placed.id.as_str()))
             .map(|placed| {
                 (
@@ -1663,10 +1669,12 @@ impl ReviewApp {
         // hides them instead of dying silently: first the earlier-comments
         // toggle, then - like a search hit outside the view - the scope.
         if stops.is_empty() && !self.show_other_revisions {
-            self.set_other_revisions(true, cx);
-            stops = self.comment_stops();
-            if stops.is_empty() {
-                self.set_other_revisions(false, cx);
+            // Probe before flipping: the flip rebuilds the Diff's file set
+            // when orphan entries exist, too heavy for a jump to nowhere.
+            let revealed = self.comment_stops_showing(true);
+            if !revealed.is_empty() {
+                self.set_other_revisions(true, cx);
+                stops = revealed;
             }
         }
         if stops.is_empty() {
@@ -2007,8 +2015,10 @@ impl ReviewApp {
             }
             self.diff.update(cx, |state, cx| {
                 state.set_files(files, cx);
+                // The exact-restore pair of top_line; scroll_to_line would
+                // re-center the row and shift the page by half a screen.
                 if let Some(top) = top {
-                    state.scroll_to_line(top, cx);
+                    state.scroll_to_top_line(top, cx);
                 }
             });
         }
@@ -5907,11 +5917,17 @@ fn load(
         let placed_ids: HashSet<&str> = placed.iter().map(|placed| placed.id.as_str()).collect();
         let whole_branch = matches!(scope, Scope::WholeBranch);
         let branch_paths: HashSet<&str> = branch.iter().map(|(path, _)| path.as_str()).collect();
+        // A path with an entry in the comparison must never get a second,
+        // synthetic one: an unplaceable thread on a shown file stays
+        // unplaced and keeps the status-bar label instead.
+        let shown_paths: HashSet<&str> =
+            patch.files.iter().map(|file| file.path.as_str()).collect();
         let threads = reviews.threads();
         let orphans: Vec<&diffie_core::review::Comment> = threads
             .iter()
             .filter(|thread| !thread.resolved())
             .filter(|thread| !placed_ids.contains(thread.comment.id.as_str()))
+            .filter(|thread| !shown_paths.contains(thread.comment.path.as_str()))
             .filter(|thread| whole_branch || !branch_paths.contains(thread.comment.path.as_str()))
             .map(|thread| thread.comment)
             .collect();
@@ -5943,7 +5959,9 @@ fn load(
                 // The snippet rows are emitted as additions, which exist on
                 // the new side only - old-side comments anchor there too.
                 side: Side::New,
-                line: comment.line.max(1),
+                // The last row the synthesis emits: a snippet taller than
+                // its stored line sits shifted down from the file top.
+                line: comment.line.max(comment.snippet.lines().count().max(1)),
                 lines: comment.lines,
                 selection: comment.selection.is_some(),
                 // The earlier-round machinery gates the card and the jump
