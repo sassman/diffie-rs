@@ -5826,6 +5826,9 @@ impl Render for ReviewApp {
                             let line = owner
                                 .upgrade()
                                 .and_then(|app| app.read(cx).hovered_line.clone());
+                            let symbol = owner
+                                .upgrade()
+                                .and_then(|app| app.read(cx).pointed_symbol());
                             let line_owner = owner.clone();
                             let comment_owner = owner.clone();
                             menu.item(
@@ -5840,6 +5843,19 @@ impl Render for ReviewApp {
                                         }
                                     }),
                             )
+                            // Only on a name the navigation knows: its
+                            // full path, as the hover would resolve it.
+                            .when_some(symbol, |menu, symbol| {
+                                menu.item(
+                                    PopupMenuItem::new("Copy symbol")
+                                        .icon(Icon::new(Lucide::Copy))
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                symbol.clone(),
+                                            ));
+                                        }),
+                                )
+                            })
                             .item(
                                 PopupMenuItem::new("Comment")
                                     .icon(Icon::new(Lucide::MessageSquarePlus))

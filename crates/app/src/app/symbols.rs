@@ -145,6 +145,8 @@ pub(super) struct Symbols {
     old_paths: HashMap<SharedString, String>,
     pub(super) link: Option<Link>,
     hint: Option<Hint>,
+    /// The source text under the pointer, whatever keys are held.
+    pointed: Option<DiffTextPosition>,
     pub(super) entries: Vec<DefinitionEntry>,
     picker: Entity<CommandState>,
     _build: Task<()>,
@@ -159,6 +161,7 @@ impl Symbols {
             old_paths: HashMap::new(),
             link: None,
             hint: None,
+            pointed: None,
             entries: Vec::new(),
             picker: cx.new(|cx| CommandState::new(window, cx)),
             _build: Task::ready(()),
@@ -171,6 +174,7 @@ impl Symbols {
         self.views = None;
         self.link = None;
         self.hint = None;
+        self.pointed = None;
         self.entries.clear();
         self.old_paths.clear();
     }
@@ -307,6 +311,7 @@ impl ReviewApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.symbols.pointed = hit.cloned();
         let named = hit
             .filter(|_| modifiers.secondary(cx))
             .and_then(|hit| self.name_at(hit));
@@ -341,6 +346,26 @@ impl ReviewApp {
             self.symbols.link = link;
             self.symbols.hint = hint;
             cx.notify();
+        }
+    }
+
+    /// The full name of the symbol under the pointer, for the context
+    /// menu's copy: known by the same rules as the hover. Tied
+    /// definitions with different names have no one name to copy.
+    pub(super) fn pointed_symbol(&self) -> Option<String> {
+        let views = self.symbols.views.as_ref()?;
+        match self.name_at(self.symbols.pointed.as_ref()?)? {
+            Named::Elsewhere { origin, .. } => Some(origin.path),
+            Named::Here(link) => {
+                let view = views.of(link.side);
+                let mut names: Vec<String> = link
+                    .targets
+                    .iter()
+                    .filter_map(|target| view.qualified_name(target))
+                    .collect();
+                names.dedup();
+                (names.len() == 1).then(|| names.remove(0))
+            }
         }
     }
 

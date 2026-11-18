@@ -639,6 +639,61 @@ fn a_macro_resolves_to_its_definition() {
     );
 }
 
+#[test]
+fn a_definition_has_a_full_name_from_its_crates_root() {
+    let model = "\
+pub struct Oid;
+impl Oid { pub fn short(&self) {} }
+mod parse {
+    mod hex { pub fn digit() {} }
+}
+";
+    let files = [
+        ("crates/core/src/lib.rs", "mod model;\npub fn open() {}\n"),
+        ("crates/core/src/model.rs", model),
+        ("crates/core/src/patch/mod.rs", "pub enum Kind { Added }\n"),
+        ("crates/core/tests/git_cli.rs", "fn repo() {}\n"),
+    ];
+    let view = view(&files);
+    let named = |path: &str, name: &str| {
+        let definition =
+            definition(&parse(path, text_of(&files, path), false).unwrap(), name).clone();
+        view.qualified_name(&Target {
+            path: path.to_string(),
+            definition,
+        })
+        .unwrap()
+    };
+    assert_eq!(named("crates/core/src/lib.rs", "open"), "crate::open");
+    assert_eq!(named("crates/core/src/lib.rs", "model"), "crate::model");
+    assert_eq!(
+        named("crates/core/src/model.rs", "Oid"),
+        "crate::model::Oid"
+    );
+    assert_eq!(
+        named("crates/core/src/model.rs", "short"),
+        "crate::model::Oid::short"
+    );
+    assert_eq!(
+        named("crates/core/src/model.rs", "digit"),
+        "crate::model::parse::hex::digit"
+    );
+    assert_eq!(
+        named("crates/core/src/patch/mod.rs", "Added"),
+        "crate::patch::Kind::Added"
+    );
+    assert_eq!(named("crates/core/tests/git_cli.rs", "repo"), "crate::repo");
+}
+
+fn text_of<'f>(files: &[(&str, &'f str)], path: &str) -> &'f [u8] {
+    files
+        .iter()
+        .find(|(candidate, _)| *candidate == path)
+        .expect("the path is among the sources")
+        .1
+        .as_bytes()
+}
+
 /// The origin of the reference at `needle` in `path`, as `package: path`.
 fn origin(files: &[(&str, &str)], path: &str, needle: &str) -> Option<String> {
     let text = files

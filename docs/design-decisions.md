@@ -748,6 +748,11 @@ Decided (owner, 2026-11-18):
   card at the pointer instead of a link: the full path
   (`gpui_kit::component::diff::DiffSide`) and the crate it starts in.
   No underline, nothing to click.
+- **The context menu copies a symbol's full name.** "Copy symbol" sits
+  next to Copy and only shows on a name the hover would recognise. A
+  name from another crate copies the card's path; one defined here
+  copies `crate::module::Type::member`, built from the definition's
+  file, the modules written around it and its container.
 - **Variants and fields are members by position.** `Scope::NewForMe`
   resolves `Scope` first; only a `NewForMe` inside that enum's lines
   survives. An ambiguous enum offers one variant per candidate enum.
@@ -792,6 +797,9 @@ Assumed:
   path written out in place - shows nothing. An import that stays inside
   the package (`crate::`, a module declared beside it) shows nothing
   either: that name should have resolved, and a guess would mislead.
+- A copied name of a local definition starts at `crate`, not at the
+  crate's real name, which is in a manifest the syntax does not read.
+  Tied definitions with different full names offer no "Copy symbol".
 
 Open:
 

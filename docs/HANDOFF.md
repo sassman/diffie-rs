@@ -81,7 +81,7 @@ Be exact about this when you report further work.
 | Symbol engine (`diffie-symbols`): Rust definitions, references and imports; role, qualifier and ranking rules; ties; positional membership of variants and fields; per-revision views, the working-tree overlay and references for shown files only | Unit tests on source snippets and tests against a throwaway repository, macOS, 2026-11-18. Probed once against this repository: both views of a load in about 135 ms |
 | Core `blobs` (batch read, bytes kept exact) and `worktree_file` | Tests in `crates/core/tests/git_cli.rs`, macOS, 2026-11-18 |
 | Kit fork additions (`on_text_hover` including the modifier-at-rest case, `on_text_click` and its claim, `has_line`, `DiffFile::excerpts`) | Kit tests with simulated pointer and modifier events, macOS, 2026-11-18. The pointing-hand cursor and the underline style compile and render in those tests; how they look was not seen |
-| Symbol navigation in the window: Cmd-hover link styling and cursor, Cmd-click landing inside the diff with the focus mark, the origin card for a name from another crate, the tie dialog, a definition entry (excerpt rows, header note and x, panel row), Cmd+[ back from each, chained jumps inside an entry | Compiled, clippy-clean. The window was started once against this repository and loaded with the views built; **no gesture was exercised** - synthetic mouse events do not reach the handlers (see the orphan row above) |
+| Symbol navigation in the window: Cmd-hover link styling and cursor, Cmd-click landing inside the diff with the focus mark, the origin card for a name from another crate, "Copy symbol" in the context menu, the tie dialog, a definition entry (excerpt rows, header note and x, panel row), Cmd+[ back from each, chained jumps inside an entry | Compiled, clippy-clean. The window was started once against this repository and loaded with the views built; **no gesture was exercised** - synthetic mouse events do not reach the handlers (see the orphan row above) |
 | Moved-code folds surviving the earlier-comments toggle (`sync_diff_files` puts them back after `set_files`; before, the toggle dropped them whenever orphan entries existed) | Compiled; not seen on screen |
 
 ## Build, run, test
@@ -469,7 +469,9 @@ actually exercised):
   trusted only where the row spells its name). A name that resolves to
   nothing but is imported from another crate gets a card at the pointer
   instead (`render_origin_hint`): full path and crate, read from the
-  imports by `RevisionView::origin`, through `use super::*` too.
+  imports by `RevisionView::origin`, through `use super::*` too. The
+  diff's context menu offers "Copy symbol" on such names and on
+  resolvable ones (`pointed_symbol`, from the last text hover).
   Cmd/Ctrl-click jumps: one
   target lands on its row when the diff carries the line, with the
   change-navigation focus mark, and otherwise opens a definition entry;

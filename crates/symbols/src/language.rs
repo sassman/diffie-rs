@@ -18,6 +18,11 @@ pub struct Language {
     /// The directory of the package `path` belongs to: files sharing it
     /// rank as "same crate".
     pub(crate) package: fn(path: &str) -> &str,
+    /// The module the file at `path` is, as segments from its package's
+    /// root.
+    pub(crate) module_path: fn(path: &str) -> Vec<String>,
+    /// What joins the segments of a qualified name.
+    pub(crate) separator: &'static str,
     /// What the language calls a package, for the reader.
     pub(crate) package_word: &'static str,
     /// Whether an import path starting with `segment` stays inside the
@@ -36,6 +41,8 @@ static LANGUAGES: &[Language] = &[Language {
     module_like: rust::module_like,
     is_module: rust::is_module,
     package: rust::package,
+    module_path: rust::module_path,
+    separator: "::",
     package_word: "crate",
     local_root: rust::local_root,
     glob_sources: rust::glob_sources,

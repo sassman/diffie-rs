@@ -1,8 +1,9 @@
-//! Where a name comes from when the tree does not define it: another
-//! package, read off the import that brings the name into scope.
+//! A name's full path: for one the tree does not define, the package it
+//! comes from, read off the import that brings it into scope; for one it
+//! does, the modules around its definition.
 
 use crate::index::RevisionView;
-use crate::{GLOB, Import, Kind, Language, Reference};
+use crate::{GLOB, Import, Kind, Language, Reference, Target};
 
 /// A name defined outside the tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,6 +72,29 @@ impl RevisionView {
             package: root.to_string(),
             package_word: language.package_word,
         })
+    }
+
+    /// The full name of a definition in this tree: its file's module,
+    /// the modules written around it in the file, its container, its name.
+    pub fn qualified_name(&self, target: &Target) -> Option<String> {
+        let language = Language::for_path(&target.path)?;
+        let definition = &target.definition;
+        let mut segments = (language.module_path)(&target.path);
+        let mut inline: Vec<&crate::Definition> = self.files[self.file_ix(&target.path)?]
+            .symbols
+            .definitions
+            .iter()
+            .filter(|outer| {
+                outer.kind == Kind::Module
+                    && *outer != definition
+                    && (outer.first_line..=outer.last_line).contains(&definition.line)
+            })
+            .collect();
+        inline.sort_by_key(|outer| (outer.line, outer.column.start));
+        segments.extend(inline.into_iter().map(|outer| outer.name.clone()));
+        segments.extend(definition.container.clone());
+        segments.push(definition.name.clone());
+        Some(segments.join(language.separator))
     }
 
     /// The import that brings `name` into `file`, and the file it is

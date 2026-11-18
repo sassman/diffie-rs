@@ -55,6 +55,34 @@ pub(crate) fn package(path: &str) -> &str {
         .map_or("", |end| &path[..end])
 }
 
+/// The module the file at `path` is, from its crate's root. The crate's
+/// real name is in its manifest, which syntax does not read, so the path
+/// starts at `crate`.
+pub(crate) fn module_path(path: &str) -> Vec<String> {
+    let rest = path[package(path).len()..].trim_start_matches('/');
+    let (target, rest) = rest.split_once('/').unwrap_or(("", rest));
+    let mut parts: Vec<&str> = rest
+        .strip_suffix(".rs")
+        .unwrap_or(rest)
+        .split('/')
+        .collect();
+    // `src` has one root; under `tests` and its like every file is one.
+    let root = match target {
+        "src" => matches!(parts.as_slice(), ["lib"] | ["main"]),
+        _ => parts.len() == 1,
+    };
+    if root {
+        parts.clear();
+    }
+    if parts.last() == Some(&"mod") {
+        parts.pop();
+    }
+    std::iter::once("crate")
+        .chain(parts)
+        .map(str::to_string)
+        .collect()
+}
+
 /// A path that starts here names something of this package, not a crate.
 pub(crate) fn local_root(segment: &str) -> bool {
     matches!(segment, "crate" | "self" | "super")
