@@ -1,19 +1,24 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/app"]
+members = ["crates/core", "crates/symbols", "crates/app"]
 
 [workspace.package]
 version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
 repository = "https://github.com/sassman/diffie-rs"
-homepage = "https://github.com/sassman/diffie-rs"
 # Releases ship as GitHub Release binaries and a Homebrew formula, not
 # through crates.io.
 publish = false
 
 [workspace.dependencies]
 diffie-core = { path = "crates/core" }
+diffie-symbols = { path = "crates/symbols" }
+# The versions the Kit builds its own highlighting on, so the lock holds
+# one copy once that feature is switched on. The Kit does not re-export
+# `tree_sitter`, hence the direct dependency.
+tree-sitter = "0.26.13"
+tree-sitter-rust = "0.24.0"
 # GPUI Kit re-exports GPUI and pins the matching GPUI snapshot itself.
 # Pin exactly: every Kit release may move to a GPUI snapshot with API changes.
 gpui-kit = { version = "=0.9.1", features = ["syntect"] }
@@ -28,14 +33,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # The owner's Kit fork until longbridge/gpui-kit takes the PRs. The
 # branch stacks the fork's diff features (bulk collapse, per-panel split
-# scrolling, pinned file headers, labeled fold rows) on the v0.9.1 tag,
-# so every crate keeps the pinned version; the whole family must come
-# from one source or two copies of gpui-base collide.
+# scrolling, pinned file headers, labeled fold rows, text pointer events)
+# on the v0.9.1 tag, so every crate keeps the pinned version; the whole
+# family must come from one source or two copies of gpui-base collide.
 [patch.crates-io]
-gpui-kit = { git = "https://github.com/sassman/gpui-kit", branch = "sticky-file-headers" }
-gpui-component = { git = "https://github.com/sassman/gpui-kit", branch = "sticky-file-headers" }
-gpui-base = { git = "https://github.com/sassman/gpui-kit", branch = "sticky-file-headers" }
-gpui-kit-assets = { git = "https://github.com/sassman/gpui-kit", branch = "sticky-file-headers" }
+gpui-kit = { git = "https://github.com/sassman/gpui-kit", branch = "diff-text-pointer" }
+gpui-component = { git = "https://github.com/sassman/gpui-kit", branch = "diff-text-pointer" }
+gpui-base = { git = "https://github.com/sassman/gpui-kit", branch = "diff-text-pointer" }
+gpui-kit-assets = { git = "https://github.com/sassman/gpui-kit", branch = "diff-text-pointer" }
 
 [profile.dev]
 # GPUI is slow unoptimised; keep our own crates fast to rebuild.

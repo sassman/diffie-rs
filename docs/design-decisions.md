@@ -59,7 +59,9 @@ dependency and pins it exactly.
 Decided:
 
 - Two crates. `diffie-core` has no UI dependency: repository access, diff
-  production, the review file. `diffie` is the GPUI Kit UI.
+  production, the review file. `diffie` is the GPUI Kit UI. A third,
+  `diffie-symbols`, joined on 2026-11-18 for symbol navigation (section
+  19): no UI dependency either, and it sits on top of the core.
 - The UI talks to the repository only through the `ReviewBackend` trait.
 - The first backend is deliberately cheap: it shells out to `git`. The owner
   does not want effort spent there until the UI and flow have settled. A real
@@ -713,3 +715,95 @@ Open:
 - Whether comments made on the pull request should be read back in.
 - Whether removed-line comments should record the old side they were made
   against, so they can be anchored on the pull request's left side.
+
+## 19. Symbol navigation
+
+Decided (owner, 2026-11-18):
+
+- **The gesture is Zed's.** Holding Cmd (Ctrl on Windows and Linux) over
+  a name that resolves styles it as a link; Cmd/Ctrl-click jumps to the
+  definition. A name that does not resolve gets no styling.
+- **Syntax only.** Definitions and references are read from tree-sitter
+  trees; there is no type inference and no language server. A name
+  resolves by its role (call, type position, field, ...), its qualifier
+  and where the candidates live.
+- **Several candidates: rank, then ask.** Candidates are ranked - the
+  qualifier names the candidate's home, same file, named by an import,
+  same package. One winner jumps. Candidates sharing the top rank open a
+  list for the reviewer to pick from; the app never guesses between
+  equals.
+- **Each side resolves in its own revision.** Added and context rows
+  resolve in the revision the right side shows (the working tree in an
+  uncommitted review), removed rows in the revision the left side shows.
+  A removed call to a since-deleted function still finds its definition.
+- **The lookup table cannot go stale.** Symbols are kept per blob id; a
+  revision is a view over those entries. A new commit parses only the
+  blobs it changed.
+- **Clickable kinds**: functions, methods, structs, enums, unions,
+  traits, type aliases, constants, statics, modules, macros, enum
+  variants and struct fields. Not locals, not parameters, nothing from
+  the standard library or a dependency.
+- **A name from another crate says where it comes from.** Cmd/Ctrl-hover
+  on a name the repository does not define, but an import names, shows a
+  card at the pointer instead of a link: the full path
+  (`gpui_kit::component::diff::DiffSide`) and the crate it starts in.
+  No underline, nothing to click.
+- **The context menu copies a symbol's full name.** "Copy symbol" sits
+  next to Copy and only shows on a name the hover would recognise. A
+  name from another crate copies the card's path; one defined here
+  copies `crate::module::Type::member`, built from the definition's
+  file, the modules written around it and its container.
+- **Variants and fields are members by position.** `Scope::NewForMe`
+  resolves `Scope` first; only a `NewForMe` inside that enum's lines
+  survives. An ambiguous enum offers one variant per candidate enum.
+  `value.field` and `value.method()` carry no type and resolve by name
+  alone, except on `self`, which is the enclosing type.
+- **A definition outside the diff opens as a temporary entry** showing
+  the whole item (doc comment included) at its real line numbers, as
+  plain code. It has no tick, stays out of the reviewed progress and is
+  closed by hand; a reload, a scope change or a new commit closes all of
+  them. More items from the same file join the same entry. Names inside
+  an entry can be followed in turn.
+- **Definition entries are read-only.** No comments there: one would sit
+  outside the comparison the moment it is saved.
+- **The way back is the existing history**: Cmd/Ctrl+[ and Cmd/Ctrl+].
+- **The engine is its own crate**, `diffie-symbols`, with one table
+  entry per language; Rust is the first. It depends on `diffie-core` and
+  reads the repository only through `ReviewBackend`; the core keeps all
+  repository access. This index is a sanctioned exception to "the cheap
+  backend stays cheap".
+
+Assumed:
+
+- The list for tied candidates is a dialog over the Kit's command list,
+  like the command palette (arrows, Enter, Escape, typing narrows), not a
+  popup at the pointer.
+- Definition entries sit after the comparison's files, in the diff and
+  under the tree in the file panel, in the order they were opened.
+- Where a side shows no revision git can list, the nearest real one
+  stands in: the branch tip for a combined pick of non-contiguous
+  commits, and the comparison's base for the left side of New for me,
+  whose files really diff against their ticks. A name is only offered as
+  a link where the row on screen spells it at the reference's position,
+  so a stand-in never lights up the wrong word.
+- A definition in a changed file, but beyond the context the patch
+  carries, opens as an entry too ("outside the changed lines").
+- Syntax highlighting stays on `syntect`; the tree-sitter trees serve
+  navigation only.
+- The origin card reads imports only: the name's own `use`, the `use` of
+  its qualifier, and through `use super::*` the parent module's imports.
+  Other globs are not followed (they pass on `pub use` alone, which is
+  not recorded), so a name with no import in reach - prelude names, a
+  path written out in place - shows nothing. An import that stays inside
+  the package (`crate::`, a module declared beside it) shows nothing
+  either: that name should have resolved, and a guess would mislead.
+- A copied name of a local definition starts at `crate`, not at the
+  crate's real name, which is in a manifest the syntax does not read.
+  Tied definitions with different full names offer no "Copy symbol".
+
+Open:
+
+- Whether definition entries should take comments, and what such a
+  comment is in terms of section 9.
+- Local variables and parameters, find-references, and the next
+  languages.

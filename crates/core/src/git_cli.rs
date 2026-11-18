@@ -920,6 +920,51 @@ impl ReviewBackend for GitCli {
             .collect())
     }
 
+    fn blobs(&self, ids: &[Oid]) -> Result<HashMap<Oid, Vec<u8>>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let list: String = ids.iter().map(|id| format!("{id}\n")).collect();
+        let output = run_bytes(
+            &mut self.command(),
+            &["cat-file", "--batch"],
+            Some(list.as_bytes()),
+        )?;
+        // `<oid> <type> <size>\n<content>\n` per object, `<name> missing\n`
+        // for one git does not hold. Sizes count bytes, hence the raw output.
+        let mut blobs = HashMap::new();
+        let mut rest = output.as_slice();
+        while let Some(end) = rest.iter().position(|byte| *byte == b'\n') {
+            let header = String::from_utf8_lossy(&rest[..end]).into_owned();
+            rest = &rest[end + 1..];
+            let mut fields = header.split(' ');
+            let (Some(id), Some(kind), Some(size)) = (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let Some(content) = size.parse().ok().and_then(|size: usize| rest.get(..size)) else {
+                break;
+            };
+            if kind == "blob" {
+                blobs.insert(Oid::new(id), content.to_vec());
+            }
+            rest = rest.get(content.len() + 1..).unwrap_or_default();
+        }
+        Ok(blobs)
+    }
+
+    fn worktree_file(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        let top = self
+            .try_read(&["rev-parse", "--show-toplevel"])?
+            .map(|output| PathBuf::from(output.trim()))
+            .ok_or_else(|| BackendError::NotARepository(self.repository.display().to_string()))?;
+        let file = top.join(path);
+        if !file.is_file() {
+            return Ok(None);
+        }
+        Ok(Some(std::fs::read(file)?))
+    }
+
     fn author_name(&self) -> Result<String> {
         let name = self
             .try_read(&["config", "user.name"])?
@@ -938,6 +983,15 @@ impl ReviewBackend for GitCli {
 }
 
 fn run(command: &mut Command, args: &[impl AsRef<str>], stdin: Option<&[u8]>) -> Result<String> {
+    run_bytes(command, args, stdin).map(|output| String::from_utf8_lossy(&output).into_owned())
+}
+
+/// [`run`] without the text conversion, for output whose byte counts matter.
+fn run_bytes(
+    command: &mut Command,
+    args: &[impl AsRef<str>],
+    stdin: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     command
         .args(args.iter().map(|argument| argument.as_ref()))
         .stdin(if stdin.is_some() {
@@ -963,7 +1017,7 @@ fn run(command: &mut Command, args: &[impl AsRef<str>], stdin: Option<&[u8]>) ->
     }
     let output = child.wait_with_output()?;
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(output.stdout)
     } else {
         Err(BackendError::Git {
             command: args

@@ -1,0 +1,16 @@
+[package]
+name = "diffie-symbols"
+description = "diffie symbol navigation: definitions and references from tree-sitter syntax trees."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+diffie-core.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

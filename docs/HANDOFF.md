@@ -28,6 +28,12 @@ first code: a working core and a first UI scaffold wired to it.
   bar. See "What the UI does and does not do". The same cleanup fixed a
   lost-update race around the review file, moved search scans off the UI
   thread and added a status-bar notice for side-task failures.
+- **Symbol navigation** (`crates/symbols`, `app/symbols.rs`), added
+  2026-11-18: Cmd/Ctrl-hover styles a resolvable name as a link,
+  Cmd/Ctrl-click jumps to its definition. The engine and its rules are
+  tested; **the gesture itself has not been seen on screen** (see the
+  verification table). Design document section 19 holds the decisions.
+  The Kit patch moved to the fork branch `diff-text-pointer` for it.
 
 ## Verification status
 
@@ -71,6 +77,11 @@ Be exact about this when you report further work.
 | Orphan comments as snippet files: entry with note and comment badge in diff and panel, addition rows at stored lines, dashed card tagged "not in this comparison" with plain "lines n-m" header, scope bar "1 open comment" with the orphan outside "0 of 0 files reviewed", `o` hiding entry and card in both diff and panel while "1 not in this comparison" appears, `n` turning the toggle back on and landing on the card with the focus marker, scope untouched | Verified on macOS on 2026-11-17 by screenshot against a demo repository with a hand-written stale comment on a path the repository never had (uncommitted comparison, empty diff) |
 | The same orphan flow's mouse paths: the count click (same `jump_comment` as `n`), the card's Archive click and the reload that removes the emptied snippet file, resolve folding an orphan card | Compiled, clippy-clean; not seen on screen - synthetic clicks never reached the handlers (CGEvent `postToPid` mouse events are ignored where its key events work), and real HID clicks were abandoned to keep hands off the owner's live session |
 | First paint of a freshly opened occluded window lays the file header out at content width (the file name starves before the note truncates); the first real repaint fixes it. Pre-existing, surfaced by narrow snippet files; the name cluster now keeps its content basis (`flex_auto`) and the note truncates, so the name survives | Seen on screen on 2026-11-17 (the artifact and that it clears); the flex change itself judged only in the healthy layout |
+| Symbol engine (`diffie-symbols`): Rust definitions, references and imports; role, qualifier and ranking rules; ties; positional membership of variants and fields; per-revision views, the working-tree overlay and references for shown files only | Unit tests on source snippets and tests against a throwaway repository, macOS, 2026-11-18. Probed once against this repository: both views of a load in about 135 ms |
+| Core `blobs` (batch read, bytes kept exact) and `worktree_file` | Tests in `crates/core/tests/git_cli.rs`, macOS, 2026-11-18 |
+| Kit fork additions (`on_text_hover` including the modifier-at-rest case, `on_text_click` and its claim, `has_line`, `DiffFile::excerpts`) | Kit tests with simulated pointer and modifier events, macOS, 2026-11-18. The pointing-hand cursor and the underline style compile and render in those tests; how they look was not seen |
+| Symbol navigation in the window: Cmd-hover link styling and cursor, Cmd-click landing inside the diff with the focus mark, the origin card for a name from another crate, "Copy symbol" in the context menu, the tie dialog, a definition entry (excerpt rows, header note and x, panel row), Cmd+[ back from each, chained jumps inside an entry | Compiled, clippy-clean. The window was started once against this repository and loaded with the views built; **no gesture was exercised** - synthetic mouse events do not reach the handlers (see the orphan row above) |
+| Moved-code folds surviving the earlier-comments toggle (`sync_diff_files` puts them back after `set_files`; before, the toggle dropped them whenever orphan entries existed) | Compiled; not seen on screen |
 
 ## Build, run, test
 
@@ -157,6 +168,16 @@ crates/core/src/
   github.rs                   GitHubCli: the Forge over the gh CLI
   time.rs                     RFC 3339 without a date-time crate
 crates/core/tests/git_cli.rs  backend tests against a throwaway repository
+crates/symbols/src/           symbol navigation's engine; depends on the
+                              core, never on the UI
+  lib.rs                      Definition, Reference, Import, FileSymbols; `parse`
+  language.rs                 the language table: one entry per language
+  rust.rs                     Rust: the tree walk and the ranking conventions
+  index.rs                    SymbolIndex (per blob id) and RevisionView
+  resolve.rs                  from a reference to its ranked definitions
+  origin.rs                   the crate and full path of a name from outside
+  tests.rs                    extraction and resolution on source snippets
+crates/symbols/tests/index.rs views against a throwaway repository
 crates/app/src/
   main.rs                     arguments, window
   app.rs                      ReviewApp: all state, loading, rendering
@@ -165,6 +186,9 @@ crates/app/src/
                               `app`, so it reaches ReviewApp's state)
   app/palette.rs              the command palette: the command list and
                               running the chosen one
+  app/symbols.rs              symbol navigation in the UI: which revision
+                              each side reads, the link, where a jump
+                              lands, definition entries, the tie dialog
   settings.rs                 machine-wide settings (~/.config/diffie),
                               TOML; layout mode and window bounds
 assets/                       brand mark (logo.svg) and app icon (icon.svg)
@@ -414,12 +438,47 @@ Other Kit facts used here:
   1.6 × font size: 12.5 gives the mockup's 20px rows.
 - Syntax highlighting uses the lighter `syntect` feature. Per-language
   `tree-sitter-*` features exist if higher fidelity is wanted.
+- The Kit does not re-export `tree_sitter`, so `diffie-symbols` depends on
+  `tree-sitter` and `tree-sitter-rust` itself, at the versions the Kit
+  uses for its own highlighting.
+- The fork's text pointer API, added for symbol navigation:
+  `Diff::on_text_hover` reports the character under the pointer
+  (`DiffTextPosition`: line, byte offset, the line's text) with the held
+  modifiers - on mouse move, and when a modifier changes at rest **while
+  the diff has focus** (GPUI routes modifier changes along the focus
+  path); `Diff::on_text_click` gets a click on a character first and may
+  claim it; `Diff::text_cursor` sets the pointer over code;
+  `DiffSpanHighlight::without_background` and `with_underline`;
+  `DiffState::has_line`; and `DiffFile::excerpts`, parts of a file at
+  their own line numbers as a single-column reference file.
+- `DiffState::set_files` clears the folds, the focus mark and every
+  expansion. Anything that swaps the file set mid-session goes through
+  `ReviewApp::sync_diff_files`, which puts the folds back.
 
 ## What the UI does and does not do
 
 Implemented in `app.rs` (compiled; see the verification table for what was
 actually exercised):
 
+- Symbol navigation (`app/symbols.rs`): after each load a background task
+  builds two symbol views - the comparison's base for the left side, the
+  shown revision (or the branch tip with the uncommitted files overlaid)
+  for the right. With Cmd/Ctrl held, the name under the pointer becomes a
+  link when it resolves (`name_at`: the reference in that side's view,
+  trusted only where the row spells its name). A name that resolves to
+  nothing but is imported from another crate gets a card at the pointer
+  instead (`render_origin_hint`): full path and crate, read from the
+  imports by `RevisionView::origin`, through `use super::*` too. The
+  diff's context menu offers "Copy symbol" on such names and on
+  resolvable ones (`pointed_symbol`, from the last text hover).
+  Cmd/Ctrl-click jumps: one
+  target lands on its row when the diff carries the line, with the
+  change-navigation focus mark, and otherwise opens a definition entry;
+  tied targets open a dialog over the Kit's command list. Entries are
+  `DiffFile::excerpts` files after the comparison's files, with a header
+  note, an x, no tick and a muted row under the file tree. Every jump
+  goes onto the Cmd/Ctrl+[ history; the palette lists "Go back" and
+  "Go forward".
 - Title bar: repository, "changes in X going into Y" with chips, swap,
   split/unified as a segmented icon pair (columns and rows, named on
   hover), wrap and hide-whitespace as icon
@@ -689,6 +748,20 @@ In this order, each one small enough to show the owner:
 
 ## Traps
 
+- **Symbol navigation reads syntax, not types.** `value.method()` and
+  `value.field` resolve by name alone and often tie; that is the design
+  (section 19), not a bug to fix with heuristics. Names inside macro
+  arguments are read from raw tokens by their neighbours - good for
+  `assert_eq!` and `format!`, blind to macros with their own grammar.
+- **A definition entry's Diff path is a key, not a path.** It carries a
+  prefix (`→ `) because the real path may already have an entry: a
+  changed file whose patch does not reach the definition, or an orphan
+  snippet. Use `Symbols::entry` to get from the key to the file; never
+  hand the key to the backend or the review file. `set_reviewed` and
+  `start_comment` refuse it.
+- **The add-comment button still appears on definition rows.** The Kit
+  shows it for every file once `on_add_annotation` is set; on an entry
+  it only says, in the status bar, that definitions are for reading.
 - **Publishing was never run against a real pull request.** Everything
   below the `Forge` trait is tested against a stand-in gh, and the schema
   names were introspected, but the first real publish is the first real
@@ -716,8 +789,10 @@ In this order, each one small enough to show the owner:
   of files), `split-panel-scroll` (per-panel horizontal scrolling),
   `pinned-file-headers`, `folded-ranges` (`DiffFold` +
   `DiffState::set_folds`, the labeled click-to-reveal rows the moved-code
-  feature renders), and `scroll_to_top_line` (the exact counterpart of
-  `top_line`, which the jump-back restore rides on). Drop the patch when
+  feature renders), `scroll_to_top_line` (the exact counterpart of
+  `top_line`, which the jump-back restore rides on), and
+  `diff-text-pointer` (the text pointer API symbol navigation rides on,
+  stacked on `sticky-file-headers`). Drop the patch when
   upstream ships them.
 - **Moved-code folds.** `diffie_core::moved::moved_blocks(&patch.text)`
   pairs whole verbatim-moved runs - a complete removal run whose full

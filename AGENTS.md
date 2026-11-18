@@ -36,6 +36,11 @@ Windows and Linux.
    or on `diffie`. The UI reaches the repository only through the
    `ReviewBackend` trait, and the code host only through the `Forge`
    trait - no GitHub name, API or CLI call outside `github.rs`.
+   `diffie-symbols` (symbol navigation) has no UI dependency either. It
+   may depend on `diffie-core`, never the reverse, and reads the
+   repository only through `ReviewBackend`: all repository access,
+   reading file content included, stays in the core. A new language is a
+   new entry in its language table, not a change to its index or resolver.
 5. **Never write to the reviewed repository.** No changes to its objects,
    index, refs, config or working tree. The only files the app writes are
    review files under `<git-dir>/review/`. Scratch objects go to a temporary
@@ -52,7 +57,8 @@ Windows and Linux.
 The owner does not want effort spent on the core until the UI and flow have
 settled. Fix bugs in it and extend the trait when the UI needs something, but
 do not optimise it, add caching layers, or start the `gix` and `imara-diff`
-backend unless asked.
+backend unless asked. One sanctioned exception: the symbol index in
+`diffie-symbols`, which the owner asked for (design document, section 19).
 
 When calling git:
 
