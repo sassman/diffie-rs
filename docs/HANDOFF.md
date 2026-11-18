@@ -33,8 +33,7 @@ first code: a working core and a first UI scaffold wired to it.
   Cmd/Ctrl-click jumps to its definition. The engine and its rules are
   tested; **the gesture itself has not been seen on screen** (see the
   verification table). Design document section 19 holds the decisions.
-  The workspace's Kit patch points at a local, unpushed fork branch for
-  it - see the traps.
+  The Kit patch moved to the fork branch `diff-text-pointer` for it.
 
 ## Verification status
 
@@ -749,15 +748,6 @@ In this order, each one small enough to show the owner:
 
 ## Traps
 
-- **`Cargo.toml` patches the Kit from a local path.** Symbol navigation
-  needs fork commit `b5c04412` on the branch `diff-text-pointer`
-  (`sticky-file-headers` plus the text pointer API). The branch exists
-  only in the owner's local Kit repository (checked out at
-  `../gpui-kit-text-pointer`), so the four `[patch.crates-io]` lines name
-  `file:///...` and the lock records that. This builds on the owner's
-  machine only. To land: push the branch (or fold the commit into
-  `sticky-file-headers`), point the four lines back at GitHub, run
-  `cargo update gpui-kit gpui-component gpui-base gpui-kit-assets`.
 - **Symbol navigation reads syntax, not types.** `value.method()` and
   `value.field` resolve by name alone and often tie; that is the design
   (section 19), not a bug to fix with heuristics. Names inside macro
@@ -799,8 +789,10 @@ In this order, each one small enough to show the owner:
   of files), `split-panel-scroll` (per-panel horizontal scrolling),
   `pinned-file-headers`, `folded-ranges` (`DiffFold` +
   `DiffState::set_folds`, the labeled click-to-reveal rows the moved-code
-  feature renders), and `scroll_to_top_line` (the exact counterpart of
-  `top_line`, which the jump-back restore rides on). Drop the patch when
+  feature renders), `scroll_to_top_line` (the exact counterpart of
+  `top_line`, which the jump-back restore rides on), and
+  `diff-text-pointer` (the text pointer API symbol navigation rides on,
+  stacked on `sticky-file-headers`). Drop the patch when
   upstream ships them.
 - **Moved-code folds.** `diffie_core::moved::moved_blocks(&patch.text)`
   pairs whole verbatim-moved runs - a complete removal run whose full
