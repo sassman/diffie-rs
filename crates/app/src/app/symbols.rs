@@ -10,11 +10,11 @@ use std::cell::Cell;
 use std::ops::Range;
 
 use super::*;
-use diffie_symbols::{FileSymbols, RevisionView, SymbolIndex, Target};
+use diffie_symbols::{FileSymbols, Origin, RevisionView, SymbolIndex, Target};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::diff::DiffTextPosition;
-use gpui_kit::{Modifiers, MouseButton};
+use gpui_kit::{Modifiers, MouseButton, Pixels, Point, anchored, point};
 
 /// Leads the Diff path of a definition entry. The real path cannot be the
 /// key: the file may already have an entry of its own - a changed file
@@ -47,6 +47,27 @@ pub(super) struct Link {
     /// The revision the name was read in, which the jump stays in.
     side: DiffSide,
     targets: Vec<Target>,
+}
+
+/// A hovered name the repository does not define: there is nowhere to
+/// jump, so a card says where it comes from instead.
+#[derive(Clone, PartialEq)]
+pub(super) struct Hint {
+    position: DiffLinePosition,
+    span: Range<usize>,
+    origin: Origin,
+    /// Where the pointer was when it reached the name, in the window.
+    at: Point<Pixels>,
+}
+
+/// What a hovered name leads to.
+enum Named {
+    Here(Link),
+    Elsewhere {
+        position: DiffLinePosition,
+        span: Range<usize>,
+        origin: Origin,
+    },
 }
 
 /// A temporary file entry showing definitions from outside the diff.
@@ -123,6 +144,7 @@ pub(super) struct Symbols {
     /// A renamed file's path on the old side, by its path in the Diff.
     old_paths: HashMap<SharedString, String>,
     pub(super) link: Option<Link>,
+    hint: Option<Hint>,
     pub(super) entries: Vec<DefinitionEntry>,
     picker: Entity<CommandState>,
     _build: Task<()>,
@@ -136,6 +158,7 @@ impl Symbols {
             views: None,
             old_paths: HashMap::new(),
             link: None,
+            hint: None,
             entries: Vec::new(),
             picker: cx.new(|cx| CommandState::new(window, cx)),
             _build: Task::ready(()),
@@ -147,6 +170,7 @@ impl Symbols {
     pub(super) fn clear(&mut self) {
         self.views = None;
         self.link = None;
+        self.hint = None;
         self.entries.clear();
         self.old_paths.clear();
     }
@@ -240,7 +264,7 @@ impl ReviewApp {
         )
     }
 
-    fn link_at(&self, hit: &DiffTextPosition) -> Option<Link> {
+    fn name_at(&self, hit: &DiffTextPosition) -> Option<Named> {
         let views = self.symbols.views.as_ref()?;
         let position = hit.position();
         let (side, path) = self.symbol_site(position);
@@ -254,27 +278,112 @@ impl ReviewApp {
             return None;
         }
         let targets = view.resolve(&path, reference);
-        (!targets.is_empty()).then(|| Link {
+        if targets.is_empty() {
+            return Some(Named::Elsewhere {
+                position: position.clone(),
+                span: reference.column.clone(),
+                origin: view.origin(&path, reference)?,
+            });
+        }
+        Some(Named::Here(Link {
             position: position.clone(),
             span: reference.column.clone(),
             side,
             targets,
-        })
+        }))
+    }
+
+    fn link_at(&self, hit: &DiffTextPosition) -> Option<Link> {
+        match self.name_at(hit)? {
+            Named::Here(link) => Some(link),
+            Named::Elsewhere { .. } => None,
+        }
     }
 
     pub(super) fn symbol_hover(
         &mut self,
         hit: Option<&DiffTextPosition>,
         modifiers: Modifiers,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let link = hit
+        let named = hit
             .filter(|_| modifiers.secondary(cx))
-            .and_then(|hit| self.link_at(hit));
-        if self.symbols.link != link {
+            .and_then(|hit| self.name_at(hit));
+        let (link, hint) = match named {
+            Some(Named::Here(link)) => (Some(link), None),
+            Some(Named::Elsewhere {
+                position,
+                span,
+                origin,
+            }) => {
+                // The card stays where the pointer met the name instead of
+                // trailing every move across it.
+                let at = self
+                    .symbols
+                    .hint
+                    .as_ref()
+                    .filter(|hint| hint.position == position && hint.span == span)
+                    .map_or_else(|| window.mouse_position(), |hint| hint.at);
+                (
+                    None,
+                    Some(Hint {
+                        position,
+                        span,
+                        origin,
+                        at,
+                    }),
+                )
+            }
+            None => (None, None),
+        };
+        if self.symbols.link != link || self.symbols.hint != hint {
             self.symbols.link = link;
+            self.symbols.hint = hint;
             cx.notify();
         }
+    }
+
+    /// The card naming where the hovered name comes from, at the pointer.
+    pub(super) fn render_origin_hint(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let hint = self.symbols.hint.as_ref()?;
+        let origin = &hint.origin;
+        // Below the pointer, clear of the row being read.
+        let at = hint.at + point(px(0.), px(16.));
+        let card = v_flex()
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().popover_foreground)
+            .shadow_md()
+            .child(
+                div()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_size(px(12.))
+                    .child(origin.path.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "from {} {} - not in this repository",
+                        origin.package_word, origin.package
+                    )),
+            );
+        Some(
+            deferred(
+                anchored()
+                    .position(at)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(card),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
     }
 
     /// A Cmd/Ctrl-click on source text. True when the name resolved and

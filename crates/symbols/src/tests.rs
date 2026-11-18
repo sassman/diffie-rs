@@ -303,6 +303,7 @@ use super::*;
                 "crate::review::ReviewFile".to_string(),
                 "ReviewFile".to_string()
             ),
+            ("super".to_string(), "*".to_string()),
         ]
     );
 }
@@ -635,5 +636,96 @@ fn a_macro_resolves_to_its_definition() {
     assert_eq!(
         resolve(&view, &files, "src/app.rs", "bail"),
         ["src/macros.rs:1"]
+    );
+}
+
+/// The origin of the reference at `needle` in `path`, as `package: path`.
+fn origin(files: &[(&str, &str)], path: &str, needle: &str) -> Option<String> {
+    let text = files
+        .iter()
+        .find(|(candidate, _)| *candidate == path)
+        .expect("the path is among the sources")
+        .1;
+    let parsed = parse(path, text.as_bytes(), true).unwrap();
+    let reference = reference(&parsed, text, needle);
+    view(files)
+        .origin(path, reference)
+        .map(|origin| format!("{}: {}", origin.package, origin.path))
+}
+
+#[test]
+fn an_imported_name_knows_the_package_it_comes_from() {
+    let text = "\
+use gpui_kit::component::diff::{DiffSide, DiffState as State};
+use std::collections;
+fn f(side: DiffSide, state: State) -> collections::HashMap<u8, u8> {
+    DiffSide::Original
+}
+";
+    let files = [("src/app.rs", text)];
+    let found = |needle| origin(&files, "src/app.rs", needle);
+    let side = Some("gpui_kit: gpui_kit::component::diff::DiffSide".to_string());
+    assert_eq!(found("DiffSide,"), side, "in the use line itself");
+    assert_eq!(found("DiffSide, state"), side);
+    assert_eq!(
+        found("State)"),
+        Some("gpui_kit: gpui_kit::component::diff::DiffState".to_string()),
+        "an alias leads to the real name"
+    );
+    assert_eq!(
+        found("HashMap"),
+        Some("std: std::collections::HashMap".to_string()),
+        "through the imported qualifier"
+    );
+    assert_eq!(
+        found("Original"),
+        Some("gpui_kit: gpui_kit::component::diff::DiffSide::Original".to_string())
+    );
+}
+
+#[test]
+fn an_origin_is_found_through_the_parents_glob() {
+    let parent = "\
+mod symbols;
+use gpui_kit::component::diff::DiffSide;
+";
+    let child = "\
+use super::*;
+fn of(side: DiffSide) {}
+";
+    let side = Some("gpui_kit: gpui_kit::component::diff::DiffSide".to_string());
+    let files = [("src/app.rs", parent), ("src/app/symbols.rs", child)];
+    assert_eq!(origin(&files, "src/app/symbols.rs", "DiffSide"), side);
+    let files = [("src/app/mod.rs", parent), ("src/app/symbols.rs", child)];
+    assert_eq!(origin(&files, "src/app/symbols.rs", "DiffSide"), side);
+    // From a crate root there is no parent to read.
+    let files = [("src/lib.rs", child)];
+    assert_eq!(origin(&files, "src/lib.rs", "DiffSide"), None);
+}
+
+#[test]
+fn a_name_from_this_package_has_no_origin() {
+    let text = "\
+mod patch;
+use crate::model::Oid;
+use patch::Hunk;
+use gpui_kit::component;
+use component::diff::DiffSide;
+use other::*;
+fn f(id: Oid, hunk: Hunk, side: DiffSide, plain: Unknown) {}
+";
+    let files = [("src/app.rs", text)];
+    let found = |needle| origin(&files, "src/app.rs", needle);
+    assert_eq!(found("Oid,"), None, "a crate path");
+    assert_eq!(found("Hunk,"), None, "a module declared beside the import");
+    assert_eq!(
+        found("Unknown"),
+        None,
+        "no import, and other globs are not followed"
+    );
+    assert_eq!(
+        found("DiffSide,"),
+        Some("gpui_kit: gpui_kit::component::diff::DiffSide".to_string()),
+        "an imported root is spelled out"
     );
 }

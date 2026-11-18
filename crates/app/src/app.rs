@@ -4480,8 +4480,9 @@ impl ReviewApp {
             }))
             .on_text_hover({
                 let owner = owner.clone();
-                move |hit, modifiers, _, cx| {
-                    let _ = owner.update(cx, |this, cx| this.symbol_hover(hit, modifiers, cx));
+                move |hit, modifiers, window, cx| {
+                    let _ =
+                        owner.update(cx, |this, cx| this.symbol_hover(hit, modifiers, window, cx));
                 }
             })
             .on_text_click({
@@ -5894,6 +5895,7 @@ impl Render for ReviewApp {
                 })
             })
             .child(self.render_status_bar(cx))
+            .children(self.render_origin_hint(cx))
     }
 }
 

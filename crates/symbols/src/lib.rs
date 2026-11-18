@@ -4,6 +4,8 @@
 //! - [`SymbolIndex`] keeps those per blob id and assembles a
 //!   [`RevisionView`] for one tree.
 //! - [`RevisionView::resolve`] ranks the definitions a reference may mean.
+//! - [`RevisionView::origin`] names where a reference comes from when the
+//!   tree does not define it.
 //!
 //! There is no type inference: a name resolves by its syntactic role, its
 //! qualifier and where its candidates live. The repository is reached only
@@ -12,6 +14,7 @@
 
 mod index;
 mod language;
+mod origin;
 mod resolve;
 mod rust;
 #[cfg(test)]
@@ -21,6 +24,7 @@ use std::ops::Range;
 
 pub use index::{RevisionView, SymbolIndex};
 pub use language::Language;
+pub use origin::Origin;
 pub use resolve::Target;
 
 /// What a definition introduces.
@@ -116,12 +120,17 @@ pub struct Reference {
     pub column: Range<usize>,
 }
 
-/// One name a file brings into scope.
+/// The [`Import::name`] of a glob, which no identifier can spell.
+pub(crate) const GLOB: &str = "*";
+
+/// One name a file brings into scope, or a glob bringing in a module's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Import {
-    /// Every segment as written, the imported item last.
+    /// Every segment as written, the imported item last. A glob's path is
+    /// the module it reads from.
     pub path: Vec<String>,
     /// The name it goes by in the file: the alias, or the last segment.
+    /// `*` for a glob.
     pub name: String,
 }
 

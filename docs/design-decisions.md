@@ -743,6 +743,11 @@ Decided (owner, 2026-11-18):
   traits, type aliases, constants, statics, modules, macros, enum
   variants and struct fields. Not locals, not parameters, nothing from
   the standard library or a dependency.
+- **A name from another crate says where it comes from.** Cmd/Ctrl-hover
+  on a name the repository does not define, but an import names, shows a
+  card at the pointer instead of a link: the full path
+  (`gpui_kit::component::diff::DiffSide`) and the crate it starts in.
+  No underline, nothing to click.
 - **Variants and fields are members by position.** `Scope::NewForMe`
   resolves `Scope` first; only a `NewForMe` inside that enum's lines
   survives. An ambiguous enum offers one variant per candidate enum.
@@ -780,6 +785,13 @@ Assumed:
   carries, opens as an entry too ("outside the changed lines").
 - Syntax highlighting stays on `syntect`; the tree-sitter trees serve
   navigation only.
+- The origin card reads imports only: the name's own `use`, the `use` of
+  its qualifier, and through `use super::*` the parent module's imports.
+  Other globs are not followed (they pass on `pub use` alone, which is
+  not recorded), so a name with no import in reach - prelude names, a
+  path written out in place - shows nothing. An import that stays inside
+  the package (`crate::`, a module declared beside it) shows nothing
+  either: that name should have resolved, and a guess would mislead.
 
 Open:
 

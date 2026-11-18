@@ -3,7 +3,7 @@
 
 use tree_sitter::Node;
 
-use crate::{Definition, FileSymbols, Import, Kind, Reference, Role};
+use crate::{Definition, FileSymbols, GLOB, Import, Kind, Reference, Role};
 
 /// A candidate list has one line per entry; a longer signature is cut.
 const SIGNATURE_CHARS: usize = 160;
@@ -53,6 +53,46 @@ pub(crate) fn package(path: &str) -> &str {
         .filter_map(|marker| path.rfind(marker))
         .max()
         .map_or("", |end| &path[..end])
+}
+
+/// A path that starts here names something of this package, not a crate.
+pub(crate) fn local_root(segment: &str) -> bool {
+    matches!(segment, "crate" | "self" | "super")
+}
+
+/// Only `super::*` is followed: it brings in the parent's private imports
+/// too. Any other glob passes on `pub use` alone, which is not recorded.
+pub(crate) fn glob_sources(path: &str, module: &[String]) -> Vec<String> {
+    if module.is_empty() || module.iter().any(|segment| segment != "super") {
+        return Vec::new();
+    }
+    let mut files = vec![path.to_string()];
+    for _ in module {
+        files = files.iter().flat_map(|file| parent_modules(file)).collect();
+    }
+    files
+}
+
+/// Where the module above the one in `path` may be written.
+fn parent_modules(path: &str) -> Vec<String> {
+    let (directory, file) = path.rsplit_once('/').unwrap_or(("", path));
+    let home = match file {
+        "lib.rs" | "main.rs" => return Vec::new(),
+        "mod.rs" => match directory.rsplit_once('/') {
+            Some((above, _)) => above,
+            None => return Vec::new(),
+        },
+        _ => directory,
+    };
+    if home.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        format!("{home}.rs"),
+        format!("{home}/mod.rs"),
+        format!("{home}/lib.rs"),
+        format!("{home}/main.rs"),
+    ]
 }
 
 /// What the enclosing items mean for the node being visited.
@@ -491,6 +531,12 @@ impl<'t> Walker<'t> {
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
                     self.segments(child, prefix);
+                }
+                if !prefix.is_empty() {
+                    self.out.imports.push(Import {
+                        path: prefix.iter().map(|segment| segment.to_string()).collect(),
+                        name: GLOB.to_string(),
+                    });
                 }
                 prefix.truncate(depth);
             }
