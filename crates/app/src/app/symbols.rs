@@ -743,7 +743,11 @@ impl ReviewApp {
     /// A definition entry's row in the file panel, under the tree: it is
     /// in no changeset, so it carries the link icon instead of a status.
     pub(super) fn render_definition_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let entry = &self.symbols.entries[index];
+        // The row list is built a frame before the list paints its rows;
+        // an entry closed in between leaves its row empty, not a panic.
+        let Some(entry) = self.symbols.entries.get(index) else {
+            return div().into_any_element();
+        };
         let muted = cx.theme().muted_foreground;
         let name = entry
             .path
