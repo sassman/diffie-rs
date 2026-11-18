@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "diffie"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "diffie-core",
  "dirs-lite",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "diffie-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "tempfile",
