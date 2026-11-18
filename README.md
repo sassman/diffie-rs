@@ -43,6 +43,17 @@ With Homebrew, on macOS and Linux:
 brew install sassman/tap/diffie
 ```
 
+> [!NOTE]
+> On a new macOS with last year's Xcode still installed, Homebrew refuses
+> with `Error: Your Xcode (...) is too outdated.` The formula only copies a
+> prebuilt binary, but Homebrew checks the developer tools for any formula
+> without a bottle. Either update (or delete) Xcode, or skip Homebrew and
+> use the installer script, which needs no developer tools:
+>
+> ```sh
+> curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sassman/diffie-rs/releases/latest/download/diffie-installer.sh | sh
+> ```
+
 Or build it from source with a recent stable Rust; the first build compiles
 GPUI and takes several minutes (Linux needs the packages listed below):
 
