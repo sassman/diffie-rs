@@ -830,6 +830,32 @@ struct FileView {
     definition: Option<SharedString>,
 }
 
+/// A file with nothing to report: what an entry outside the comparison
+/// starts from. Written out because the core's status and review state
+/// have no neutral value of their own to derive from.
+impl Default for FileView {
+    fn default() -> Self {
+        Self {
+            state: ReviewState::NotReviewed,
+            status: FileStatus::Modified,
+            note: None,
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            generated: false,
+            touched: 0,
+            in_scope: 0,
+            uncommitted: false,
+            removed_at: None,
+            comments: 0,
+            other_revision: 0,
+            changed_code_comments: 0,
+            orphan: false,
+            definition: None,
+        }
+    }
+}
+
 pub struct ReviewApp {
     backend: Arc<dyn ReviewBackend>,
     repository: SharedString,
@@ -2969,22 +2995,9 @@ impl ReviewApp {
                 (
                     entry.key.clone(),
                     FileView {
-                        state: ReviewState::NotReviewed,
-                        status: FileStatus::Modified,
                         note: Some(entry.note().into()),
-                        additions: 0,
-                        deletions: 0,
-                        binary: false,
-                        generated: false,
-                        touched: 0,
-                        in_scope: 0,
-                        uncommitted: false,
-                        removed_at: None,
-                        comments: 0,
-                        other_revision: 0,
-                        changed_code_comments: 0,
-                        orphan: false,
                         definition: Some(entry.path.clone().into()),
+                        ..Default::default()
                     },
                 )
             }))
