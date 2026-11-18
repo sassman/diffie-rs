@@ -59,6 +59,7 @@ use gpui_kit::{
 
 mod palette;
 mod pull;
+mod symbols;
 pub use pull::Pull;
 
 mod commands {
@@ -824,6 +825,9 @@ struct FileView {
     changed_code_comments: usize,
     /// A synthetic snippet entry for orphaned threads: nothing to tick.
     orphan: bool,
+    /// A definition entry: the repository path behind its Diff key.
+    /// Read-only, closable, nothing to tick.
+    definition: Option<SharedString>,
 }
 
 pub struct ReviewApp {
@@ -869,6 +873,9 @@ pub struct ReviewApp {
     /// Synthetic snippet files for orphaned threads, kept apart from the
     /// Diff's set so toggle flips can join or withhold them.
     orphan_files: Vec<DiffFile>,
+    /// Symbol navigation: the lookup tables, the hovered link and the
+    /// definition entries joined to the Diff's set.
+    symbols: symbols::Symbols,
     diff: Entity<DiffState>,
     /// The reviewer's own split-or-unified choice. The view falls back to
     /// Unified while the window is too narrow for a split, without losing it.
@@ -1070,6 +1077,7 @@ impl ReviewApp {
             review_path: PathBuf::new(),
             placed: Vec::new(),
             orphan_files: Vec::new(),
+            symbols: symbols::Symbols::new(window, cx),
             diff,
             manual_mode: mode,
             settings,
@@ -1368,9 +1376,11 @@ impl ReviewApp {
                 if self.search_open {
                     self.run_search(cx);
                 }
+                self.build_symbol_views(cx);
             }
             Err(error) => {
                 self.diff.update(cx, |state, cx| state.set_files([], cx));
+                self.symbols.clear();
                 self.files = Arc::default();
                 self.placed.clear();
                 self.pending_jump = None;
@@ -1557,6 +1567,11 @@ impl ReviewApp {
     }
 
     fn set_reviewed(&mut self, path: &str, reviewed: bool, cx: &mut Context<Self>) {
+        // `r` acts on the file being read, and that may be a definition
+        // entry: no file of the comparison, so nothing to tick.
+        if self.symbols.entry(path).is_some() {
+            return;
+        }
         let (Some(set), Some(resolved)) = (self.reviews.as_mut(), self.resolved.as_ref()) else {
             return;
         };
@@ -2010,25 +2025,9 @@ impl ReviewApp {
         }
         self.show_other_revisions = on;
         if !self.orphan_files.is_empty() {
-            let orphans: HashSet<&str> = self
-                .orphan_files
-                .iter()
-                .map(|file| file.path().as_ref())
-                .collect();
-            let state = self.diff.read(cx);
-            let top = state.top_line();
-            let mut files: Vec<DiffFile> = state
-                .files()
-                .iter()
-                .filter(|file| !orphans.contains(file.path().as_ref()))
-                .cloned()
-                .collect();
-            if on {
-                files.extend(self.orphan_files.iter().cloned());
-                files.sort_by(|a, b| tree_order(a.path().as_ref(), b.path().as_ref()));
-            }
+            let top = self.diff.read(cx).top_line();
+            self.sync_diff_files(cx);
             self.diff.update(cx, |state, cx| {
-                state.set_files(files, cx);
                 // The exact-restore pair of top_line; scroll_to_line would
                 // re-center the row and shift the page by half a screen.
                 if let Some(top) = top {
@@ -2078,6 +2077,13 @@ impl ReviewApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A definition entry is read-only: a comment there would sit
+        // outside the comparison the moment it is saved.
+        if self.symbols.entry(range.path()).is_some() {
+            self.notice = Some("Definitions are shown for reading - comment in the diff".into());
+            cx.notify();
+            return;
+        }
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 10)
@@ -2953,9 +2959,35 @@ impl ReviewApp {
                         other_revision: tally.map_or(0, |tally| tally.other_revision),
                         changed_code_comments: tally.map_or(0, |tally| tally.changed_since),
                         orphan: file.state == FileState::NotInComparison,
+                        definition: None,
                     },
                 )
             })
+            // Definition entries are no part of the comparison's file
+            // list; the header still needs to know what they are.
+            .chain(self.symbols.entries.iter().map(|entry| {
+                (
+                    entry.key.clone(),
+                    FileView {
+                        state: ReviewState::NotReviewed,
+                        status: FileStatus::Modified,
+                        note: Some(entry.note().into()),
+                        additions: 0,
+                        deletions: 0,
+                        binary: false,
+                        generated: false,
+                        touched: 0,
+                        in_scope: 0,
+                        uncommitted: false,
+                        removed_at: None,
+                        comments: 0,
+                        other_revision: 0,
+                        changed_code_comments: 0,
+                        orphan: false,
+                        definition: Some(entry.path.clone().into()),
+                    },
+                )
+            }))
             .collect();
         let draft = self.draft.as_ref().map(|draft| {
             let range = &draft.range;
@@ -4104,6 +4136,9 @@ impl ReviewApp {
                 index: usize,
                 depth: usize,
             },
+            /// A definition entry, by its index: listed under the tree,
+            /// since it belongs to no folder of the comparison.
+            Definition(usize),
         }
         let mut rows = Vec::new();
         let mut previous: Vec<String> = Vec::new();
@@ -4145,6 +4180,7 @@ impl ReviewApp {
             }
             previous = folders;
         }
+        rows.extend((0..self.symbols.entries.len()).map(TreeRow::Definition));
         let rows = Rc::new(rows);
         // Counted up front, open threads only: the badge mirrors the gutter,
         // where a verdict folds the card away.
@@ -4261,6 +4297,9 @@ impl ReviewApp {
                                         .copied()
                                         .unwrap_or(0);
                                     this.render_file_row(*index, *depth, comments, cx)
+                                }
+                                TreeRow::Definition(index) => {
+                                    this.render_definition_row(*index, cx)
                                 }
                             })
                             .collect::<Vec<_>>()
@@ -4383,6 +4422,14 @@ impl ReviewApp {
                         .with_foreground(search_match_foreground)
                 })
             })
+            // The name Cmd/Ctrl is held over, when it resolves: it reads
+            // as a link, with no fill to hide the row's own colours.
+            .chain(self.symbols.link.as_ref().map(|link| {
+                DiffSpanHighlight::new(link.position.clone(), link.span.clone())
+                    .without_background()
+                    .with_foreground(cx.theme().link)
+                    .with_underline()
+            }))
             .collect();
         let decorations: Vec<DiffDecoration> = self
             .runs
@@ -4431,6 +4478,23 @@ impl ReviewApp {
             .on_add_annotation(cx.listener(|this, range: &DiffLineRange, window, cx| {
                 this.start_comment(range.clone(), None, window, cx);
             }))
+            .on_text_hover({
+                let owner = owner.clone();
+                move |hit, modifiers, _, cx| {
+                    let _ = owner.update(cx, |this, cx| this.symbol_hover(hit, modifiers, cx));
+                }
+            })
+            .on_text_click({
+                let owner = owner.clone();
+                move |hit, event, window, cx| {
+                    // Without the modifier the click stays what it was: the
+                    // start of a selection, or nothing.
+                    event.modifiers().secondary(cx)
+                        && owner
+                            .update(cx, |this, cx| this.symbol_click(hit, window, cx))
+                            .unwrap_or(false)
+                }
+            })
             .on_line_hover(move |position, window, cx| {
                 let position = position.cloned();
                 let selecting = gpui_kit::base::TextSelection::has_selection(window, cx);
@@ -4469,6 +4533,10 @@ impl ReviewApp {
                 let (snapshot, owner) = &for_header;
                 let path = file.path().clone();
                 let view = snapshot.files.get(&path);
+                // A definition entry's Diff path is a key; the header
+                // names the file it shows.
+                let definition = view.and_then(|view| view.definition.clone());
+                let shown_path = definition.clone().unwrap_or_else(|| path.clone());
                 let reviewed = view.is_some_and(|view| view.state == ReviewState::Reviewed);
                 let note = view.and_then(|view| view.note.clone());
                 // A file that changed under an existing tick is the one note
@@ -4534,7 +4602,7 @@ impl ReviewApp {
                     }
                     (!parts.is_empty()).then(|| parts.join(" · "))
                 });
-                let path_for_copy = path.clone();
+                let path_for_copy = shown_path.clone();
                 h_flex()
                     .flex_1()
                     .min_w_0()
@@ -4583,9 +4651,11 @@ impl ReviewApp {
                                     // trailing label read as noise), and it
                                     // outranks the quiet mute: a ticked
                                     // removal still reads as removed.
-                                    .when(quiet && !removed, |name| name.text_color(muted))
+                                    .when((quiet || definition.is_some()) && !removed, |name| {
+                                        name.text_color(muted)
+                                    })
                                     .when(removed, |name| name.text_color(danger))
-                                    .child(path.clone()),
+                                    .child(shown_path.clone()),
                             )
                             .child(
                                 Button::new(SharedString::from(format!("copy-path-{path}")))
@@ -4676,79 +4746,107 @@ impl ReviewApp {
                                 .child(note),
                         )
                     })
-                    // An orphan snippet entry is not reviewable: no tick.
-                    .when(!view.is_some_and(|view| view.orphan), |row| {
-                        row.child({
-                            // A ticked file should read as done at a glance: box
-                            // and label turn the theme's light blue. The Kit's
-                            // labeled Checkbox hard-codes both colors, so this is
-                            // the base checkbox plus its own label.
-                            let blue = cx.theme().blue_light;
-                            let box_owner = owner.clone();
-                            let box_path = path.clone();
-                            let label_path = path.clone();
-                            h_flex()
-                                .flex_none()
-                                .gap(px(5.))
-                                .child(
-                                    // The base checkbox is unstyled by design;
-                                    // box, border and check mark are drawn here.
-                                    gpui_kit::base::Checkbox::new(SharedString::from(format!(
-                                        "reviewed-{path}"
-                                    )))
-                                    .checked(reviewed)
-                                    .w(px(13.))
-                                    .h(px(13.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(3.))
-                                    .border_1()
-                                    .border_color(muted)
-                                    .cursor_pointer()
-                                    .styles(|styles| {
-                                        styles.checked(|state| state.bg(blue).border_color(blue))
-                                    })
-                                    .when(reviewed, |checkbox| {
-                                        checkbox.child(
-                                            Icon::new(IconName::Check)
-                                                .xsmall()
-                                                .text_color(cx.theme().background),
-                                        )
-                                    })
-                                    .accessibility_label("Reviewed")
-                                    .on_change(
-                                        move |state, _, _, cx| {
-                                            let checked =
-                                                state == gpui_kit::base::CheckboxState::Checked;
-                                            let _ = box_owner.update(cx, |this, cx| {
-                                                this.set_reviewed(&box_path, checked, cx)
-                                            });
-                                        },
-                                    ),
-                                )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("reviewed-label-{path}")))
-                                        .cursor_pointer()
-                                        .map(|label| {
-                                            if reviewed {
-                                                label.text_color(blue).font_medium()
-                                            } else {
-                                                label.text_color(muted)
-                                            }
-                                        })
-                                        .on_click(move |_, _, cx| {
-                                            let _ = owner.update(cx, |this, cx| {
-                                                this.set_reviewed(&label_path, !reviewed, cx)
-                                            });
-                                        })
-                                        .child("Reviewed"),
-                                )
-                        })
+                    // A definition entry leaves the way it came: by hand.
+                    .when(definition.is_some(), |row| {
+                        let owner = owner.clone();
+                        let key = path.clone();
+                        row.child(
+                            Button::new(SharedString::from(format!("close-{path}")))
+                                .ghost()
+                                .xsmall()
+                                .w(px(18.))
+                                .h(px(18.))
+                                .icon(Icon::new(Lucide::X))
+                                .tooltip("Close this definition")
+                                .on_click(move |_, _, cx| {
+                                    let _ = owner
+                                        .update(cx, |this, cx| this.close_definition(&key, cx));
+                                }),
+                        )
                     })
+                    // Orphan snippet and definition entries are not
+                    // reviewable: no tick.
+                    .when(
+                        !view.is_some_and(|view| view.orphan || view.definition.is_some()),
+                        |row| {
+                            row.child({
+                                // A ticked file should read as done at a glance: box
+                                // and label turn the theme's light blue. The Kit's
+                                // labeled Checkbox hard-codes both colors, so this is
+                                // the base checkbox plus its own label.
+                                let blue = cx.theme().blue_light;
+                                let box_owner = owner.clone();
+                                let box_path = path.clone();
+                                let label_path = path.clone();
+                                h_flex()
+                                    .flex_none()
+                                    .gap(px(5.))
+                                    .child(
+                                        // The base checkbox is unstyled by design;
+                                        // box, border and check mark are drawn here.
+                                        gpui_kit::base::Checkbox::new(SharedString::from(format!(
+                                            "reviewed-{path}"
+                                        )))
+                                        .checked(reviewed)
+                                        .w(px(13.))
+                                        .h(px(13.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(3.))
+                                        .border_1()
+                                        .border_color(muted)
+                                        .cursor_pointer()
+                                        .styles(|styles| {
+                                            styles
+                                                .checked(|state| state.bg(blue).border_color(blue))
+                                        })
+                                        .when(reviewed, |checkbox| {
+                                            checkbox.child(
+                                                Icon::new(IconName::Check)
+                                                    .xsmall()
+                                                    .text_color(cx.theme().background),
+                                            )
+                                        })
+                                        .accessibility_label("Reviewed")
+                                        .on_change(
+                                            move |state, _, _, cx| {
+                                                let checked =
+                                                    state == gpui_kit::base::CheckboxState::Checked;
+                                                let _ = box_owner.update(cx, |this, cx| {
+                                                    this.set_reviewed(&box_path, checked, cx)
+                                                });
+                                            },
+                                        ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "reviewed-label-{path}"
+                                            )))
+                                            .cursor_pointer()
+                                            .map(|label| {
+                                                if reviewed {
+                                                    label.text_color(blue).font_medium()
+                                                } else {
+                                                    label.text_color(muted)
+                                                }
+                                            })
+                                            .on_click(move |_, _, cx| {
+                                                let _ = owner.update(cx, |this, cx| {
+                                                    this.set_reviewed(&label_path, !reviewed, cx)
+                                                });
+                                            })
+                                            .child("Reviewed"),
+                                    )
+                            })
+                        },
+                    )
                     .into_any_element()
             });
+        if self.symbols.link.is_some() {
+            diff = diff.text_cursor(gpui_kit::CursorStyle::PointingHand);
+        }
         // The marker lane carries the resolved threads' toggles. It is set
         // only when some exist, so a review without verdicts keeps the
         // mockup's tight gutter.

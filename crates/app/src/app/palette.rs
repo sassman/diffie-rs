@@ -22,6 +22,8 @@ pub(super) use gpui_kit::component::command::CommandState;
 enum PaletteCommand {
     Reload,
     ToggleMode,
+    Back,
+    Forward,
     Approve { with_comments: bool },
 }
 
@@ -87,6 +89,22 @@ impl ReviewApp {
                 enabled: true,
                 hint: Some(Box::new(ToggleMode)),
             },
+            // The way back from a jump: to a definition, a comment, a
+            // search hit or a file.
+            PaletteEntry {
+                command: PaletteCommand::Back,
+                label: "Go back".into(),
+                keywords: &["return", "previous", "jump", "definition", "history"],
+                enabled: !self.back_stack.is_empty(),
+                hint: Some(Box::new(JumpBack)),
+            },
+            PaletteEntry {
+                command: PaletteCommand::Forward,
+                label: "Go forward".into(),
+                keywords: &["next", "jump", "definition", "history"],
+                enabled: !self.forward_stack.is_empty(),
+                hint: Some(Box::new(JumpForward)),
+            },
         ];
         if let Some(pull) = &self.pull {
             let number = pull.request.number;
@@ -112,6 +130,8 @@ impl ReviewApp {
         match command {
             PaletteCommand::Reload => self.reload(cx),
             PaletteCommand::ToggleMode => self.toggle_mode(cx),
+            PaletteCommand::Back => self.jump_back(cx),
+            PaletteCommand::Forward => self.jump_forward(cx),
             PaletteCommand::Approve { with_comments } => {
                 self.publish(Verdict::Approve, with_comments, cx)
             }

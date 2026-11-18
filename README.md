@@ -30,8 +30,9 @@ This is an early alpha. Start with:
 ## Layout
 
 ```text
-crates/core   diffie-core: repository access, diffs, the review file. No UI.
-crates/app    diffie: the GPUI Kit window and binary.
+crates/core     diffie-core: repository access, diffs, the review file. No UI.
+crates/symbols  diffie-symbols: where a name is defined, from syntax. No UI.
+crates/app      diffie: the GPUI Kit window and binary.
 docs/         design decisions, handoff, mockup
 ```
 

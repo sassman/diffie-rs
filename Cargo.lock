@@ -1218,6 +1218,7 @@ name = "diffie"
 version = "0.2.0"
 dependencies = [
  "diffie-core",
+ "diffie-symbols",
  "dirs-lite",
  "gpui-kit",
  "image",
@@ -2064,7 +2065,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#b97451f2fdae83dd196fcca247b5b6583bdbfa54"
+source = "git+file:///Users/d34dl0ck/workspaces/diffie/gpui-kit?branch=diff-text-pointer#ee47bdab1a5679646ff69caf5a6105034e76ed72"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2105,7 +2106,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#b97451f2fdae83dd196fcca247b5b6583bdbfa54"
+source = "git+file:///Users/d34dl0ck/workspaces/diffie/gpui-kit?branch=diff-text-pointer#ee47bdab1a5679646ff69caf5a6105034e76ed72"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2153,7 +2154,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#b97451f2fdae83dd196fcca247b5b6583bdbfa54"
+source = "git+file:///Users/d34dl0ck/workspaces/diffie/gpui-kit?branch=diff-text-pointer#ee47bdab1a5679646ff69caf5a6105034e76ed72"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2164,7 +2165,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#b97451f2fdae83dd196fcca247b5b6583bdbfa54"
+source = "git+file:///Users/d34dl0ck/workspaces/diffie/gpui-kit?branch=diff-text-pointer#ee47bdab1a5679646ff69caf5a6105034e76ed72"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -2178,7 +2179,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=sticky-file-headers#b97451f2fdae83dd196fcca247b5b6583bdbfa54"
+source = "git+file:///Users/d34dl0ck/workspaces/diffie/gpui-kit?branch=diff-text-pointer#ee47bdab1a5679646ff69caf5a6105034e76ed72"
 dependencies = [
  "anyhow",
  "gpui-pre",
