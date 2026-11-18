@@ -24,6 +24,11 @@ publish-prereleases = false
 # release.yml is customized (GitHub App auth for the tap) - don't overwrite
 allow-dirty = ["ci"]
 
+# GitHub retired the macos-14 label that dist defaults to for Apple Silicon;
+# pin the arm64 runner to the same image generation as dist's macos-15-intel.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+
 # What GPUI links against on Linux; the README lists the same packages.
 [dist.dependencies.apt]
 gcc = "*"
