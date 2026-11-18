@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "diffie"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "diffie-core",
  "diffie-symbols",
@@ -1234,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "diffie-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "tempfile",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "diffie-symbols"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "diffie-core",
  "tempfile",
