@@ -438,11 +438,6 @@ fn parse_state(state: &str) -> Option<PrState> {
     }
 }
 
-/// Folds the rollup's lines (status, conclusion, state, URL, start - tab
-/// separated) into one verdict. A failure outranks a check still running:
-/// the reviewer should hear about red before the rest finishes. Unknown
-/// words count as running, never as passing - a new GitHub conclusion must
-/// not paint the pull request green.
 /// How many pull requests one `gh pr list` call brings: the picker is a
 /// page to pick from, not the archive.
 const PR_PAGE: &str = "50";
@@ -528,6 +523,11 @@ fn fold_verdict(folded: Option<CheckState>, check: CheckState) -> CheckState {
     }
 }
 
+/// Folds the rollup's lines (status, conclusion, state, URL, start - tab
+/// separated) into one verdict. A failure outranks a check still running:
+/// the reviewer should hear about red before the rest finishes. Unknown
+/// words count as running, never as passing - a new GitHub conclusion must
+/// not paint the pull request green.
 fn fold_checks<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Checks> {
     let mut state = None;
     let mut latest: Option<(&str, &str)> = None;

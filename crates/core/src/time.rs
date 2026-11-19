@@ -31,11 +31,20 @@ pub fn parse_rfc3339(text: &str) -> Option<i64> {
     if bytes.len() != 20 || bytes[10] != b'T' || bytes[19] != b'Z' {
         return None;
     }
-    let number = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
+    // Every digit checked by position: `parse` alone would take a signed
+    // 4-character year like `+126`.
+    let number = |range: std::ops::Range<usize>| {
+        bytes[range.clone()]
+            .iter()
+            .all(u8::is_ascii_digit)
+            .then(|| text.get(range))??
+            .parse::<i64>()
+            .ok()
+    };
     let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
     let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
     if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+        || !(1..=days_in_month(year, month)).contains(&day)
         || hour > 23
         || minute > 59
         || second > 59
@@ -47,6 +56,16 @@ pub fn parse_rfc3339(text: &str) -> Option<i64> {
         return None;
     }
     Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+fn days_in_month(year: i64, month: i64) -> i64 {
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
 }
 
 /// A proleptic Gregorian date to days since 1970-01-01 (Howard Hinnant's
@@ -136,6 +155,8 @@ mod tests {
             "2026-11-11T08:02:25.5Z",
             "2026-13-11T08:02:25Z",
             "2026-11-11T25:02:25Z",
+            "2026-02-31T08:02:25Z",
+            "+126-11-11T08:02:25Z",
             "not a date, 20 chars",
         ] {
             assert_eq!(parse_rfc3339(text), None, "{text:?}");

@@ -120,7 +120,7 @@ pub struct PrSummary {
 
 /// Whether [`open`] may fetch missing commits. The command line never
 /// fetches - it prints the fetch to run instead - while the in-app picker
-/// fetches on the reviewer's explicit pick (owner decision, 2026-11-19).
+/// fetches on the reviewer's explicit pick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FetchMode {
     Never,
@@ -154,7 +154,7 @@ pub fn open(
         [only] => only.clone(),
         _ => "<remote>".to_string(),
     };
-    // Honest both before and after an on-demand fetch: the command line
+    // True both before and after an on-demand fetch: the command line
     // never fetched, the picker already did and the hint is what to try
     // by hand.
     let tail = match fetch {
@@ -229,8 +229,10 @@ pub fn open(
 
 /// A branch only the remotes know resolves when exactly one remote has it;
 /// several are a question the user must answer, not a guess. `missing` words
-/// the no-remote case, because the callers know different things.
-fn remote_ref(
+/// the no-remote case, because the callers know different things. Public
+/// so the command line's revision fallback resolves by the same rule and
+/// in the same words.
+pub fn remote_ref(
     backend: &dyn ReviewBackend,
     branch: &str,
     missing: impl FnOnce() -> String,

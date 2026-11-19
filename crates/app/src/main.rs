@@ -53,31 +53,15 @@ fn exit_usage(message: &str) -> ! {
     std::process::exit(2);
 }
 
-/// A branch only the remotes know resolves when exactly one remote has it;
-/// several are a question the user must answer, not a guess. `missing` words
-/// the no-remote case, because the callers know different things: a PR base
-/// exists upstream but is not fetched, while an arbitrary revision may not
-/// exist anywhere.
+/// The core's resolution rule (`pr::remote_ref`) with the command line's
+/// answer to failure: print and exit. `missing` words the no-remote case,
+/// because the callers know different things: a PR base exists upstream
+/// but is not fetched, while an arbitrary revision may not exist anywhere.
 fn remote_ref(backend: &GitCli, branch: &str, missing: impl FnOnce() -> String) -> String {
-    let remotes = backend.remotes_with_branch(branch).unwrap_or_else(|error| {
-        eprintln!("{error}");
+    diffie_core::pr::remote_ref(backend, branch, missing).unwrap_or_else(|message| {
+        eprintln!("{message}");
         std::process::exit(1);
-    });
-    match remotes.as_slice() {
-        [remote] => format!("{remote}/{branch}"),
-        [] => {
-            eprintln!("{}", missing());
-            std::process::exit(1);
-        }
-        _ => {
-            eprintln!(
-                "`{branch}` is on more than one remote ({}); say which, e.g. `{}/{branch}`.",
-                remotes.join(", "),
-                remotes[0]
-            );
-            std::process::exit(1);
-        }
-    }
+    })
 }
 
 /// The branch a bare start compares against when nothing names one: what

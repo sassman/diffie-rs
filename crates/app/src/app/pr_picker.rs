@@ -217,7 +217,7 @@ impl ReviewApp {
                                         let number = *number;
                                         window.close_dialog(cx);
                                         let _ = owner.update(cx, |this, cx| {
-                                            this.open_pull(number, cx);
+                                            this.open_pull(number, window, cx);
                                         });
                                     }
                                     // The dialog stays up; the rows grow in
@@ -266,10 +266,23 @@ impl ReviewApp {
     /// Opens the picked pull request in this window, as `--pr` would have:
     /// resolve, fetch what is missing, then swap the review over. On
     /// failure the current review stays and the status line says why.
-    pub(super) fn open_pull(&mut self, number: u64, cx: &mut Context<Self>) {
+    pub(super) fn open_pull(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
         if self.publishing {
+            // The palette entry is greyed while publishing, but the picker
+            // may already be up when a publish starts; the pick must not
+            // vanish without a word.
+            self.notice = Some(format!("publishing; #{number} can open once it lands").into());
+            cx.notify();
             return;
         }
+        // The inputs are per-review state too, cleared here because
+        // `adopt` runs in an async completion with no window to hand the
+        // input its new value. A failed open leaves them cleared: losing
+        // a stale filter is no loss.
+        self.picker_query
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.search_query
+            .update(cx, |state, cx| state.set_value("", window, cx));
         self.loading = true;
         self.notice = None;
         cx.notify();
@@ -307,9 +320,20 @@ impl ReviewApp {
     /// field of `ReviewApp` must be reset here or rebuilt by `install`.
     fn adopt(&mut self, comparison: Comparison, pull: Option<Pull>, cx: &mut Context<Self>) {
         // A pending save still writes the old review file before the
-        // review is replaced; a save already running finishes on the path
-        // it captured.
-        self.write_review(cx);
+        // review is replaced: directly when no save runs (the task
+        // captures file and path at call time), else parked for the save
+        // chain's next turn, which would otherwise find the swapped
+        // review and write nothing.
+        if self.save_pending {
+            if self.save_running {
+                self.parting_save = self
+                    .reviews
+                    .as_ref()
+                    .map(|set| (set.mine.clone(), self.review_path.clone()));
+            } else {
+                self.write_review(cx);
+            }
+        }
         self.comparison = comparison;
         self.pull = pull;
         self.publish_status = None;

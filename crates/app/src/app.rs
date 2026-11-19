@@ -1013,6 +1013,10 @@ pub struct ReviewApp {
     /// at its newest.
     save_pending: bool,
     save_running: bool,
+    /// A review file parked by `adopt` while a save was in flight: the
+    /// swap replaces `reviews`, so the save chain's next turn writes this
+    /// instead of finding nothing to save. See `write_review`.
+    parting_save: Option<(ReviewFile, PathBuf)>,
     /// Discards finished searches a newer query has outrun.
     search_generation: usize,
     _search: Task<()>,
@@ -1175,6 +1179,7 @@ impl ReviewApp {
             review_generation: 0,
             save_pending: false,
             save_running: false,
+            parting_save: None,
             search_generation: 0,
             _search: Task::ready(()),
             _load: Task::ready(()),
@@ -1450,13 +1455,20 @@ impl ReviewApp {
         if self.save_running || !self.save_pending {
             return;
         }
-        let Some(mut file) = self.reviews.as_ref().map(|set| set.mine.clone()) else {
+        // A parked file first: `adopt` swapped the review while a save
+        // ran, and the edit made meanwhile must still reach the old file.
+        let parked = self.parting_save.take();
+        let live = || {
+            self.reviews
+                .as_ref()
+                .map(|set| (set.mine.clone(), self.review_path.clone()))
+        };
+        let Some((mut file, path)) = parked.or_else(live) else {
             self.save_pending = false;
             return;
         };
         self.save_pending = false;
         self.save_running = true;
-        let path = self.review_path.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(
