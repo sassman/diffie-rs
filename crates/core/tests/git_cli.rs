@@ -1193,7 +1193,10 @@ fn clone_behind_upstream() -> (tempfile::TempDir, std::path::PathBuf, Oid, Oid) 
     git(&upstream, &["commit", "-q", "-m", "pr commit"]);
     let head = Oid::new(git(&upstream, &["rev-parse", "HEAD"]));
     let base = Oid::new(git(&upstream, &["rev-parse", "main"]));
-    git(&upstream, &["update-ref", "refs/pull/7/head", head.as_str()]);
+    git(
+        &upstream,
+        &["update-ref", "refs/pull/7/head", head.as_str()],
+    );
     git(&upstream, &["checkout", "-q", "main"]);
     (directory, local, head, base)
 }
@@ -1216,7 +1219,10 @@ fn fetch_brings_missing_commits_and_leaves_the_checkout_alone() {
     // Only objects and remote-tracking refs: no new local branch, HEAD and
     // the working tree as they were.
     assert_eq!(git(&local, &["rev-parse", "HEAD"]), before);
-    assert_eq!(git(&local, &["branch", "--format=%(refname:short)"]), "main");
+    assert_eq!(
+        git(&local, &["branch", "--format=%(refname:short)"]),
+        "main"
+    );
     assert_eq!(git(&local, &["status", "--porcelain"]), "");
 }
 

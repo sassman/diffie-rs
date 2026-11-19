@@ -273,8 +273,7 @@ fn fetch_missing(backend: &dyn ReviewBackend, pull: &PullRequest) -> Result<(), 
     let remote = match remotes.as_slice() {
         [] => {
             return Err(
-                "no remote is configured; fetch the pull request's commits and retry."
-                    .to_string(),
+                "no remote is configured; fetch the pull request's commits and retry.".to_string(),
             );
         }
         [only] => only.clone(),
@@ -306,8 +305,6 @@ fn fetch_missing(backend: &dyn ReviewBackend, pull: &PullRequest) -> Result<(), 
         .fetch(&remote, &refspecs)
         .map_err(|error| error.to_string())
 }
-
-/// Parses the `--pr` value: a decimal number, or an http(s) URL shaped
 
 /// Parses the `--pr` value: a decimal number, or an http(s) URL shaped
 /// `https://<host>/<owner>/<repo>/pull/<number>` with trailing path segments,
