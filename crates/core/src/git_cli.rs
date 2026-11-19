@@ -17,8 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backend::{BackendError, Result, ReviewBackend};
 use crate::model::{
-    BlameLine, ChangedRegion, Commit, CompareMode, Comparison, FileState, FileStatus, FileSummary,
-    LineOrigin, NewSide, Oid, Resolved, Scope, ScopedPatch,
+    BlameLine, ChangedRegion, Commit, CompareMode, Comparison, ConflictFile, ConflictLabels,
+    FileState, FileStatus, FileSummary, LineOrigin, NewSide, Oid, RepoState, Resolved, Scope,
+    ScopedPatch,
 };
 use crate::review::{ReviewInput, ReviewedFile};
 
@@ -530,6 +531,159 @@ impl GitCli {
         }
     }
 
+    /// The absolute path of `name` inside the git dir. `--git-path` answers
+    /// per worktree, so MERGE_HEAD and the rebase state directories are the
+    /// ones of the checkout the backend was opened in.
+    fn git_path(&self, name: &str) -> Result<PathBuf> {
+        Ok(self.absolute(self.read(&["rev-parse", "--git-path", name])?.trim()))
+    }
+
+    /// The working tree's top directory; an error on a bare repository.
+    fn worktree_root(&self) -> Result<PathBuf> {
+        self.try_read(&["rev-parse", "--show-toplevel"])?
+            .map(|output| PathBuf::from(output.trim()))
+            .ok_or_else(|| BackendError::NotARepository(self.repository.display().to_string()))
+    }
+
+    /// `(path, [stage 1, stage 2, stage 3])` for every unmerged index entry,
+    /// in git's path order, optionally narrowed to one path.
+    fn unmerged_entries(&self, path: Option<&str>) -> Result<Vec<(String, [Option<Oid>; 3])>> {
+        let mut args = vec!["ls-files", "-u", "-z", "--"];
+        args.extend(path);
+        let output = self.read(&args)?;
+        let mut entries: Vec<(String, [Option<Oid>; 3])> = Vec::new();
+        // `<mode> <oid> <stage>\t<path>` per entry; -z keeps paths raw, and
+        // the entries of one path are adjacent.
+        for record in output.split('\0').filter(|record| !record.is_empty()) {
+            let Some((meta, path)) = record.split_once('\t') else {
+                continue;
+            };
+            let mut fields = meta.split(' ');
+            let (Some(_mode), Some(oid), Some(stage)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let Some(stage) = stage
+                .parse::<usize>()
+                .ok()
+                .filter(|stage| (1..=3).contains(stage))
+            else {
+                continue;
+            };
+            if entries.last().map(|(existing, _)| existing.as_str()) != Some(path) {
+                entries.push((path.to_string(), [None, None, None]));
+            }
+            if let Some((_, stages)) = entries.last_mut() {
+                stages[stage - 1] = Some(Oid::new(oid));
+            }
+        }
+        Ok(entries)
+    }
+
+    /// The pane labels for the interrupted operation. Together with the
+    /// stage swap in [`ReviewBackend::conflicts`] this is the one place that
+    /// maps git's ours/theirs to yours/upstream; the git terms leave neither.
+    fn conflict_labels(&self, rebase: bool) -> Result<ConflictLabels> {
+        if rebase {
+            Ok(ConflictLabels {
+                yours: self.replayed_title()?,
+                upstream: self.onto_name()?,
+            })
+        } else {
+            Ok(ConflictLabels {
+                yours: self.current_branch()?.unwrap_or_else(|| "HEAD".to_string()),
+                upstream: self.merged_name()?,
+            })
+        }
+    }
+
+    /// The name of what a merge is bringing in: the quoted ref of the
+    /// prepared MERGE_MSG ("Merge branch 'x' ..."), or the merged commit's
+    /// short id when the message names none.
+    fn merged_name(&self) -> Result<String> {
+        if let Ok(message) = std::fs::read_to_string(self.git_path("MERGE_MSG")?)
+            && let Some(first) = message.lines().next()
+            && let Some((_, rest)) = first.split_once('\'')
+            && let Some((name, _)) = rest.split_once('\'')
+            && !name.is_empty()
+        {
+            return Ok(name.to_string());
+        }
+        let head = std::fs::read_to_string(self.git_path("MERGE_HEAD")?).unwrap_or_default();
+        Ok(Oid::new(head.trim()).short().to_string())
+    }
+
+    /// The name of the upstream a rebase replays onto: a ref pointing at the
+    /// recorded onto commit - refs/heads sort before refs/remotes, so a
+    /// local branch wins - or that commit's short id.
+    fn onto_name(&self) -> Result<String> {
+        let onto = ["rebase-merge", "rebase-apply"]
+            .iter()
+            .find_map(|dir| {
+                let state = self.git_path(dir).ok()?;
+                std::fs::read_to_string(state.join("onto")).ok()
+            })
+            .map(|text| text.trim().to_string())
+            .unwrap_or_default();
+        if onto.is_empty() {
+            return Ok("upstream".to_string());
+        }
+        let points_at = format!("--points-at={onto}");
+        Ok(self
+            .try_read(&[
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname:short)",
+                &points_at,
+                "refs/heads",
+                "refs/remotes",
+            ])?
+            .map(|output| output.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| Oid::new(onto).short().to_string()))
+    }
+
+    /// The replayed commit's title: rebase-merge/message, or the subject of
+    /// REBASE_HEAD where the apply backend keeps no message file.
+    fn replayed_title(&self) -> Result<String> {
+        if let Ok(state) = self.git_path("rebase-merge")
+            && let Ok(message) = std::fs::read_to_string(state.join("message"))
+            && let Some(first) = message.lines().next().map(str::trim)
+            && !first.is_empty()
+        {
+            return Ok(first.to_string());
+        }
+        Ok(self
+            .try_read(&[
+                "log",
+                "-1",
+                "--format=%s",
+                "--end-of-options",
+                "REBASE_HEAD",
+                "--",
+            ])?
+            .map(|output| output.trim().to_string())
+            .filter(|subject| !subject.is_empty())
+            .unwrap_or_else(|| "replayed commit".to_string()))
+    }
+
+    /// `git merge <action>` or `git rebase <action>`, editors stubbed out so
+    /// git can never block waiting for a message or a todo list.
+    fn operate(&self, action: &str) -> Result<()> {
+        let subcommand = match self.repo_state()? {
+            RepoState::Merge => "merge",
+            RepoState::Rebase { .. } => "rebase",
+            RepoState::Idle => return Err(BackendError::NoOperation),
+        };
+        let mut command = self.command();
+        command
+            .env("GIT_EDITOR", "true")
+            .env("GIT_SEQUENCE_EDITOR", "true");
+        run(&mut command, &[subcommand, action], None)?;
+        Ok(())
+    }
+
     fn blame_with(
         &self,
         rev: &Oid,
@@ -922,10 +1076,7 @@ impl ReviewBackend for GitCli {
     }
 
     fn worktree_blob_ids(&self, paths: &[String]) -> Result<HashMap<String, Oid>> {
-        let top = self
-            .try_read(&["rev-parse", "--show-toplevel"])?
-            .map(|output| PathBuf::from(output.trim()))
-            .ok_or_else(|| BackendError::NotARepository(self.repository.display().to_string()))?;
+        let top = self.worktree_root()?;
         // One `hash-object` call for every path. Absolute paths keep the
         // call independent of where the backend was opened. `--stdin-paths`
         // is newline-separated, so a path containing one cannot be hashed
@@ -984,15 +1135,120 @@ impl ReviewBackend for GitCli {
     }
 
     fn worktree_file(&self, path: &str) -> Result<Option<Vec<u8>>> {
-        let top = self
-            .try_read(&["rev-parse", "--show-toplevel"])?
-            .map(|output| PathBuf::from(output.trim()))
-            .ok_or_else(|| BackendError::NotARepository(self.repository.display().to_string()))?;
-        let file = top.join(path);
+        let file = self.worktree_root()?.join(path);
         if !file.is_file() {
             return Ok(None);
         }
         Ok(Some(std::fs::read(file)?))
+    }
+
+    fn repo_state(&self) -> Result<RepoState> {
+        // The two rebase backends keep separate state directories; both are
+        // checked before MERGE_HEAD, which a rebase never leaves behind.
+        for (dir, current, last) in [
+            ("rebase-merge", "msgnum", "end"),
+            ("rebase-apply", "next", "last"),
+        ] {
+            let state = self.git_path(dir)?;
+            if state.is_dir() {
+                let number = |file: &str| {
+                    std::fs::read_to_string(state.join(file))
+                        .ok()
+                        .and_then(|text| text.trim().parse().ok())
+                        .unwrap_or(0)
+                };
+                return Ok(RepoState::Rebase {
+                    done: number(current),
+                    total: number(last),
+                });
+            }
+        }
+        if self.git_path("MERGE_HEAD")?.is_file() {
+            return Ok(RepoState::Merge);
+        }
+        Ok(RepoState::Idle)
+    }
+
+    fn conflicts(&self) -> Result<Vec<ConflictFile>> {
+        let rebase = match self.repo_state()? {
+            RepoState::Idle => return Ok(Vec::new()),
+            RepoState::Merge => false,
+            RepoState::Rebase { .. } => true,
+        };
+        let labels = self.conflict_labels(rebase)?;
+        let entries = self.unmerged_entries(None)?;
+        let ids: Vec<Oid> = entries
+            .iter()
+            .flat_map(|(_, stages)| stages.iter().flatten().cloned())
+            .collect();
+        let blobs = self.blobs(&ids)?;
+        let text = |id: &Option<Oid>| {
+            id.as_ref()
+                .and_then(|id| blobs.get(id))
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        };
+        entries
+            .into_iter()
+            .map(|(path, [base, ours, theirs])| {
+                let working = self
+                    .worktree_file(&path)?
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_default();
+                // In a merge git's stage 2 is the user's own branch; a
+                // rebase replays the user's commits onto the upstream, so
+                // the stages swap sides. This mapping exists only here.
+                let (yours, upstream) = if rebase {
+                    (text(&theirs), text(&ours))
+                } else {
+                    (text(&ours), text(&theirs))
+                };
+                Ok(ConflictFile {
+                    path,
+                    base: text(&base),
+                    yours,
+                    upstream,
+                    working,
+                    labels: labels.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn resolve_file(&self, path: &str, contents: &str) -> Result<()> {
+        // The sanctioned write is narrow: nothing but an unmerged path may
+        // be touched, however the caller got here.
+        if self.unmerged_entries(Some(path))?.is_empty() {
+            return Err(BackendError::NotConflicted(path.to_string()));
+        }
+        let file = self.worktree_root()?.join(path);
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(file, contents)?;
+        // `--end-of-options` would turn the following `--` into a literal
+        // pathspec here; the separator alone keeps the path a path.
+        self.read(&["add", "--", path])?;
+        Ok(())
+    }
+
+    fn unresolve_file(&self, path: &str) -> Result<()> {
+        // `-m` rebuilds the markers from the resolve-undo data, even after
+        // the path was staged. Older gits reject `--end-of-options` here;
+        // the `--` separator alone still keeps the path a path.
+        match self.read(&["checkout", "-m", "--end-of-options", "--", path]) {
+            Err(BackendError::Git { stderr, .. }) if stderr.contains("end-of-options") => {
+                self.read(&["checkout", "-m", "--", path]).map(|_| ())
+            }
+            other => other.map(|_| ()),
+        }
+    }
+
+    fn continue_op(&self) -> Result<()> {
+        self.operate("--continue")
+    }
+
+    fn abort_op(&self) -> Result<()> {
+        self.operate("--abort")
     }
 
     fn author_name(&self) -> Result<String> {

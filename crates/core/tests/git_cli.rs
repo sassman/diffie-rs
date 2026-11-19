@@ -5,7 +5,7 @@ use std::process::Command;
 
 use diffie_core::review::{ReviewInput, ReviewedFile};
 use diffie_core::{
-    BackendError, CompareMode, Comparison, FileState, FileStatus, GitCli, NewSide, Oid,
+    BackendError, CompareMode, Comparison, FileState, FileStatus, GitCli, NewSide, Oid, RepoState,
     ReviewBackend, Scope,
 };
 
@@ -1374,4 +1374,275 @@ fn opening_without_fetching_names_the_fetch_to_run() {
          `git fetch origin topic` and retry - diffie never fetches."
     );
     assert!(!backend.revision_exists(head.as_str()).unwrap());
+}
+
+/// Like [`git`], but for a merge or rebase that is expected to stop on a
+/// conflict: git exits non-zero, and that interrupted state is the fixture.
+fn git_conflicting(directory: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Ada")
+        .env("GIT_AUTHOR_EMAIL", "ada@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Ada")
+        .env("GIT_COMMITTER_EMAIL", "ada@example.invalid")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("git runs");
+    assert!(
+        !output.status.success(),
+        "git {args:?} should stop on a conflict"
+    );
+}
+
+/// `feat` and `main` both rewrite the one line of `t.txt`, so merging or
+/// rebasing one into the other always conflicts there; `calm.txt` only
+/// changes on `feat` and merges cleanly.
+struct ConflictFixture {
+    directory: tempfile::TempDir,
+}
+
+impl ConflictFixture {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.name", "Ada"]);
+        // diff3 markers carry the base section the resolver needs. Set on
+        // the throwaway repository; the app never touches a repo's config.
+        git(root, &["config", "merge.conflictStyle", "diff3"]);
+        std::fs::write(root.join("t.txt"), "base line\n").unwrap();
+        std::fs::write(root.join("calm.txt"), "calm\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "base"]);
+        git(root, &["checkout", "-q", "-b", "feat"]);
+        std::fs::write(root.join("t.txt"), "feat line\n").unwrap();
+        git(root, &["commit", "-q", "-am", "feat rewrites t"]);
+        std::fs::write(root.join("calm.txt"), "calm feat\n").unwrap();
+        git(root, &["commit", "-q", "-am", "feat edits calm"]);
+        git(root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("t.txt"), "main line\n").unwrap();
+        git(root, &["commit", "-q", "-am", "main rewrites t"]);
+        Self { directory }
+    }
+
+    fn root(&self) -> &Path {
+        self.directory.path()
+    }
+
+    fn backend(&self) -> GitCli {
+        GitCli::open(self.root()).unwrap()
+    }
+
+    /// Interrupt a merge of `feat` into `main`, conflicted on `t.txt`.
+    fn start_merge(&self) {
+        git_conflicting(self.root(), &["merge", "feat"]);
+    }
+
+    /// Interrupt a rebase of `feat` onto `main`: it stops at the first of
+    /// feat's two commits.
+    fn start_rebase(&self) {
+        git(self.root(), &["checkout", "-q", "feat"]);
+        git_conflicting(self.root(), &["rebase", "main"]);
+    }
+}
+
+#[test]
+fn repo_state_tells_a_merge_from_idle_per_worktree() {
+    let fixture = ConflictFixture::new();
+    assert_eq!(fixture.backend().repo_state().unwrap(), RepoState::Idle);
+
+    // A linked worktree on another branch stays idle while the main
+    // checkout merges: the state is read from the worktree's own git dir.
+    let aside = fixture.root().join("aside");
+    git(
+        fixture.root(),
+        &["worktree", "add", "-q", aside.to_str().unwrap(), "feat"],
+    );
+    fixture.start_merge();
+    assert_eq!(fixture.backend().repo_state().unwrap(), RepoState::Merge);
+    assert_eq!(
+        GitCli::open(&aside).unwrap().repo_state().unwrap(),
+        RepoState::Idle
+    );
+}
+
+#[test]
+fn repo_state_counts_rebase_progress() {
+    let fixture = ConflictFixture::new();
+    fixture.start_rebase();
+    assert_eq!(
+        fixture.backend().repo_state().unwrap(),
+        RepoState::Rebase { done: 1, total: 2 }
+    );
+}
+
+#[test]
+fn conflicts_name_the_sides_of_a_merge() {
+    let fixture = ConflictFixture::new();
+    fixture.start_merge();
+    let conflicts = fixture.backend().conflicts().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    let file = &conflicts[0];
+    assert_eq!(file.path, "t.txt");
+    // Merging feat into main: git's ours is main, the user's own branch.
+    assert_eq!(file.base.as_deref(), Some("base line\n"));
+    assert_eq!(file.yours.as_deref(), Some("main line\n"));
+    assert_eq!(file.upstream.as_deref(), Some("feat line\n"));
+    assert_eq!(file.labels.yours, "main");
+    assert_eq!(file.labels.upstream, "feat");
+    // diff3 working text: both sides, the base section, all markers.
+    assert!(file.working.contains("<<<<<<<"));
+    assert!(file.working.contains("|||||||"));
+    assert!(file.working.contains(">>>>>>>"));
+    assert!(file.working.contains("main line"));
+    assert!(file.working.contains("feat line"));
+    assert!(file.working.contains("base line"));
+}
+
+#[test]
+fn conflicts_swap_the_sides_of_a_rebase() {
+    let fixture = ConflictFixture::new();
+    fixture.start_rebase();
+    let conflicts = fixture.backend().conflicts().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    let file = &conflicts[0];
+    assert_eq!(file.path, "t.txt");
+    // Rebasing feat onto main: git's ours is main - the upstream being
+    // rebased onto - and theirs is the user's replayed commit.
+    assert_eq!(file.base.as_deref(), Some("base line\n"));
+    assert_eq!(file.yours.as_deref(), Some("feat line\n"));
+    assert_eq!(file.upstream.as_deref(), Some("main line\n"));
+    assert_eq!(file.labels.yours, "feat rewrites t");
+    assert_eq!(file.labels.upstream, "main");
+    assert!(file.working.contains("<<<<<<<"));
+}
+
+#[test]
+fn resolve_file_writes_and_stages_the_resolution() {
+    let fixture = ConflictFixture::new();
+    fixture.start_merge();
+    let backend = fixture.backend();
+    backend.resolve_file("t.txt", "settled\n").unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(fixture.root().join("t.txt")).unwrap(),
+        "settled\n"
+    );
+    assert_eq!(git(fixture.root(), &["ls-files", "-u", "--", "t.txt"]), "");
+    assert!(backend.conflicts().unwrap().is_empty());
+    // Staging the last file does not continue anything by itself.
+    assert_eq!(backend.repo_state().unwrap(), RepoState::Merge);
+
+    // A path without a conflict is outside the narrow write exception.
+    assert!(matches!(
+        backend.resolve_file("calm.txt", "no\n"),
+        Err(BackendError::NotConflicted(path)) if path == "calm.txt"
+    ));
+}
+
+#[test]
+fn unresolve_file_regenerates_markers_after_staging_in_a_merge() {
+    let fixture = ConflictFixture::new();
+    fixture.start_merge();
+    let backend = fixture.backend();
+    backend.resolve_file("t.txt", "settled\n").unwrap();
+    backend.unresolve_file("t.txt").unwrap();
+
+    assert_ne!(git(fixture.root(), &["ls-files", "-u", "--", "t.txt"]), "");
+    let conflicts = backend.conflicts().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    let file = &conflicts[0];
+    // The markers are back; their labels are generic, so only the stage
+    // texts and the stored labels are trusted, never the marker lines.
+    assert!(file.working.contains("<<<<<<<"));
+    assert_eq!(file.yours.as_deref(), Some("main line\n"));
+    assert_eq!(file.upstream.as_deref(), Some("feat line\n"));
+}
+
+#[test]
+fn unresolve_file_regenerates_markers_after_staging_in_a_rebase() {
+    let fixture = ConflictFixture::new();
+    fixture.start_rebase();
+    let backend = fixture.backend();
+    backend.resolve_file("t.txt", "settled\n").unwrap();
+    backend.unresolve_file("t.txt").unwrap();
+
+    assert_ne!(git(fixture.root(), &["ls-files", "-u", "--", "t.txt"]), "");
+    let conflicts = backend.conflicts().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    let file = &conflicts[0];
+    assert!(file.working.contains("<<<<<<<"));
+    // The swap still holds after regeneration.
+    assert_eq!(file.yours.as_deref(), Some("feat line\n"));
+    assert_eq!(file.upstream.as_deref(), Some("main line\n"));
+}
+
+#[test]
+fn continue_finishes_a_merge_and_abort_discards_one() {
+    let fixture = ConflictFixture::new();
+    fixture.start_merge();
+    let backend = fixture.backend();
+    backend.resolve_file("t.txt", "settled\n").unwrap();
+    // GIT_EDITOR=true keeps `merge --continue` from waiting on an editor.
+    backend.continue_op().unwrap();
+    assert_eq!(backend.repo_state().unwrap(), RepoState::Idle);
+    // A real merge commit: two parents, carrying the resolution.
+    git(fixture.root(), &["rev-parse", "--verify", "HEAD^2"]);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root().join("t.txt")).unwrap(),
+        "settled\n"
+    );
+
+    let fixture = ConflictFixture::new();
+    fixture.start_merge();
+    let backend = fixture.backend();
+    backend.abort_op().unwrap();
+    assert_eq!(backend.repo_state().unwrap(), RepoState::Idle);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root().join("t.txt")).unwrap(),
+        "main line\n"
+    );
+}
+
+#[test]
+fn continue_finishes_a_rebase_and_abort_discards_one() {
+    let fixture = ConflictFixture::new();
+    fixture.start_rebase();
+    let backend = fixture.backend();
+    backend.resolve_file("t.txt", "settled\n").unwrap();
+    // The second commit replays cleanly, so one continue finishes it all.
+    backend.continue_op().unwrap();
+    assert_eq!(backend.repo_state().unwrap(), RepoState::Idle);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root().join("t.txt")).unwrap(),
+        "settled\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root().join("calm.txt")).unwrap(),
+        "calm feat\n"
+    );
+
+    let fixture = ConflictFixture::new();
+    fixture.start_rebase();
+    let backend = fixture.backend();
+    backend.abort_op().unwrap();
+    assert_eq!(backend.repo_state().unwrap(), RepoState::Idle);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root().join("t.txt")).unwrap(),
+        "feat line\n"
+    );
+}
+
+#[test]
+fn continue_and_abort_refuse_an_idle_repository() {
+    let fixture = ConflictFixture::new();
+    let backend = fixture.backend();
+    assert!(matches!(
+        backend.continue_op(),
+        Err(BackendError::NoOperation)
+    ));
+    assert!(matches!(backend.abort_op(), Err(BackendError::NoOperation)));
 }
