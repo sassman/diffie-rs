@@ -4346,8 +4346,14 @@ impl ReviewApp {
     }
 
     fn render_diff(&self, cx: &mut Context<Self>) -> AnyElement {
+        // The placeholders stand in for the Diff, so they must also stand
+        // in for its focus: without a tracked handle in the tree, nothing
+        // carries the Review key context and the window-level shortcuts -
+        // the palette first of all - go dead on an empty or failed load.
+        let focus = self.diff.read(cx).focus_handle(cx);
         if let Some(error) = &self.error {
             return div()
+                .track_focus(&focus)
                 .size_full()
                 .p_4()
                 .text_sm()
@@ -4357,6 +4363,7 @@ impl ReviewApp {
         }
         if self.loading && self.files.is_empty() {
             return h_flex()
+                .track_focus(&focus)
                 .size_full()
                 .justify_center()
                 .gap_2()
@@ -4373,6 +4380,7 @@ impl ReviewApp {
             .any(|file| file.state != FileState::NotInComparison || self.show_other_revisions);
         if !visible {
             return h_flex()
+                .track_focus(&focus)
                 .size_full()
                 .justify_center()
                 .text_sm()
