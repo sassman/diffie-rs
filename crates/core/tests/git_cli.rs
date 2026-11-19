@@ -1170,6 +1170,22 @@ fn worktree_file_reads_what_is_on_disk() {
     assert_eq!(backend.worktree_file("missing.txt").unwrap(), None);
 }
 
+#[test]
+fn has_uncommitted_changes_counts_edits_and_untracked_files() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    let backend = fixture.backend();
+    assert!(!backend.has_uncommitted_changes().unwrap());
+
+    std::fs::write(root.join("a.txt"), "edited\n").unwrap();
+    assert!(backend.has_uncommitted_changes().unwrap());
+    git(root, &["checkout", "--", "a.txt"]);
+    assert!(!backend.has_uncommitted_changes().unwrap());
+
+    std::fs::write(root.join("fresh.txt"), "untracked\n").unwrap();
+    assert!(backend.has_uncommitted_changes().unwrap());
+}
+
 /// Upstream with a pull request's shape: `topic` going into `main`, the
 /// head also reachable as `refs/pull/7/head` like on GitHub, and a clone
 /// made before the pull request's commits existed.

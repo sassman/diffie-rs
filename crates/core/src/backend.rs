@@ -120,6 +120,11 @@ pub trait ReviewBackend: Send + Sync {
     /// request from a fetched one.
     fn revision_exists(&self, revision: &str) -> Result<bool>;
 
+    /// Whether the working tree holds anything an uncommitted review
+    /// would show: changes against HEAD, staged or not, and untracked
+    /// files. Decides the bare invocation's default comparison.
+    fn has_uncommitted_changes(&self) -> Result<bool>;
+
     /// The configured remotes, as `git remote` lists them. Names a remote
     /// in fetch hints without guessing.
     fn remotes(&self) -> Result<Vec<String>>;

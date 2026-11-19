@@ -18,7 +18,8 @@ Usage: diffie [-C <path>] [<revision> [<revision>]] [--every-difference]
        diffie [-C <path>] --reply <id> <answer> [--session <id>]
 
 Reads in the merge direction. With no revision, reviews the uncommitted
-changes going into the checked-out branch. With one revision, reviews
+changes going into the checked-out branch - and with a clean working
+tree, what the branch itself adds going into main. With one revision, reviews
 everything the working tree adds going into it. With two revisions (or A..B),
 reviews the first going into the second: `diffie topic main` is topic's
 changes going into main. A revision only a remote has is taken from there
@@ -76,6 +77,17 @@ fn remote_ref(backend: &GitCli, branch: &str, missing: impl FnOnce() -> String) 
             std::process::exit(1);
         }
     }
+}
+
+/// Whether `main` can anchor the clean-tree default: it is a revision
+/// here, or exactly one remote carries it (the resolve step then takes
+/// that remote's ref). Anything else keeps the uncommitted default
+/// instead of failing a bare start over a branch nobody named.
+fn main_comparable(backend: &GitCli) -> bool {
+    backend.revision_exists("main").unwrap_or(false)
+        || backend
+            .remotes_with_branch("main")
+            .is_ok_and(|remotes| remotes.len() == 1)
 }
 
 fn main() {
@@ -311,9 +323,25 @@ fn main() {
         )),
         [] => {
             // Opened plainly, the review is the uncommitted work going into
-            // the checked-out branch. A bare repository or a detached HEAD
-            // has no such review and falls back to branch against main.
-            if let Some(into) = branch.clone().filter(|_| working_tree) {
+            // the checked-out branch. A clean working tree has no such
+            // review, so the default becomes what the branch itself adds to
+            // main (`diffie HEAD..main` spelled out) - but only when that
+            // reads as a review: a branch that is not main itself, and a
+            // main to compare against. A bare repository or a detached HEAD
+            // has neither and falls back to branch against main.
+            let branch_into_main = working_tree
+                && !backend.has_uncommitted_changes().unwrap_or(true)
+                && branch.as_deref().is_some_and(|name| name != "main")
+                && main_comparable(&backend);
+            if branch_into_main {
+                Comparison {
+                    source: branch.clone().unwrap_or_default(),
+                    target: "main".to_string(),
+                    mode,
+                    uncommitted: false,
+                    ..Default::default()
+                }
+            } else if let Some(into) = branch.clone().filter(|_| working_tree) {
                 Comparison {
                     source: "uncommitted".to_string(),
                     target: into,

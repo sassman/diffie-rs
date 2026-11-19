@@ -172,6 +172,15 @@ Decided:
   squash- or rebase-merged PR, which never land on the base branch).
   Sending comments back to the pull request happens only from a PR entry
   point (section 18).
+- Opened plainly on a clean working tree, the review is the branch's own
+  work going into main (owner, 2026-11-19): the old default - uncommitted
+  going into the checked-out branch - opened an empty window right after
+  a commit or in a fresh worktree, where the branch review is the one the
+  reviewer plausibly came for (`diffie HEAD..main` typed out). The
+  uncommitted default stays whenever anything is uncommitted (untracked
+  counts), on main itself, and when no main is in reach (local, or on
+  exactly one remote): those cases keep the old behaviour rather than
+  turning a bare start into an error.
 - The command palette opens pull requests (owner, 2026-11-19). "Open a
   pull request..." lists the repository's PRs in a popover styled like
   the palette itself, freshly fetched from the forge on every opening:

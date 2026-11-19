@@ -574,6 +574,13 @@ impl ReviewBackend for GitCli {
             .is_some())
     }
 
+    fn has_uncommitted_changes(&self) -> Result<bool> {
+        // Like the uncommitted layer: untracked counts, ignored does not.
+        Ok(!self
+            .read(&["status", "--porcelain", "-z", "--no-renames"])?
+            .is_empty())
+    }
+
     fn remotes(&self) -> Result<Vec<String>> {
         Ok(self
             .read(&["remote"])?
