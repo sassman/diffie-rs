@@ -21,7 +21,16 @@ whole branch, with comments on lines and selections. Rust and GPUI Kit, for
 macOS, Windows and Linux.
 
 <p align="center">
-  <img src="docs/screenshots/main-screen.png" alt="diffie reviewing a pull request: file tree, scope bar with the commit range, a split diff with a resolved review comment, and the hint bar">
+  <img src="docs/screenshots/main-screen.png" alt="diffie reviewing a pull request: file tree, scope bar with the commit range, and a review comment on the diff answered by the agent">
+</p>
+
+The review loop in motion - a comment answered by the agent, then resolved
+(click for the [video](docs/screenshots/comment-resolve.mp4)):
+
+<p align="center">
+  <a href="docs/screenshots/comment-resolve.mp4">
+    <img src="docs/screenshots/comment-resolve.gif" alt="A review comment is answered by the agent and resolved">
+  </a>
 </p>
 
 This is an early alpha. Start with:
