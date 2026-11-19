@@ -1731,6 +1731,83 @@ impl ReviewApp {
         self.file_op(move |backend| backend.unresolve_file(&path), cx);
     }
 
+    /// The header's Resolved tick, in the review header's checkbox idiom:
+    /// checking writes and stages the result, unchecking reopens. The box
+    /// turns the conflict feature's success green, not Reviewed's blue.
+    fn render_resolved_box(
+        &self,
+        path: &str,
+        checked: bool,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let green = cx.theme().success;
+        let muted = cx.theme().muted_foreground;
+        let background = cx.theme().background;
+        let owner = cx.weak_entity();
+        let box_owner = owner.clone();
+        let box_path = path.to_owned();
+        let label_path = path.to_owned();
+        h_flex()
+            .flex_none()
+            .gap(px(5.))
+            .child(
+                // The base checkbox is unstyled by design; box, border and
+                // check mark are drawn here, like the Reviewed tick.
+                gpui_kit::base::Checkbox::new(SharedString::from(format!("resolved-{path}")))
+                    .checked(checked)
+                    .w(px(13.))
+                    .h(px(13.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(3.))
+                    .border_1()
+                    .border_color(muted)
+                    .when(enabled, |checkbox| checkbox.cursor_pointer())
+                    .styles(|styles| styles.checked(|state| state.bg(green).border_color(green)))
+                    .when(checked, |checkbox| {
+                        checkbox.child(Icon::new(IconName::Check).xsmall().text_color(background))
+                    })
+                    .accessibility_label("Resolved")
+                    .when(enabled, |checkbox| {
+                        checkbox.on_change(move |state, _, _, cx| {
+                            let checked = state == gpui_kit::base::CheckboxState::Checked;
+                            let _ = box_owner.update(cx, |this, cx| {
+                                if checked {
+                                    this.mark_resolved(box_path.clone(), cx);
+                                } else {
+                                    this.reopen(box_path.clone(), cx);
+                                }
+                            });
+                        })
+                    }),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("resolved-label-{path}")))
+                    .map(|label| {
+                        if checked {
+                            label.text_color(green).font_medium()
+                        } else {
+                            label.text_color(muted)
+                        }
+                    })
+                    .when(enabled, |label| {
+                        label.cursor_pointer().on_click(move |_, _, cx| {
+                            let _ = owner.update(cx, |this, cx| {
+                                if checked {
+                                    this.reopen(label_path.clone(), cx);
+                                } else {
+                                    this.mark_resolved(label_path.clone(), cx);
+                                }
+                            });
+                        })
+                    })
+                    .child("Resolved"),
+            )
+    }
+
     /// Continue or abort, through the same guard, background shape and
     /// error surface as the per-file writes.
     fn run_op(&mut self, abort: bool, cx: &mut Context<Self>) {
@@ -4421,10 +4498,9 @@ impl ReviewApp {
         let rows = self
             .conflict_seen
             .iter()
-            .enumerate()
-            .map(|(seen_ix, path)| {
+            .map(|path| {
                 let Some(ix) = self.conflicts.iter().position(|f| &f.path == path) else {
-                    return self.render_resolved_file(seen_ix, path, &mono, cx);
+                    return self.render_resolved_file(path, &mono, cx);
                 };
                 self.render_conflict_file(ix, &mono, cx)
             })
@@ -4461,12 +4537,10 @@ impl ReviewApp {
     /// stays reachable through Reopen until the operation continues.
     fn render_resolved_file(
         &self,
-        seen_ix: usize,
         path: &str,
         mono: &SharedString,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let owned = path.to_owned();
         h_flex()
             .flex_none()
             .h(px(28.))
@@ -4487,16 +4561,7 @@ impl ReviewApp {
                     .child(path.to_owned()),
             )
             .child(div().flex_1())
-            .child(
-                Button::new(("conflict-reopen", seen_ix))
-                    .ghost()
-                    .xsmall()
-                    .label("Reopen")
-                    .disabled(self.op_running)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.reopen(owned.clone(), cx);
-                    })),
-            )
+            .child(self.render_resolved_box(path, true, !self.op_running, cx))
             .into_any_element()
     }
 
@@ -4589,16 +4654,7 @@ impl ReviewApp {
                             .child(badge),
                     )
                     .child(div().flex_1())
-                    .child(
-                        Button::new(("conflict-resolve", ix))
-                            .primary()
-                            .xsmall()
-                            .label("Mark resolved")
-                            .disabled(!ready || self.op_running)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.mark_resolved(path.clone(), cx);
-                            })),
-                    ),
+                    .child(self.render_resolved_box(&path, false, ready && !self.op_running, cx)),
             )
             .child(body)
             .into_any_element()
