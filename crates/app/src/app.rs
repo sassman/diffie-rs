@@ -21,15 +21,16 @@ use diffie_core::search::{SearchHit, search_patch};
 use crate::settings::{LayoutMode, Settings, WindowSettings};
 use diffie_core::time::ago;
 use diffie_core::{
-    BlameLine, ChangedRegion, Commit, Comparison, FileState, FileStatus, FileSummary, NewSide, Oid,
-    Resolved, ReviewBackend, Scope, ScopedPatch,
+    BlameLine, ChangedRegion, Commit, Comparison, ConflictFile, FileState, FileStatus, FileSummary,
+    NewSide, Oid, RepoState, Resolved, ReviewBackend, Scope, ScopedPatch,
 };
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
-    StyledExt as _, Theme, ThemeMode, ThemeRegistry, TitleBar,
+    StyledExt as _, Theme, ThemeMode, ThemeRegistry, TitleBar, WindowExt as _,
     button::{
-        Button, ButtonCustomVariant, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
+        Button, ButtonCustomVariant, ButtonVariant, ButtonVariants as _, Toggle, ToggleGroup,
+        ToggleVariants as _,
     },
     checkbox::Checkbox,
     diff::{
@@ -616,6 +617,14 @@ enum ScopeKind {
     Custom,
 }
 
+/// What fills the center while a merge or rebase is interrupted. Session
+/// state, not a setting: the choice dies with the operation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CenterView {
+    Review,
+    Conflicts,
+}
+
 /// One group of the commit picker: its heading row and the commits it lists.
 struct PickerSection {
     title: &'static str,
@@ -688,6 +697,8 @@ struct Draft {
 
 /// Everything one background load produces.
 struct Loaded {
+    repo_state: RepoState,
+    conflicts: Vec<ConflictFile>,
     resolved: Resolved,
     commits: Vec<Commit>,
     reviews: ReviewSet,
@@ -1021,6 +1032,24 @@ pub struct ReviewApp {
     forge: Arc<dyn Forge>,
     /// A publish or approval is on its way to the forge; one at a time.
     publishing: bool,
+    /// The interrupted merge or rebase, as the last load saw it. The state
+    /// strip, the center switch and the palette's continue and abort all
+    /// read it; polled on load and reload only, like the backend says.
+    repo_state: RepoState,
+    /// The paths still unmerged. Empty means the operation can continue.
+    conflicts: Vec<ConflictFile>,
+    /// The most files the current operation had unmerged at once:
+    /// `conflicts` only lists what is left, so progress needs a high-water
+    /// mark. A state change (a rebase stepping on) starts a fresh count.
+    conflict_peak: usize,
+    center: CenterView,
+    /// Conflicts auto-selects once per operation; after that the manual
+    /// choice stands until the repository is idle again.
+    conflicts_seen: bool,
+    /// One continue or abort at a time; strip and palette grey behind it.
+    op_running: bool,
+    /// Git's own words when continue or abort failed, shown in the strip.
+    op_error: Option<SharedString>,
     /// Symbol navigation: the lookup tables, the hovered link and the
     /// definition entries joined to the Diff's set.
     symbols: symbols::Symbols,
@@ -1165,6 +1194,13 @@ impl ReviewApp {
             review: PerReview::fresh(comparison, pull),
             forge,
             publishing: false,
+            repo_state: RepoState::Idle,
+            conflicts: Vec::new(),
+            conflict_peak: 0,
+            center: CenterView::Review,
+            conflicts_seen: false,
+            op_running: false,
+            op_error: None,
             symbols: symbols::Symbols::new(window, cx),
             diff,
             manual_mode: mode,
@@ -1227,6 +1263,7 @@ impl ReviewApp {
         self.error = None;
         self.notice = None;
         self.review.draft = None;
+        self.op_error = None;
         let backend = self.backend.clone();
         let comparison = self.review.comparison.clone();
         let scope = self.core_scope();
@@ -1380,6 +1417,25 @@ impl ReviewApp {
                         cx,
                     );
                 });
+                // A fresh operation, or a rebase stepping to its next
+                // commit, starts a fresh progress count.
+                if self.repo_state != loaded.repo_state {
+                    self.conflict_peak = 0;
+                }
+                self.repo_state = loaded.repo_state;
+                self.conflict_peak = self.conflict_peak.max(loaded.conflicts.len());
+                self.conflicts = loaded.conflicts;
+                match self.repo_state {
+                    RepoState::Idle => {
+                        self.center = CenterView::Review;
+                        self.conflicts_seen = false;
+                    }
+                    _ => {
+                        if !std::mem::replace(&mut self.conflicts_seen, true) {
+                            self.center = CenterView::Conflicts;
+                        }
+                    }
+                }
                 self.review.resolved = Some(loaded.resolved);
                 self.review.commits = Arc::new(loaded.commits);
                 if let Some(picked) = loaded.picked {
@@ -1512,6 +1568,90 @@ impl ReviewApp {
             });
         })
         .detach();
+    }
+
+    // ---- conflicts -----------------------------------------------------
+
+    /// The operation's name in every label; "merge" also covers Idle, where
+    /// the labels exist only greyed.
+    fn op_noun(&self) -> &'static str {
+        match self.repo_state {
+            RepoState::Rebase { .. } => "rebase",
+            _ => "merge",
+        }
+    }
+
+    fn showing_conflicts(&self) -> bool {
+        self.repo_state != RepoState::Idle && self.center == CenterView::Conflicts
+    }
+
+    /// Continue only moves git forward once nothing is left unmerged;
+    /// offering it earlier would just relay a git refusal.
+    fn can_continue_op(&self) -> bool {
+        self.repo_state != RepoState::Idle && self.conflicts.is_empty() && !self.op_running
+    }
+
+    fn can_abort_op(&self) -> bool {
+        self.repo_state != RepoState::Idle && !self.op_running
+    }
+
+    /// Continue or abort off the UI thread, then the normal reload. Git's
+    /// complaint lands in the strip verbatim instead of replacing the view.
+    fn run_op(&mut self, abort: bool, cx: &mut Context<Self>) {
+        if self.op_running || self.repo_state == RepoState::Idle {
+            return;
+        }
+        self.op_running = true;
+        self.op_error = None;
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if abort {
+                        backend.abort_op()
+                    } else {
+                        backend.continue_op()
+                    }
+                    .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.op_running = false;
+                match result {
+                    Ok(()) => this.reload(cx),
+                    Err(error) => {
+                        this.op_error = Some(error.into());
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Abort asks first: it throws away every resolution made so far.
+    fn confirm_abort(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.op_running || self.repo_state == RepoState::Idle {
+            return;
+        }
+        let noun = self.op_noun();
+        let owner = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let owner = owner.clone();
+            alert
+                .confirm()
+                .title(format!("Abort {noun}?"))
+                .description(format!(
+                    "Aborting the {noun} discards all conflict resolutions."
+                ))
+                .ok_text("Abort")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, cx| {
+                    let _ = owner.update(cx, |this, cx| this.run_op(true, cx));
+                    true
+                })
+        });
     }
 
     // ---- scope and commits ---------------------------------------------
@@ -3249,6 +3389,41 @@ impl ReviewApp {
                         .when_some(self.review.pull.as_ref(), |controls, pull| {
                             controls.child(self.render_pull_menu(pull, cx))
                         })
+                        // Review or Conflicts, only while an operation is
+                        // interrupted; the pair mirrors split/unified.
+                        .when(self.repo_state != RepoState::Idle, |controls| {
+                            let conflicts = self.center == CenterView::Conflicts;
+                            controls.child(
+                                ToggleGroup::new("center")
+                                    .outline()
+                                    .segmented()
+                                    .single()
+                                    .small()
+                                    .child(
+                                        Toggle::new("center-review")
+                                            .icon(Icon::new(Lucide::FileDiff))
+                                            .tooltip("Review view")
+                                            .checked(!conflicts),
+                                    )
+                                    .child(
+                                        Toggle::new("center-conflicts")
+                                            .icon(Icon::new(Lucide::GitMergeConflict))
+                                            .tooltip("Conflicts view")
+                                            .checked(conflicts),
+                                    )
+                                    .on_click(cx.listener(|this, checks: &Vec<bool>, _, cx| {
+                                        // Clicking the checked segment clears
+                                        // the group; an either-or keeps the
+                                        // current choice instead.
+                                        this.center = match checks.iter().position(|on| *on) {
+                                            Some(0) => CenterView::Review,
+                                            Some(_) => CenterView::Conflicts,
+                                            None => return,
+                                        };
+                                        cx.notify();
+                                    })),
+                            )
+                        })
                         .child(
                             ToggleGroup::new("layout")
                                 .outline()
@@ -4047,6 +4222,138 @@ impl ReviewApp {
             .child(div().text_color(muted).child(explanation))
             .child(div().flex_1())
             .map(|bar| self.render_review_progress(bar, reviewed, cx))
+    }
+
+    /// The strip under the scope bar while a merge or rebase waits: where
+    /// the operation stands, and the one button that moves it forward.
+    fn render_conflict_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rebase = matches!(self.repo_state, RepoState::Rebase { .. });
+        // The first conflict carries the operation's own side labels; with
+        // every file resolved the comparison's branches stand in.
+        let (source, target) = match self.conflicts.first() {
+            // A rebase replays the reviewer's commit onto the upstream; a
+            // merge brings the upstream into the reviewer's branch.
+            Some(file) if rebase => (file.labels.yours.clone(), file.labels.upstream.clone()),
+            Some(file) => (file.labels.upstream.clone(), file.labels.yours.clone()),
+            None => (
+                self.review.comparison.source.clone(),
+                self.review.comparison.target.clone(),
+            ),
+        };
+        let total = self.conflict_peak;
+        let resolved = total.saturating_sub(self.conflicts.len());
+        let standing = match self.repo_state {
+            RepoState::Rebase {
+                done,
+                total: commits,
+            } => format!(
+                "Resolving rebase: {source} going into {target} - commit {done} of {commits} - {resolved} of {total} files resolved"
+            ),
+            _ => format!(
+                "Resolving merge: {source} going into {target} - {resolved} of {total} files resolved"
+            ),
+        };
+        h_flex()
+            .flex_none()
+            .w_full()
+            .px(px(10.))
+            .py(px(4.))
+            .gap_2()
+            .bg(cx.theme().sidebar)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                Icon::new(Lucide::GitMergeConflict)
+                    .xsmall()
+                    .text_color(cx.theme().warning),
+            )
+            .child(standing)
+            .when_some(self.op_error.clone(), |strip, error| {
+                strip.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().danger)
+                        .child(error),
+                )
+            })
+            .child(div().flex_1())
+            .child(
+                Button::new("continue-op")
+                    .primary()
+                    .xsmall()
+                    .h(px(22.))
+                    .label(format!("Continue {}", self.op_noun()))
+                    .loading(self.op_running)
+                    .disabled(!self.can_continue_op())
+                    .on_click(cx.listener(|this, _, _, cx| this.run_op(false, cx))),
+            )
+    }
+
+    /// The center while the reviewer looks at conflicts. Only the shell:
+    /// the body under each header is the seam where the Kit fork's
+    /// `ConflictResolv` mounts, one three-pane block per file - the app
+    /// will feed it `ConflictFile` and listen for its events.
+    fn render_conflicts(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        if self.conflicts.is_empty() {
+            // Resolved in the terminal, or by the last Mark resolved: the
+            // operation only waits for its continue.
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .text_sm()
+                .text_color(muted)
+                .child("Every conflict is resolved")
+                .child(format!(
+                    "Continue the {} from the bar above",
+                    self.op_noun()
+                ))
+                .into_any_element();
+        }
+        let mono = cx.theme().mono_font_family.clone();
+        let warning = cx.theme().warning;
+        v_flex()
+            .id("conflicts")
+            .size_full()
+            .overflow_y_scroll()
+            .children(self.conflicts.iter().map(|file| {
+                v_flex()
+                    .w_full()
+                    .flex_none()
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .h(px(28.))
+                            .px(px(10.))
+                            .gap_2()
+                            .bg(cx.theme().sidebar)
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .child(div().font_family(mono.clone()).child(file.path.clone()))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .px(px(6.))
+                                    .rounded(px(4.))
+                                    .text_size(px(10.5))
+                                    .bg(warning.opacity(0.15))
+                                    .text_color(warning)
+                                    .child("unresolved"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px(px(10.))
+                            .py(px(6.))
+                            .text_color(muted)
+                            .child("The conflict resolver mounts here"),
+                    )
+            }))
+            .into_any_element()
     }
 
     fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -5938,12 +6245,27 @@ impl Render for ReviewApp {
             }))
             .child(self.render_title(cx))
             .child(self.render_scope_bar(reviewed, cx))
+            .when(self.repo_state != RepoState::Idle, |root| {
+                root.child(self.render_conflict_strip(cx))
+            })
             .when(self.review.search_open, |root| {
                 root.child(self.render_search_bar(cx))
             })
             .child({
                 let owner = cx.entity().downgrade();
-                let diff_column = v_flex().flex_1().h_full().min_w_0().child(
+                // The Diff's context menu acts on lines and selections; the
+                // conflict shell has neither, so the pane swaps wholesale.
+                let diff_column = if self.showing_conflicts() {
+                    v_flex().flex_1().h_full().min_w_0().child(
+                        div()
+                            .id("conflicts-pane")
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .child(self.render_conflicts(cx)),
+                    )
+                } else {
+                    v_flex().flex_1().h_full().min_w_0().child(
                     div()
                         .id("diff-pane")
                         .flex_1()
@@ -6031,7 +6353,8 @@ impl Render for ReviewApp {
                                     }),
                             )
                         }),
-                );
+                )
+                };
                 div().flex_1().min_h_0().w_full().map(|wrap| {
                     if self.sidebar_visible {
                         wrap.child(
@@ -6065,6 +6388,11 @@ fn load(
     ignore_whitespace: bool,
 ) -> Result<Loaded, String> {
     let text = |error: diffie_core::BackendError| error.to_string();
+    let repo_state = backend.repo_state().map_err(text)?;
+    let conflicts = match repo_state {
+        RepoState::Idle => Vec::new(),
+        _ => backend.conflicts().map_err(text)?,
+    };
     let resolved = backend.resolve(comparison).map_err(text)?;
     let commits = backend.commits(&resolved).map_err(text)?;
     // Only now is it known what HEAD gained; the caller could only say
@@ -6266,6 +6594,8 @@ fn load(
     let moved = diffie_core::moved::moved_blocks(&patch.text);
 
     Ok(Loaded {
+        repo_state,
+        conflicts,
         resolved,
         commits,
         reviews,
