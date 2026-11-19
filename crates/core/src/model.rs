@@ -218,6 +218,9 @@ pub struct ConflictFile {
     /// Markers carry generic side labels, so they are display material
     /// only; the texts and labels above are what resolution trusts.
     pub working: String,
+    /// Some side's bytes are not valid UTF-8, so the texts above are lossy
+    /// decodes: fine to show, never to write back as a resolution.
+    pub binary: bool,
     pub labels: ConflictLabels,
 }
 

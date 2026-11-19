@@ -1521,6 +1521,79 @@ fn conflicts_swap_the_sides_of_a_rebase() {
 }
 
 #[test]
+fn conflicts_flag_a_side_that_is_not_text() {
+    let fixture = ConflictFixture::new();
+    let root = fixture.root();
+    // Both branches add raw.bin with clashing bytes; feat's side is not
+    // UTF-8, so its lossy text must never be written back.
+    git(root, &["checkout", "-q", "feat"]);
+    std::fs::write(root.join("raw.bin"), [0xff, 0xfe, 0x00]).unwrap();
+    git(root, &["add", "raw.bin"]);
+    git(root, &["commit", "-q", "-m", "feat adds raw"]);
+    git(root, &["checkout", "-q", "main"]);
+    std::fs::write(root.join("raw.bin"), "text\n").unwrap();
+    git(root, &["add", "raw.bin"]);
+    git(root, &["commit", "-q", "-m", "main adds raw"]);
+    fixture.start_merge();
+
+    let conflicts = fixture.backend().conflicts().unwrap();
+    assert_eq!(conflicts.len(), 2);
+    assert_eq!(conflicts[0].path, "raw.bin");
+    assert!(conflicts[0].binary);
+    assert_eq!(conflicts[1].path, "t.txt");
+    assert!(!conflicts[1].binary);
+}
+
+#[test]
+fn resolve_file_takes_glob_characters_in_a_path_literally() {
+    let fixture = ConflictFixture::new();
+    let root = fixture.root();
+    // As a glob pathspec `a[b].txt` matches ab.txt and never itself, so
+    // both files conflict and only literal matching stages the right one.
+    for (branch, text) in [("feat", "feat\n"), ("main", "main\n")] {
+        git(root, &["checkout", "-q", branch]);
+        std::fs::write(root.join("a[b].txt"), text).unwrap();
+        std::fs::write(root.join("ab.txt"), text).unwrap();
+        git(root, &["add", "a[b].txt", "ab.txt"]);
+        git(root, &["commit", "-q", "-m", "adds bracket files"]);
+    }
+    fixture.start_merge();
+    let backend = fixture.backend();
+    backend.resolve_file("a[b].txt", "settled\n").unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("a[b].txt")).unwrap(),
+        "settled\n"
+    );
+    assert_eq!(
+        git(root, &["ls-files", "-u", "--", ":(literal)a[b].txt"]),
+        ""
+    );
+    assert_ne!(git(root, &["ls-files", "-u", "--", ":(literal)ab.txt"]), "");
+
+    backend.unresolve_file("a[b].txt").unwrap();
+    assert_ne!(
+        git(root, &["ls-files", "-u", "--", ":(literal)a[b].txt"]),
+        ""
+    );
+}
+
+#[test]
+fn conflicts_label_the_rebase_upstream_the_user_named() {
+    let fixture = ConflictFixture::new();
+    let root = fixture.root();
+    // `release` and `main` share the onto commit; only the reflog's
+    // rebase start entry knows which one the user typed.
+    git(root, &["branch", "release", "main"]);
+    git(root, &["checkout", "-q", "feat"]);
+    git_conflicting(root, &["rebase", "release"]);
+
+    let conflicts = fixture.backend().conflicts().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].labels.upstream, "release");
+}
+
+#[test]
 fn resolve_file_writes_and_stages_the_resolution() {
     let fixture = ConflictFixture::new();
     fixture.start_merge();
