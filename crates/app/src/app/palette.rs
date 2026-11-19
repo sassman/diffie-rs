@@ -24,6 +24,7 @@ enum PaletteCommand {
     ToggleMode,
     Back,
     Forward,
+    OpenPullRequest,
     Approve { with_comments: bool },
 }
 
@@ -105,6 +106,15 @@ impl ReviewApp {
                 enabled: !self.forward_stack.is_empty(),
                 hint: Some(Box::new(JumpForward)),
             },
+            PaletteEntry {
+                command: PaletteCommand::OpenPullRequest,
+                label: "Open a pull request…".into(),
+                keywords: &["pr", "pull request", "review", "github"],
+                // One publish at a time, and a swap under a running
+                // publish would blur which review it reported on.
+                enabled: !self.publishing,
+                hint: None,
+            },
         ];
         if let Some(pull) = &self.pull {
             let number = pull.request.number;
@@ -126,12 +136,18 @@ impl ReviewApp {
         entries
     }
 
-    fn run_palette_command(&mut self, command: PaletteCommand, cx: &mut Context<Self>) {
+    fn run_palette_command(
+        &mut self,
+        command: PaletteCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match command {
             PaletteCommand::Reload => self.reload(cx),
             PaletteCommand::ToggleMode => self.toggle_mode(cx),
             PaletteCommand::Back => self.jump_back(cx),
             PaletteCommand::Forward => self.jump_forward(cx),
+            PaletteCommand::OpenPullRequest => self.open_pr_picker(window, cx),
             PaletteCommand::Approve { with_comments } => {
                 self.publish(Verdict::Approve, with_comments, cx)
             }
@@ -191,7 +207,7 @@ impl ReviewApp {
                                 };
                                 window.close_dialog(cx);
                                 let _ = owner.update(cx, |this, cx| {
-                                    this.run_palette_command(command, cx);
+                                    this.run_palette_command(command, window, cx);
                                 });
                             }),
                     )

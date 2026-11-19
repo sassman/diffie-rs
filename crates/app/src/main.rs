@@ -246,106 +246,39 @@ fn main() {
             }
         }
     }
+    // The code host, for the in-app picker; `--pr` connects the review to
+    // it right away. Only ever asked on the reviewer's explicit action.
+    let forge: Arc<dyn Forge> = Arc::new(GitHubCli::new(&path));
     // The review's pull request, kept for the window: publishing and
-    // approving exist only when the review was opened from one.
+    // approving exist only when the review was opened from one. The
+    // resolution itself is shared with the in-app picker (`pr::open`);
+    // only the picker may fetch - the command line prints the fetch to
+    // run instead.
     let mut connected = None;
     let pr_comparison = pr.map(|value| {
         let argument = match diffie_core::pr::parse(&value) {
             Ok(argument) => argument,
             Err(message) => exit_usage(&message),
         };
-        let forge: Arc<dyn Forge> = Arc::new(GitHubCli::new(&path));
-        let pull = match forge.pull_request(&argument) {
-            Ok(pull) => pull,
-            Err(error) => {
-                eprintln!("{error}");
+        let opened = diffie_core::pr::open(
+            &*backend,
+            &*forge,
+            &argument,
+            mode,
+            diffie_core::pr::FetchMode::Never,
+        );
+        let (pull, comparison) = match opened {
+            Ok(opened) => opened,
+            Err(message) => {
+                eprintln!("{message}");
                 std::process::exit(1);
             }
         };
         connected = Some(app::Pull {
-            forge,
-            request: pull.clone(),
+            forge: forge.clone(),
+            request: pull,
         });
-        use diffie_core::pr::PrState;
-        let exists = |revision: &str| -> bool {
-            backend.revision_exists(revision).unwrap_or_else(|error| {
-                eprintln!("{error}");
-                std::process::exit(1);
-            })
-        };
-        // For fetch hints only; with several remotes the user knows better
-        // than a guess.
-        let remote_hint = match backend.remotes().unwrap_or_default().as_slice() {
-            [only] => only.clone(),
-            _ => "<remote>".to_string(),
-        };
-        // The PR's exact head commit, never a branch lookup: a stale
-        // same-named branch must not silently show other content.
-        if !exists(&pull.source_commit) {
-            match pull.state {
-                PrState::Open if pull.cross_repository => eprintln!(
-                    "the pull request's head commit is not here: it comes from {owner}'s \
-                     fork. Add that fork as a remote, run `git fetch <fork> {branch}`, \
-                     then retry - diffie never fetches.",
-                    owner = pull.head_owner,
-                    branch = pull.source_branch,
-                ),
-                PrState::Open => eprintln!(
-                    "the pull request's head commit is not here; run \
-                     `git fetch {remote_hint} {branch}` and retry - diffie never fetches.",
-                    branch = pull.source_branch,
-                ),
-                // Merged or closed, the head branch is usually deleted, but
-                // GitHub keeps the commit reachable under refs/pull - also
-                // after a squash or rebase merge, which puts different
-                // commits on the base branch.
-                PrState::Merged | PrState::Closed => eprintln!(
-                    "the pull request's head commit is not here; run \
-                     `git fetch {remote_hint} refs/pull/{number}/head` and retry - \
-                     diffie never fetches.",
-                    number = pull.number,
-                ),
-            }
-            std::process::exit(1);
-        }
-        let target_rev = match pull.state {
-            // The base as the PR was compared against it: the live base
-            // already contains a merged PR, which would collapse the diff
-            // to nothing. gh's baseRefOid, not the merge commit's first
-            // parent - a base rebuilt under the PR moves that parent off
-            // the PR's own comparison and drags foreign commits in.
-            PrState::Merged => {
-                if !exists(&pull.target_commit) {
-                    eprintln!(
-                        "the pull request's base commit is not here; run \
-                         `git fetch {remote_hint}` and retry - diffie never fetches."
-                    );
-                    std::process::exit(1);
-                }
-                pull.target_commit.clone()
-            }
-            // Open (or closed unmerged), the base moves on, so follow its
-            // remote-tracking ref - never a same-named local branch, which
-            // can lag.
-            PrState::Open | PrState::Closed => {
-                let branch = &pull.target_branch;
-                remote_ref(&backend, branch, || {
-                    format!(
-                        "`{branch}` is not fetched here; run \
-                         `git fetch {remote_hint} {branch}` and retry - \
-                         diffie never fetches."
-                    )
-                })
-            }
-        };
-        Comparison {
-            source: pull.source_branch,
-            target: pull.target_branch,
-            source_rev: Some(pull.source_commit),
-            target_rev: Some(target_rev),
-            mode,
-            uncommitted: false,
-        }
+        comparison
     });
     let branch = backend.current_branch().ok().flatten();
     let working_tree = backend.has_working_tree().unwrap_or(false);
@@ -558,6 +491,7 @@ fn main() {
                 cx.new(|cx| {
                     app::ReviewApp::new(
                         backend,
+                        forge,
                         app::Subject {
                             repository: name.into(),
                             worktree: worktree.map(Into::into),

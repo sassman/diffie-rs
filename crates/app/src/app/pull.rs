@@ -45,7 +45,7 @@ fn status_words(status: &PullStatus) -> String {
 /// What a status row says at a glance, before its words are read; the
 /// theme gives each tone its colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tone {
+pub(super) enum Tone {
     /// Nothing stands in the way: open, approved, passing.
     Good,
     /// Under way or waiting: checks running, a review still required.
@@ -59,7 +59,7 @@ enum Tone {
 }
 
 impl Tone {
-    fn color(self, cx: &App) -> Hsla {
+    pub(super) fn color(self, cx: &App) -> Hsla {
         match self {
             Tone::Good => cx.theme().success,
             Tone::Waiting => cx.theme().warning,
@@ -80,7 +80,7 @@ struct StatusRow {
     tone: Tone,
 }
 
-fn state_icon(state: PrState) -> Lucide {
+pub(super) fn state_icon(state: PrState) -> Lucide {
     match state {
         PrState::Open => Lucide::GitPullRequest,
         PrState::Merged => Lucide::GitMerge,

@@ -34,6 +34,12 @@ first code: a working core and a first UI scaffold wired to it.
   tested; **the gesture itself has not been seen on screen** (see the
   verification table). Design document section 19 holds the decisions.
   The Kit patch moved to the fork branch `diff-text-pointer` for it.
+- **Open a pull request from the palette** (`app/pr_picker.rs`,
+  `pr::open`), added 2026-11-19: the palette's "Open a pull request…"
+  lists the repository's PRs in a palette-styled popover and opens the
+  picked one in the current window as `--pr` would, fetching missing
+  commits on that click (the one sanctioned repository write besides
+  review files; see AGENTS.md constraint 5 and the design document).
 
 ## Verification status
 
@@ -67,6 +73,7 @@ Be exact about this when you report further work.
 | `r` ticking the file the focus mark is in after `]`/`[` (`follow_mark` pulls `current_file` from the Kit's mark; `n`/`p` and search jumps already set it), and ticking the first expanded, unticked file on a fresh load before any navigation | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Jump-back and forward (Cmd/Ctrl+[ and ]): the two stacks, the exact restore, the hint-bar entry and the Go > Back and Forward items | The Kit's `scroll_to_top_line`/`top_line` round trip is covered by a Kit integration test (`scroll_to_top_line_restores_what_top_line_read`); the app side compiled, clippy-clean, not seen on screen - the window was not run |
 | Command palette (Cmd/Ctrl+P): the list, key hints, keyword search, focus returning on close | Verified on macOS by screenshot, driven by System Events keys: Cmd+P opens it with Reload (Cmd+R hint) and the split/unified switch (`s` hint); "spl" finds the switch by keyword; Enter switched the layout and a following `s` switched it back (focus was on the diff again); the same after Escape; Down, Down (wraps) and Up move the highlight, and a reopened palette starts on the first row again (read off the row backgrounds in screenshots). The two approvals and their greying were not seen - no `--pr` review was run |
+| Open a pull request from the palette | Verified on macOS on 2026-11-19 by screenshot, driven by System Events keys, against this repository's real PRs: "pull" filters to the entry; the picker lists the open draft (state icon, Draft marker, #1, author, age); "Show merged and closed…" appends the five merged PRs in place (each with "checks passing" in green) - a first run showed every merged PR twice, which exposed that gh's `--state closed` already includes merged (fixed to one call, FakeGh test updated); typing "#6" and Enter swapped the window to PR #6: title bar, PR widget with status dot, 10-of-10 commit range, 23-file tree, and the palette then offered the greyed Approve #6 entries. The fetch path was not hit on screen (the PR's commits were already local); `GitCli::fetch` and both `pr::open` modes are covered by throwaway-repo tests. A failed open (notice line, review kept), a cross-repository fork and Windows/Linux were not exercised |
 | Other-revision cards keeping the full actions row, Edit and Delete disabled with explaining tooltips | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 | Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
@@ -186,6 +193,9 @@ crates/app/src/
                               `app`, so it reaches ReviewApp's state)
   app/palette.rs              the command palette: the command list and
                               running the chosen one
+  app/pr_picker.rs            the pull-request picker behind the palette's
+                              "Open a pull request…", and the review swap
+                              (`adopt`) it ends in
   app/symbols.rs              symbol navigation in the UI: which revision
                               each side reads, the link, where a jump
                               lands, definition entries, the tie dialog
@@ -278,11 +288,27 @@ into a comparison whose `source_rev`/`target_rev` pin the PR's commits while
 ### Pull requests and the forge
 
 `Forge` (`forge.rs`) is the code host behind one trait, beside
-`ReviewBackend` and just as blocking: `pull_request`, `status`,
-`submit_review`, `update_comment`, `react`. `main.rs` builds the one implementation,
-`GitHubCli`, and hands the app a `Pull` (forge plus pull request) only for
-a `--pr` start. Design document section 18 holds the product rules and
-which of them are assumptions.
+`ReviewBackend` and just as blocking: `pull_request`, `pull_requests`,
+`status`, `submit_review`, `update_comment`, `react`. `main.rs` builds
+the one implementation, `GitHubCli`, for every window - the palette's PR
+picker needs it - and hands the app a `Pull` (forge plus pull request)
+only for a `--pr` start. Design document section 18 holds the product
+rules and which of them are assumptions.
+
+Opening a pull request is one shared flow, `pr::open`: resolve through
+the forge, validate the pinned commits, build the comparison. The
+command line calls it with `FetchMode::Never` (errors keep the
+copy-pasteable fetch hint, word for word as before), the palette's
+picker with `FetchMode::OnDemand`, where the one sanctioned
+`ReviewBackend::fetch` runs on the reviewer's pick: base branch plus
+`refs/pull/<n>/head`, which reaches the head commit for forks and
+merged PRs alike. The picker itself lives in `app/pr_picker.rs`: a
+palette-styled dialog listing open PRs first (drafts after the
+non-drafts), merged and closed behind a "Show merged and closed" row,
+each row with state, number, author, age and the checks' verdict in the
+PR widget's tones. Picking one swaps the current window over via
+`ReviewApp::adopt`, which resets every per-review field and reloads;
+`_open_pull` and the `pr_rows.generation` counter guard stale answers.
 
 A publish is separate steps, so each is testable alone:
 

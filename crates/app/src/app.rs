@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use diffie_core::forge::Forge;
 use diffie_core::pr::PullStatus;
 use diffie_core::review::{
     ArchiveFile, NewComment, Placement, ReactionKind, ReviewFile, ReviewInput, ReviewSet,
@@ -58,6 +59,7 @@ use gpui_kit::{
 };
 
 mod palette;
+mod pr_picker;
 mod pull;
 mod symbols;
 pub use pull::Pull;
@@ -864,6 +866,10 @@ pub struct ReviewApp {
     worktree: Option<SharedString>,
     comparison: Comparison,
     pull: Option<Pull>,
+    /// The code host, for the picker's list and for opening a picked pull
+    /// request; `pull` carries the same forge once one is open. Only ever
+    /// asked on the reviewer's explicit action.
+    forge: Arc<dyn Forge>,
     /// A publish or approval is on its way to the forge; one at a time.
     publishing: bool,
     /// How the last publish went, and whether that was a failure. Its own
@@ -933,6 +939,13 @@ pub struct ReviewApp {
     forward_stack: Vec<DiffLinePosition>,
     search_open: bool,
     palette: Entity<palette::CommandState>,
+    pr_picker: Entity<palette::CommandState>,
+    /// What the pull-request picker shows; refetched every time it opens.
+    pr_rows: pr_picker::PrRows,
+    /// Replacing either task drops an answer in flight, so a reopened
+    /// picker or a second pick never installs a stale one.
+    _pr_rows: Task<()>,
+    _open_pull: Task<()>,
     search_query: Entity<InputState>,
     /// Extend the search past the picked commits to the whole branch.
     search_all: bool,
@@ -1010,6 +1023,7 @@ pub struct ReviewApp {
 impl ReviewApp {
     pub fn new(
         backend: Arc<dyn ReviewBackend>,
+        forge: Arc<dyn Forge>,
         subject: Subject,
         settings: Settings,
         window: &mut Window,
@@ -1083,6 +1097,7 @@ impl ReviewApp {
             worktree,
             comparison,
             pull,
+            forge,
             publishing: false,
             publish_status: None,
             pull_status: None,
@@ -1118,6 +1133,10 @@ impl ReviewApp {
             forward_stack: Vec::new(),
             search_open: false,
             palette: cx.new(|cx| palette::CommandState::new(window, cx)),
+            pr_picker: cx.new(|cx| palette::CommandState::new(window, cx)),
+            pr_rows: Default::default(),
+            _pr_rows: Task::ready(()),
+            _open_pull: Task::ready(()),
             search_query,
             search_all: false,
             patch_text: Arc::default(),

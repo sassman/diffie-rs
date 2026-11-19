@@ -44,7 +44,12 @@ Windows and Linux.
 5. **Never write to the reviewed repository.** No changes to its objects,
    index, refs, config or working tree. The only files the app writes are
    review files under `<git-dir>/review/`. Scratch objects go to a temporary
-   object directory (see `GitCli::combine`).
+   object directory (see `GitCli::combine`). One sanctioned exception
+   (owner decision, 2026-11-19): picking a pull request in the palette's
+   picker may run a single `git fetch` (`ReviewBackend::fetch`) when the
+   PR's commits are not here - objects and remote-tracking refs only, on
+   that explicit click, never in the background. The CLI still never
+   fetches.
 6. **Never block the UI thread.** Backend calls and file writes run in
    background tasks. Every load has a loading state and discards stale
    results (see the `revision` counter in `app.rs`).
@@ -90,6 +95,9 @@ When calling git:
 - **The forge is only reached on the reviewer's click.** Publishing and
   approving exist only in a review opened with `--pr`; nothing posts,
   reacts or approves on its own, and nothing is deleted on the forge.
+  The palette's PR picker reads the forge too - the list on opening the
+  picker, the resolve and one fetch on picking - each on that explicit
+  action, never in the background.
 - **Density.** Controls are 22 to 26 px high, list rows 22 px, file headers
   28 px, text 12 px. Prefer `xsmall` Kit controls. Do not add padding to make
   things "breathe".
