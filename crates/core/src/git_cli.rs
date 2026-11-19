@@ -548,8 +548,9 @@ impl GitCli {
     /// `(path, [stage 1, stage 2, stage 3])` for every unmerged index entry,
     /// in git's path order, optionally narrowed to one path.
     fn unmerged_entries(&self, path: Option<&str>) -> Result<Vec<(String, [Option<Oid>; 3])>> {
+        let literal = path.map(literal);
         let mut args = vec!["ls-files", "-u", "-z", "--"];
-        args.extend(path);
+        args.extend(literal.as_deref());
         let output = self.read(&args)?;
         let mut entries: Vec<(String, [Option<Oid>; 3])> = Vec::new();
         // `<mode> <oid> <stage>\t<path>` per entry; -z keeps paths raw, and
@@ -614,9 +615,10 @@ impl GitCli {
         Ok(Oid::new(head.trim()).short().to_string())
     }
 
-    /// The name of the upstream a rebase replays onto: a ref pointing at the
-    /// recorded onto commit - refs/heads sort before refs/remotes, so a
-    /// local branch wins - or that commit's short id.
+    /// The name of the upstream a rebase replays onto: the name the user
+    /// typed, recovered from the reflog's rebase start entry; failing that,
+    /// a ref pointing at the recorded onto commit - refs/heads sort before
+    /// refs/remotes, so a local branch wins - or that commit's short id.
     fn onto_name(&self) -> Result<String> {
         let onto = ["rebase-merge", "rebase-apply"]
             .iter()
@@ -628,6 +630,23 @@ impl GitCli {
             .unwrap_or_default();
         if onto.is_empty() {
             return Ok("upstream".to_string());
+        }
+        // Several refs can sit on the onto commit; only the start entry
+        // `git rebase <upstream>` wrote knows which one the user meant.
+        if let Some(reflog) = self.try_read(&[
+            "log",
+            "-g",
+            "--format=%gs",
+            "--end-of-options",
+            "HEAD",
+            "--",
+        ])? && let Some(name) = reflog
+            .lines()
+            .find_map(|subject| subject.strip_prefix("rebase (start): checkout "))
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            return Ok(name.to_string());
         }
         let points_at = format!("--points-at={onto}");
         Ok(self
@@ -1182,18 +1201,22 @@ impl ReviewBackend for GitCli {
             .flat_map(|(_, stages)| stages.iter().flatten().cloned())
             .collect();
         let blobs = self.blobs(&ids)?;
-        let text = |id: &Option<Oid>| {
-            id.as_ref()
-                .and_then(|id| blobs.get(id))
-                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-        };
+        let bytes = |id: &Option<Oid>| id.as_ref().and_then(|id| blobs.get(id));
+        let text =
+            |id: &Option<Oid>| bytes(id).map(|bytes| String::from_utf8_lossy(bytes).into_owned());
         entries
             .into_iter()
             .map(|(path, [base, ours, theirs])| {
-                let working = self
-                    .worktree_file(&path)?
-                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                    .unwrap_or_default();
+                let working_bytes = self.worktree_file(&path)?.unwrap_or_default();
+                // Checked on the raw bytes: the lossy texts read the same
+                // whether the original was valid or already corrupted.
+                let not_text = |bytes: &[u8]| std::str::from_utf8(bytes).is_err();
+                let binary = not_text(&working_bytes)
+                    || [&base, &ours, &theirs]
+                        .into_iter()
+                        .flat_map(&bytes)
+                        .any(|blob| not_text(blob));
+                let working = String::from_utf8_lossy(&working_bytes).into_owned();
                 // In a merge git's stage 2 is the user's own branch; a
                 // rebase replays the user's commits onto the upstream, so
                 // the stages swap sides. This mapping exists only here.
@@ -1208,6 +1231,7 @@ impl ReviewBackend for GitCli {
                     yours,
                     upstream,
                     working,
+                    binary,
                     labels: labels.clone(),
                 })
             })
@@ -1227,7 +1251,7 @@ impl ReviewBackend for GitCli {
         std::fs::write(file, contents)?;
         // `--end-of-options` would turn the following `--` into a literal
         // pathspec here; the separator alone keeps the path a path.
-        self.read(&["add", "--", path])?;
+        self.read(&["add", "--", &literal(path)])?;
         Ok(())
     }
 
@@ -1235,9 +1259,10 @@ impl ReviewBackend for GitCli {
         // `-m` rebuilds the markers from the resolve-undo data, even after
         // the path was staged. Older gits reject `--end-of-options` here;
         // the `--` separator alone still keeps the path a path.
-        match self.read(&["checkout", "-m", "--end-of-options", "--", path]) {
+        let path = literal(path);
+        match self.read(&["checkout", "-m", "--end-of-options", "--", &path]) {
             Err(BackendError::Git { stderr, .. }) if stderr.contains("end-of-options") => {
-                self.read(&["checkout", "-m", "--", path]).map(|_| ())
+                self.read(&["checkout", "-m", "--", &path]).map(|_| ())
             }
             other => other.map(|_| ()),
         }
@@ -1266,6 +1291,12 @@ impl ReviewBackend for GitCli {
         let common = self.read(&["rev-parse", "--git-common-dir"])?;
         Ok(self.absolute(common.trim()).join("review"))
     }
+}
+
+/// `path` as a pathspec matching only itself. Bare pathspecs glob, so a
+/// path like `a[b].txt` would match `ab.txt` and miss its own file.
+fn literal(path: &str) -> String {
+    format!(":(literal){path}")
 }
 
 fn run(command: &mut Command, args: &[impl AsRef<str>], stdin: Option<&[u8]>) -> Result<String> {
