@@ -18,8 +18,12 @@ use std::process::{Command, Stdio};
 use crate::forge::{
     DraftComment, Forge, ForgeError, LineAnchor, PostedComment, Posting, ReviewDraft, Verdict,
 };
-use crate::pr::{CheckState, Checks, PrArgument, PrState, PullRequest, PullStatus, ReviewDecision};
+use crate::pr::{
+    CheckState, Checks, PrArgument, PrList, PrState, PrSummary, PullRequest, PullStatus,
+    ReviewDecision,
+};
 use crate::review::{ReactionKind, Side};
+use crate::time::parse_rfc3339;
 
 pub struct GitHubCli {
     /// The checkout; gh finds the repository from its remotes.
@@ -257,6 +261,45 @@ impl Forge for GitHubCli {
         })
     }
 
+    /// One `gh pr list` per state; the picker's page, not the archive.
+    /// Like a bare `--pr` number, gh resolves the repository from this
+    /// checkout's remotes.
+    fn pull_requests(&self, which: PrList) -> Result<Vec<PrSummary>, ForgeError> {
+        // gh's `--state closed` is GraphQL's CLOSED, which excludes
+        // merged; finished means both, so two calls.
+        let states: &[&str] = match which {
+            PrList::Open => &["open"],
+            PrList::Finished => &["merged", "closed"],
+        };
+        let mut rows = Vec::new();
+        for state in states {
+            let stdout = self.run(|command| {
+                command
+                    .args(["pr", "list", "--state", state])
+                    .args(["--limit", PR_PAGE])
+                    .args([
+                        "--json",
+                        "number,title,author,updatedAt,isDraft,state,statusCheckRollup",
+                        // One @tsv line per pull request; the rollup rides
+                        // along as one column of `status;conclusion;state`
+                        // triples so the line count stays one per row.
+                        "--jq",
+                        ".[] | [(.number|tostring), .title, .author.login // \"\", \
+                         .updatedAt, (.isDraft|tostring), .state, \
+                         ([.statusCheckRollup // [] | .[] | \
+                         [(.status // \"\"), (.conclusion // \"\"), (.state // \"\")] \
+                         | join(\";\")] | join(\",\"))] | @tsv",
+                    ]);
+            })?;
+            for line in stdout.lines().filter(|line| !line.is_empty()) {
+                rows.push(parse_summary(line)?);
+            }
+        }
+        // Newest activity first; one order across the two finished calls.
+        rows.sort_by(|a, b| b.updated.cmp(&a.updated));
+        Ok(rows)
+    }
+
     fn status(&self, pull: &PullRequest) -> Result<PullStatus, ForgeError> {
         let stdout = self.run(|command| {
             // The URL, not the number: it pins host and repository the way
@@ -401,30 +444,101 @@ fn parse_state(state: &str) -> Option<PrState> {
 /// the reviewer should hear about red before the rest finishes. Unknown
 /// words count as running, never as passing - a new GitHub conclusion must
 /// not paint the pull request green.
+/// How many pull requests one `gh pr list` call brings: the picker is a
+/// page to pick from, not the archive.
+const PR_PAGE: &str = "50";
+
+/// One `@tsv` line of a `pr list` answer into a row.
+fn parse_summary(line: &str) -> Result<PrSummary, ForgeError> {
+    let unexpected = || ForgeError::Output(line.to_string());
+    let mut columns = line.split('\t');
+    let mut column = || columns.next().ok_or_else(unexpected);
+    let number = column()?.parse().map_err(|_| unexpected())?;
+    let (title, author) = (untsv(column()?), untsv(column()?));
+    let updated = parse_rfc3339(column()?).ok_or_else(unexpected)?;
+    let draft = match column()? {
+        "true" => true,
+        "false" => false,
+        _ => return Err(unexpected()),
+    };
+    let state = parse_state(column()?).ok_or_else(unexpected)?;
+    let checks = column()?
+        .split(',')
+        .filter(|check| !check.is_empty())
+        .map(|check| {
+            let mut words = check.split(';');
+            let mut word = || words.next().unwrap_or_default();
+            check_verdict((word(), word(), word()))
+        })
+        .fold(None, |folded, check| Some(fold_verdict(folded, check)));
+    Ok(PrSummary {
+        number,
+        title,
+        author,
+        updated,
+        state,
+        draft,
+        checks,
+    })
+}
+
+/// Undoes `@tsv`'s escaping, so a title shows as typed.
+fn untsv(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut escaped = false;
+    for character in text.chars() {
+        if escaped {
+            out.push(match character {
+                't' => '\t',
+                'n' => '\n',
+                'r' => '\r',
+                other => other,
+            });
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
+/// One check's verdict from gh's three state words: a check run reports
+/// status and conclusion, a commit status only a state.
+fn check_verdict(status_conclusion_state: (&str, &str, &str)) -> CheckState {
+    match status_conclusion_state {
+        (_, "SUCCESS" | "NEUTRAL" | "SKIPPED", _) | (_, _, "SUCCESS") => CheckState::Passing,
+        (
+            _,
+            "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE"
+            | "STALE",
+            _,
+        )
+        | (_, _, "FAILURE" | "ERROR") => CheckState::Failing,
+        _ => CheckState::Running,
+    }
+}
+
+/// The louder verdict wins: a failure outranks the checks still running,
+/// and those outrank the green ones.
+fn fold_verdict(folded: Option<CheckState>, check: CheckState) -> CheckState {
+    match (folded, check) {
+        (Some(CheckState::Failing), _) | (_, CheckState::Failing) => CheckState::Failing,
+        (Some(CheckState::Running), _) | (_, CheckState::Running) => CheckState::Running,
+        _ => CheckState::Passing,
+    }
+}
+
 fn fold_checks<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Checks> {
     let mut state = None;
     let mut latest: Option<(&str, &str)> = None;
     for line in lines.filter(|line| !line.is_empty()) {
         let mut columns = line.split('\t');
         let mut column = || columns.next().unwrap_or_default();
-        let (status, conclusion, commit_state) = (column(), column(), column());
+        let check = check_verdict((column(), column(), column()));
         let (url, started) = (column(), column());
-        let check = match (status, conclusion, commit_state) {
-            (_, "SUCCESS" | "NEUTRAL" | "SKIPPED", _) | (_, _, "SUCCESS") => CheckState::Passing,
-            (
-                _,
-                "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE"
-                | "STALE",
-                _,
-            )
-            | (_, _, "FAILURE" | "ERROR") => CheckState::Failing,
-            _ => CheckState::Running,
-        };
-        state = Some(match (state, check) {
-            (Some(CheckState::Failing), _) | (_, CheckState::Failing) => CheckState::Failing,
-            (Some(CheckState::Running), _) | (_, CheckState::Running) => CheckState::Running,
-            _ => CheckState::Passing,
-        });
+        state = Some(fold_verdict(state, check));
         // RFC 3339 in UTC sorts as text. A check without a start time
         // (a commit status may have none) only wins while nothing else
         // has a page to offer.
@@ -672,6 +786,81 @@ esac
     fn an_unknown_decision_is_unexpected_output() {
         let gh = FakeGh::new(r#"  *statusCheckRollup*) printf 'OPEN\nMAYBE\n' ;;"#);
         let error = gh.forge().status(&github()).unwrap_err();
+        assert!(matches!(error, ForgeError::Output(_)), "{error}");
+    }
+
+    #[test]
+    fn lists_open_pull_requests_newest_first() {
+        let gh = FakeGh::new(concat!(
+            r#"  *"pr list --state open"*) printf '"#,
+            r#"17\tTab\\there\talice\t2026-11-16T10:00:00Z\tfalse\tOPEN\tCOMPLETED;SUCCESS;,IN_PROGRESS;;\n"#,
+            r#"21\tA draft\tbob\t2026-11-16T11:00:00Z\ttrue\tOPEN\t\n' ;;"#
+        ));
+        let rows = gh.forge().pull_requests(PrList::Open).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                PrSummary {
+                    number: 21,
+                    title: "A draft".into(),
+                    author: "bob".into(),
+                    updated: parse_rfc3339("2026-11-16T11:00:00Z").unwrap(),
+                    state: PrState::Open,
+                    draft: true,
+                    checks: None,
+                },
+                PrSummary {
+                    number: 17,
+                    title: "Tab\there".into(),
+                    author: "alice".into(),
+                    updated: parse_rfc3339("2026-11-16T10:00:00Z").unwrap(),
+                    state: PrState::Open,
+                    draft: false,
+                    checks: Some(CheckState::Running),
+                },
+            ]
+        );
+        assert!(
+            gh.calls()[0].starts_with(
+                "pr list --state open --limit 50 --json \
+                 number,title,author,updatedAt,isDraft,state,statusCheckRollup"
+            ),
+            "{}",
+            gh.calls()[0]
+        );
+    }
+
+    #[test]
+    fn a_finished_list_folds_the_merged_and_closed_calls_into_one_order() {
+        let gh = FakeGh::new(concat!(
+            r#"  *"pr list --state merged"*) printf '"#,
+            r#"3\tLanded\tcarol\t2026-11-10T09:00:00Z\tfalse\tMERGED\tCOMPLETED;FAILURE;\n' ;;"#,
+            "\n",
+            r#"  *"pr list --state closed"*) printf '"#,
+            r#"5\tAbandoned\tdave\t2026-11-12T09:00:00Z\tfalse\tCLOSED\t\n' ;;"#
+        ));
+        let rows = gh.forge().pull_requests(PrList::Finished).unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.number, row.state, row.checks))
+                .collect::<Vec<_>>(),
+            vec![
+                (5, PrState::Closed, None),
+                (3, PrState::Merged, Some(CheckState::Failing)),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_list_is_no_error() {
+        let gh = FakeGh::new(r#"  *"pr list"*) printf '' ;;"#);
+        assert_eq!(gh.forge().pull_requests(PrList::Open).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn a_malformed_list_line_is_unexpected_output() {
+        let gh = FakeGh::new("");
+        let error = gh.forge().pull_requests(PrList::Open).unwrap_err();
         assert!(matches!(error, ForgeError::Output(_)), "{error}");
     }
 

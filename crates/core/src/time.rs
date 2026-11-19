@@ -23,6 +23,44 @@ pub fn rfc3339(unix_seconds: i64) -> String {
     )
 }
 
+/// The inverse of [`rfc3339`], for the timestamps a forge reports:
+/// strictly `YYYY-MM-DDTHH:MM:SSZ`, UTC, second precision. `None` for
+/// anything else, offsets and fractional seconds included.
+pub fn parse_rfc3339(text: &str) -> Option<i64> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 20 || bytes[10] != b'T' || bytes[19] != b'Z' {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+/// A proleptic Gregorian date to days since 1970-01-01 (Howard Hinnant's
+/// `days_from_civil`).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let month_index = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 /// Days since 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's
 /// `civil_from_days`).
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
@@ -79,6 +117,29 @@ mod tests {
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(rfc3339(1_794_384_145), "2026-11-11T08:02:25Z");
+    }
+
+    #[test]
+    fn parses_what_it_formats() {
+        for seconds in [0, 951_782_400, 1_794_384_145] {
+            assert_eq!(parse_rfc3339(&rfc3339(seconds)), Some(seconds));
+        }
+    }
+
+    #[test]
+    fn refuses_other_date_shapes() {
+        for text in [
+            "",
+            "2026-11-11",
+            "2026-11-11T08:02:25",
+            "2026-11-11T08:02:25+01:00",
+            "2026-11-11T08:02:25.5Z",
+            "2026-13-11T08:02:25Z",
+            "2026-11-11T25:02:25Z",
+            "not a date, 20 chars",
+        ] {
+            assert_eq!(parse_rfc3339(text), None, "{text:?}");
+        }
     }
 
     #[test]

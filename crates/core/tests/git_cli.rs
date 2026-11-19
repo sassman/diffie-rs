@@ -1169,3 +1169,175 @@ fn worktree_file_reads_what_is_on_disk() {
     );
     assert_eq!(backend.worktree_file("missing.txt").unwrap(), None);
 }
+
+/// Upstream with a pull request's shape: `topic` going into `main`, the
+/// head also reachable as `refs/pull/7/head` like on GitHub, and a clone
+/// made before the pull request's commits existed.
+fn clone_behind_upstream() -> (tempfile::TempDir, std::path::PathBuf, Oid, Oid) {
+    let directory = tempfile::tempdir().unwrap();
+    let upstream = directory.path().join("upstream");
+    std::fs::create_dir(&upstream).unwrap();
+    git(&upstream, &["init", "-q", "-b", "main"]);
+    std::fs::write(upstream.join("a.txt"), "base\n").unwrap();
+    git(&upstream, &["add", "."]);
+    git(&upstream, &["commit", "-q", "-m", "base"]);
+    let local = directory.path().join("local");
+    git(
+        directory.path(),
+        &["clone", "-q", "upstream", local.to_str().unwrap()],
+    );
+    // The pull request lands upstream only after the clone.
+    git(&upstream, &["checkout", "-q", "-b", "topic"]);
+    std::fs::write(upstream.join("a.txt"), "changed\n").unwrap();
+    git(&upstream, &["add", "."]);
+    git(&upstream, &["commit", "-q", "-m", "pr commit"]);
+    let head = Oid::new(git(&upstream, &["rev-parse", "HEAD"]));
+    let base = Oid::new(git(&upstream, &["rev-parse", "main"]));
+    git(&upstream, &["update-ref", "refs/pull/7/head", head.as_str()]);
+    git(&upstream, &["checkout", "-q", "main"]);
+    (directory, local, head, base)
+}
+
+#[test]
+fn fetch_brings_missing_commits_and_leaves_the_checkout_alone() {
+    let (_directory, local, head, _base) = clone_behind_upstream();
+    let backend = GitCli::open(&local).unwrap();
+    assert!(!backend.revision_exists(head.as_str()).unwrap());
+    let before = git(&local, &["rev-parse", "HEAD"]);
+
+    backend
+        .fetch(
+            "origin",
+            &["main".to_string(), "refs/pull/7/head".to_string()],
+        )
+        .unwrap();
+
+    assert!(backend.revision_exists(head.as_str()).unwrap());
+    // Only objects and remote-tracking refs: no new local branch, HEAD and
+    // the working tree as they were.
+    assert_eq!(git(&local, &["rev-parse", "HEAD"]), before);
+    assert_eq!(git(&local, &["branch", "--format=%(refname:short)"]), "main");
+    assert_eq!(git(&local, &["status", "--porcelain"]), "");
+}
+
+struct PullForge(diffie_core::pr::PullRequest);
+
+impl diffie_core::forge::Forge for PullForge {
+    fn name(&self) -> &'static str {
+        "Fake"
+    }
+
+    fn pull_request(
+        &self,
+        _: &diffie_core::pr::PrArgument,
+    ) -> Result<diffie_core::pr::PullRequest, diffie_core::forge::ForgeError> {
+        Ok(self.0.clone())
+    }
+
+    fn pull_requests(
+        &self,
+        _: diffie_core::pr::PrList,
+    ) -> Result<Vec<diffie_core::pr::PrSummary>, diffie_core::forge::ForgeError> {
+        unreachable!("opening never lists")
+    }
+
+    fn status(
+        &self,
+        _: &diffie_core::pr::PullRequest,
+    ) -> Result<diffie_core::pr::PullStatus, diffie_core::forge::ForgeError> {
+        unreachable!("opening never asks for status")
+    }
+
+    fn submit_review(
+        &self,
+        _: &diffie_core::pr::PullRequest,
+        _: &diffie_core::forge::ReviewDraft,
+    ) -> Result<Vec<diffie_core::forge::Posting>, diffie_core::forge::ForgeError> {
+        unreachable!("opening never publishes")
+    }
+
+    fn update_comment(
+        &self,
+        _: &diffie_core::pr::PullRequest,
+        _: &str,
+        _: &str,
+    ) -> Result<(), diffie_core::forge::ForgeError> {
+        unreachable!("opening never edits")
+    }
+
+    fn react(
+        &self,
+        _: &diffie_core::pr::PullRequest,
+        _: &str,
+        _: diffie_core::review::ReactionKind,
+    ) -> Result<(), diffie_core::forge::ForgeError> {
+        unreachable!("opening never reacts")
+    }
+}
+
+fn pull_request(head: &Oid, base: &Oid) -> diffie_core::pr::PullRequest {
+    diffie_core::pr::PullRequest {
+        number: 7,
+        id: "PR_7".into(),
+        url: "https://github.com/o/r/pull/7".into(),
+        state: diffie_core::pr::PrState::Open,
+        source_branch: "topic".into(),
+        source_commit: head.to_string(),
+        target_branch: "main".into(),
+        target_commit: base.to_string(),
+        cross_repository: false,
+        head_owner: "o".into(),
+    }
+}
+
+#[test]
+fn opening_a_pull_request_fetches_missing_commits_on_demand() {
+    let (_directory, local, head, base) = clone_behind_upstream();
+    let backend = GitCli::open(&local).unwrap();
+    let forge = PullForge(pull_request(&head, &base));
+    let argument = diffie_core::pr::PrArgument {
+        number: 7,
+        url: None,
+    };
+
+    let (pull, comparison) = diffie_core::pr::open(
+        &backend,
+        &forge,
+        &argument,
+        CompareMode::BranchAdds,
+        diffie_core::pr::FetchMode::OnDemand,
+    )
+    .unwrap();
+
+    assert_eq!(pull.number, 7);
+    assert_eq!(comparison.source_rev.as_deref(), Some(head.as_str()));
+    assert_eq!(comparison.target_rev.as_deref(), Some("origin/main"));
+    assert!(backend.revision_exists(head.as_str()).unwrap());
+}
+
+#[test]
+fn opening_without_fetching_names_the_fetch_to_run() {
+    let (_directory, local, head, base) = clone_behind_upstream();
+    let backend = GitCli::open(&local).unwrap();
+    let forge = PullForge(pull_request(&head, &base));
+    let argument = diffie_core::pr::PrArgument {
+        number: 7,
+        url: None,
+    };
+
+    let error = diffie_core::pr::open(
+        &backend,
+        &forge,
+        &argument,
+        CompareMode::BranchAdds,
+        diffie_core::pr::FetchMode::Never,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        "the pull request's head commit is not here; run \
+         `git fetch origin topic` and retry - diffie never fetches."
+    );
+    assert!(!backend.revision_exists(head.as_str()).unwrap());
+}
