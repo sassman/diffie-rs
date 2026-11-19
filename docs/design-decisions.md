@@ -163,7 +163,8 @@ Decided:
   was rebuilt underneath, where the merge commit's first parent drags
   foreign commits in. The title and the review file keep the PR's branch
   names; the pinned commits ride along on the comparison
-  (`Comparison::source_rev`/`target_rev`). The app never fetches: a
+  (`Comparison::source_rev`/`target_rev`). The command line never
+  fetches (the in-app picker may; see the palette item below): a
   commit that is not here is an error with the copy-pasteable `git fetch`
   to run - the head branch while the PR is open, `refs/pull/<n>/head`
   once it is merged or closed (the head branch is usually deleted; that
@@ -171,6 +172,35 @@ Decided:
   squash- or rebase-merged PR, which never land on the base branch).
   Sending comments back to the pull request happens only from a PR entry
   point (section 18).
+- Opened plainly on a clean working tree, the review is the branch's own
+  work going into the default branch (owner, 2026-11-19): the old
+  default - uncommitted going into the checked-out branch - opened an
+  empty window right after a commit or in a fresh worktree, where the
+  branch review is the one the reviewer plausibly came for
+  (`diffie HEAD..main` typed out). The default branch is determined, not
+  flagged: what the remotes' HEAD records (`refs/remotes/<remote>/HEAD`,
+  written at clone time; the remotes that say must agree), else `main`,
+  else `master` - the first that is a revision here or on exactly one
+  remote. No network is asked. A `--default-branch` flag was considered
+  and deferred until a setup defeats the detection. The uncommitted
+  default stays whenever anything is uncommitted (untracked counts), on
+  the default branch itself, and when no candidate is in reach: those
+  cases keep the old behaviour rather than turning a bare start into an
+  error.
+- The command palette opens pull requests (owner, 2026-11-19). "Open a
+  pull request..." lists the repository's PRs in a popover styled like
+  the palette itself, freshly fetched from the forge on every opening:
+  open first - drafts after the non-drafts - and merged and closed
+  behind a "Show merged and closed" row. Each row shows state, title,
+  number, author, age and the checks' verdict in the PR widget's tones.
+  Picking one opens it in the current window exactly as `--pr` would
+  have. That pick is the one `git fetch` the app ever runs: when the
+  PR's commits are not here, it fetches the base branch and
+  `refs/pull/<n>/head` from the remote - an explicit, clicked action,
+  mirroring "the forge is only reached on the reviewer's click", and the
+  only sanctioned write to the repository besides the review files. The
+  command line still never fetches, and nothing fetches in the
+  background.
 
 Assumed:
 

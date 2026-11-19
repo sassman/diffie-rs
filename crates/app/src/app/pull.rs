@@ -45,7 +45,7 @@ fn status_words(status: &PullStatus) -> String {
 /// What a status row says at a glance, before its words are read; the
 /// theme gives each tone its colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tone {
+pub(super) enum Tone {
     /// Nothing stands in the way: open, approved, passing.
     Good,
     /// Under way or waiting: checks running, a review still required.
@@ -59,7 +59,7 @@ enum Tone {
 }
 
 impl Tone {
-    fn color(self, cx: &App) -> Hsla {
+    pub(super) fn color(self, cx: &App) -> Hsla {
         match self {
             Tone::Good => cx.theme().success,
             Tone::Waiting => cx.theme().warning,
@@ -80,7 +80,7 @@ struct StatusRow {
     tone: Tone,
 }
 
-fn state_icon(state: PrState) -> Lucide {
+pub(super) fn state_icon(state: PrState) -> Lucide {
     match state {
         PrState::Open => Lucide::GitPullRequest,
         PrState::Merged => Lucide::GitMerge,
@@ -209,8 +209,9 @@ impl ReviewApp {
     /// Swapped, the review file belongs to the reverse comparison, and
     /// nothing in it is the pull request's to receive.
     pub(super) fn pull_in_view(&self) -> bool {
-        self.pull.as_ref().is_some_and(|pull| {
-            self.comparison.source_rev.as_deref() == Some(pull.request.source_commit.as_str())
+        self.review.pull.as_ref().is_some_and(|pull| {
+            self.review.comparison.source_rev.as_deref()
+                == Some(pull.request.source_commit.as_str())
         })
     }
 
@@ -218,12 +219,12 @@ impl ReviewApp {
     /// review decision, the checks - off the UI thread. Runs with every
     /// reload and after every publish; there is no timer behind it.
     pub(super) fn refresh_pull_status(&mut self, cx: &mut Context<Self>) {
-        let Some(pull) = &self.pull else {
+        let Some(pull) = &self.review.pull else {
             return;
         };
         let forge = pull.forge.clone();
         let request = pull.request.clone();
-        self._pull_status = cx.spawn(async move |this, cx| {
+        self.review._pull_status = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     forge.status(&request).map_err(|error| error.to_string())
@@ -232,10 +233,10 @@ impl ReviewApp {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(status) => {
-                        this.pull_status = Some(status);
-                        this.pull_status_error = None;
+                        this.review.pull_status = Some(status);
+                        this.review.pull_status_error = None;
                     }
-                    Err(error) => this.pull_status_error = Some(error.into()),
+                    Err(error) => this.review.pull_status_error = Some(error.into()),
                 }
                 cx.notify();
             });
@@ -244,7 +245,8 @@ impl ReviewApp {
 
     /// What a publish would send. Nothing while the view is swapped.
     pub(super) fn pull_pending(&self) -> Pending {
-        self.reviews
+        self.review
+            .reviews
             .as_ref()
             .filter(|_| self.pull_in_view())
             .map(diffie_core::forge::pending)
@@ -255,7 +257,8 @@ impl ReviewApp {
     /// approval. Until the forge answers, the state read at startup
     /// stands in.
     pub(super) fn pull_state(&self, pull: &Pull) -> PrState {
-        self.pull_status
+        self.review
+            .pull_status
             .as_ref()
             .map_or(pull.request.state, |status| status.state)
     }
@@ -283,9 +286,11 @@ impl ReviewApp {
         if self.publishing || !self.pull_in_view() {
             return;
         }
-        let (Some(pull), Some(reviews), Some(resolved)) =
-            (&self.pull, &self.reviews, &self.resolved)
-        else {
+        let (Some(pull), Some(reviews), Some(resolved)) = (
+            &self.review.pull,
+            &self.review.reviews,
+            &self.review.resolved,
+        ) else {
             return;
         };
         let forge = pull.forge.clone();
@@ -295,7 +300,7 @@ impl ReviewApp {
         let head = resolved.head.clone();
         let backend = self.backend.clone();
         self.publishing = true;
-        self.publish_status = None;
+        self.review.publish_status = None;
         cx.spawn(async move |this, cx| {
             // The review first, and its ids into the file before anything
             // else is sent: edits and reactions go one call at a time, and
@@ -338,7 +343,7 @@ impl ReviewApp {
                 // An approval or a review changes the decision.
                 this.refresh_pull_status(cx);
                 let (summary, failed) = publish_summary(&outcome, number);
-                this.publish_status = Some((summary.into(), failed));
+                this.review.publish_status = Some((summary.into(), failed));
                 cx.notify();
             });
         })
@@ -349,7 +354,7 @@ impl ReviewApp {
     /// Write what a publish step achieved into the reviewer's own file,
     /// through the one writer.
     fn record_published(&mut self, outcome: &Outcome, cx: &mut Context<Self>) {
-        if let Some(set) = self.reviews.as_mut()
+        if let Some(set) = self.review.reviews.as_mut()
             && set.mine.record(outcome)
         {
             self.save_review(cx);
@@ -369,13 +374,13 @@ impl ReviewApp {
         let in_view = self.pull_in_view();
         let busy = self.publishing;
         let pending = self.pull_pending();
-        let status = self.pull_status.clone();
+        let status = self.review.pull_status.clone();
         let state = self.pull_state(pull);
         let open = state == PrState::Open;
         let can_approve_with = self.can_approve(pull, true);
         let can_approve_without = self.can_approve(pull, false);
         let rows = status_rows(state, status.as_ref());
-        let error = self.pull_status_error.clone();
+        let error = self.review.pull_status_error.clone();
         let tooltip = match (&status, &error) {
             (Some(status), _) => {
                 format!(

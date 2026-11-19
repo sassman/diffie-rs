@@ -1,6 +1,12 @@
 //! `--pr`: the pull request a review is connected to, as a
-//! [`Forge`](crate::forge::Forge) describes it, and the parsing of the
-//! command-line value that names it.
+//! [`Forge`](crate::forge::Forge) describes it, the parsing of the
+//! command-line value that names it, and [`open`], which turns the named
+//! pull request into the comparison a review runs on - for the command
+//! line and for the in-app picker alike.
+
+use crate::backend::ReviewBackend;
+use crate::forge::Forge;
+use crate::model::{CompareMode, Comparison};
 
 /// The `--pr` value, parsed but not yet resolved.
 #[derive(Debug, PartialEq, Eq)]
@@ -88,6 +94,218 @@ pub enum CheckState {
     Running,
     /// At least one check failed; it outranks the ones still running.
     Failing,
+}
+
+/// Which pull requests a list asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrList {
+    Open,
+    /// Merged and closed, behind the picker's "show more" row.
+    Finished,
+}
+
+/// One row of a pull-request list: enough for picking, nothing more.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrSummary {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    /// Last update as unix seconds, for the age column.
+    pub updated: i64,
+    pub state: PrState,
+    pub draft: bool,
+    /// The head commit's checks folded to one verdict; `None` without any.
+    pub checks: Option<CheckState>,
+}
+
+/// Whether [`open`] may fetch missing commits. The command line never
+/// fetches - it prints the fetch to run instead - while the in-app picker
+/// fetches on the reviewer's explicit pick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FetchMode {
+    Never,
+    OnDemand,
+}
+
+/// Resolves a named pull request into the pinned comparison a review runs
+/// on. The error is the message to show, word for word: the command line
+/// prints it, the window's status line carries it.
+pub fn open(
+    backend: &dyn ReviewBackend,
+    forge: &dyn Forge,
+    argument: &PrArgument,
+    mode: CompareMode,
+    fetch: FetchMode,
+) -> Result<(PullRequest, Comparison), String> {
+    let pull = forge
+        .pull_request(argument)
+        .map_err(|error| error.to_string())?;
+    if let FetchMode::OnDemand = fetch {
+        fetch_missing(backend, &pull)?;
+    }
+    let exists = |revision: &str| {
+        backend
+            .revision_exists(revision)
+            .map_err(|error| error.to_string())
+    };
+    // For fetch hints only; with several remotes the user knows better
+    // than a guess.
+    let remote_hint = match backend.remotes().unwrap_or_default().as_slice() {
+        [only] => only.clone(),
+        _ => "<remote>".to_string(),
+    };
+    // True both before and after an on-demand fetch: the command line
+    // never fetched, the picker already did and the hint is what to try
+    // by hand.
+    let tail = match fetch {
+        FetchMode::Never => " - diffie never fetches",
+        FetchMode::OnDemand => "",
+    };
+    // The PR's exact head commit, never a branch lookup: a stale
+    // same-named branch must not silently show other content.
+    if !exists(&pull.source_commit)? {
+        return Err(match pull.state {
+            PrState::Open if pull.cross_repository => format!(
+                "the pull request's head commit is not here: it comes from {owner}'s \
+                 fork. Add that fork as a remote, run `git fetch <fork> {branch}`, \
+                 then retry{tail}.",
+                owner = pull.head_owner,
+                branch = pull.source_branch,
+            ),
+            PrState::Open => format!(
+                "the pull request's head commit is not here; run \
+                 `git fetch {remote_hint} {branch}` and retry{tail}.",
+                branch = pull.source_branch,
+            ),
+            // Merged or closed, the head branch is usually deleted, but
+            // GitHub keeps the commit reachable under refs/pull - also
+            // after a squash or rebase merge, which puts different
+            // commits on the base branch.
+            PrState::Merged | PrState::Closed => format!(
+                "the pull request's head commit is not here; run \
+                 `git fetch {remote_hint} refs/pull/{number}/head` and retry{tail}.",
+                number = pull.number,
+            ),
+        });
+    }
+    let target_rev = match pull.state {
+        // The base as the PR was compared against it: the live base
+        // already contains a merged PR, which would collapse the diff
+        // to nothing. gh's baseRefOid, not the merge commit's first
+        // parent - a base rebuilt under the PR moves that parent off
+        // the PR's own comparison and drags foreign commits in.
+        PrState::Merged => {
+            if !exists(&pull.target_commit)? {
+                return Err(format!(
+                    "the pull request's base commit is not here; run \
+                     `git fetch {remote_hint}` and retry{tail}."
+                ));
+            }
+            pull.target_commit.clone()
+        }
+        // Open (or closed unmerged), the base moves on, so follow its
+        // remote-tracking ref - never a same-named local branch, which
+        // can lag.
+        PrState::Open | PrState::Closed => {
+            let branch = &pull.target_branch;
+            remote_ref(backend, branch, || {
+                format!(
+                    "`{branch}` is not fetched here; run \
+                     `git fetch {remote_hint} {branch}` and retry{tail}."
+                )
+            })?
+        }
+    };
+    let comparison = Comparison {
+        source: pull.source_branch.clone(),
+        target: pull.target_branch.clone(),
+        source_rev: Some(pull.source_commit.clone()),
+        target_rev: Some(target_rev),
+        mode,
+        uncommitted: false,
+    };
+    Ok((pull, comparison))
+}
+
+/// A branch only the remotes know resolves when exactly one remote has it;
+/// several are a question the user must answer, not a guess. `missing` words
+/// the no-remote case, because the callers know different things. Public
+/// so the command line's revision fallback resolves by the same rule and
+/// in the same words.
+pub fn remote_ref(
+    backend: &dyn ReviewBackend,
+    branch: &str,
+    missing: impl FnOnce() -> String,
+) -> Result<String, String> {
+    let remotes = backend
+        .remotes_with_branch(branch)
+        .map_err(|error| error.to_string())?;
+    match remotes.as_slice() {
+        [remote] => Ok(format!("{remote}/{branch}")),
+        [] => Err(missing()),
+        _ => Err(format!(
+            "`{branch}` is on more than one remote ({}); say which, e.g. `{}/{branch}`.",
+            remotes.join(", "),
+            remotes[0]
+        )),
+    }
+}
+
+/// The picker's fetch: one explicit `git fetch` when the pull request's
+/// commits are not here yet. `refs/pull/<n>/head` reaches the head commit
+/// uniformly - forks and merged pull requests included - and the base
+/// branch rides along so its remote-tracking ref is fresh.
+fn fetch_missing(backend: &dyn ReviewBackend, pull: &PullRequest) -> Result<(), String> {
+    let head_missing = !backend
+        .revision_exists(&pull.source_commit)
+        .map_err(|error| error.to_string())?;
+    let target_missing = match pull.state {
+        PrState::Merged => !backend
+            .revision_exists(&pull.target_commit)
+            .map_err(|error| error.to_string())?,
+        PrState::Open | PrState::Closed => backend
+            .remotes_with_branch(&pull.target_branch)
+            .map_err(|error| error.to_string())?
+            .is_empty(),
+    };
+    if !head_missing && !target_missing {
+        return Ok(());
+    }
+    let remotes = backend.remotes().map_err(|error| error.to_string())?;
+    let remote = match remotes.as_slice() {
+        [] => {
+            return Err(
+                "no remote is configured; fetch the pull request's commits and retry.".to_string(),
+            );
+        }
+        [only] => only.clone(),
+        _ => {
+            // Several remotes: only the one already carrying the base
+            // branch is safe to assume; anything else is a guess.
+            let carrying = backend
+                .remotes_with_branch(&pull.target_branch)
+                .map_err(|error| error.to_string())?;
+            match carrying.as_slice() {
+                [only] => only.clone(),
+                _ => {
+                    return Err(format!(
+                        "several remotes are configured ({}); fetch the pull request \
+                         yourself, e.g. `git fetch {} refs/pull/{}/head`, and retry.",
+                        remotes.join(", "),
+                        remotes[0],
+                        pull.number,
+                    ));
+                }
+            }
+        }
+    };
+    let refspecs = vec![
+        pull.target_branch.clone(),
+        format!("refs/pull/{}/head", pull.number),
+    ];
+    backend
+        .fetch(&remote, &refspecs)
+        .map_err(|error| error.to_string())
 }
 
 /// Parses the `--pr` value: a decimal number, or an http(s) URL shaped

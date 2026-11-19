@@ -115,6 +115,39 @@ pub trait ReviewBackend: Send + Sync {
     /// sources through this, since they are in no object yet.
     fn worktree_file(&self, path: &str) -> Result<Option<Vec<u8>>>;
 
+    /// Whether `revision` names a commit here. Rejects a typo before a
+    /// window opens on an empty review, and tells an unfetched pull
+    /// request from a fetched one.
+    fn revision_exists(&self, revision: &str) -> Result<bool>;
+
+    /// Whether the working tree holds anything an uncommitted review
+    /// would show: changes against HEAD, staged or not, and untracked
+    /// files. Decides the bare invocation's default comparison.
+    fn has_uncommitted_changes(&self) -> Result<bool>;
+
+    /// The repository's default branch as the clone recorded it: the
+    /// branch the remotes' HEAD points at (`refs/remotes/<remote>/HEAD`),
+    /// when the remotes that say agree on one name. `None` otherwise - a
+    /// remote added by hand records no HEAD, and git is never asked over
+    /// the network for one.
+    fn default_branch(&self) -> Result<Option<String>>;
+
+    /// The configured remotes, as `git remote` lists them. Names a remote
+    /// in fetch hints without guessing.
+    fn remotes(&self) -> Result<Vec<String>>;
+
+    /// The configured remotes whose fetched refs carry `branch`. Stands
+    /// `o/x` in for `x` when exactly one remote knows the branch, and
+    /// names the candidates when several do.
+    fn remotes_with_branch(&self, branch: &str) -> Result<Vec<String>>;
+
+    /// Fetches `refspecs` from `remote`. The one sanctioned write to the
+    /// repository besides the review files: objects and remote-tracking
+    /// refs, on the reviewer's explicit action only - opening a pull
+    /// request whose commits are not here yet. Never touches local
+    /// branches, the index or the working tree.
+    fn fetch(&self, remote: &str, refspecs: &[String]) -> Result<()>;
+
     /// The reviewer's name as git knows it (`user.name`).
     fn author_name(&self) -> Result<String>;
 

@@ -18,7 +18,9 @@ Usage: diffie [-C <path>] [<revision> [<revision>]] [--every-difference]
        diffie [-C <path>] --reply <id> <answer> [--session <id>]
 
 Reads in the merge direction. With no revision, reviews the uncommitted
-changes going into the checked-out branch. With one revision, reviews
+changes going into the checked-out branch - and with a clean working
+tree, what the branch itself adds going into the default branch (what
+the remotes' HEAD names, else main, else master). With one revision, reviews
 everything the working tree adds going into it. With two revisions (or A..B),
 reviews the first going into the second: `diffie topic main` is topic's
 changes going into main. A revision only a remote has is taken from there
@@ -51,31 +53,37 @@ fn exit_usage(message: &str) -> ! {
     std::process::exit(2);
 }
 
-/// A branch only the remotes know resolves when exactly one remote has it;
-/// several are a question the user must answer, not a guess. `missing` words
-/// the no-remote case, because the callers know different things: a PR base
-/// exists upstream but is not fetched, while an arbitrary revision may not
-/// exist anywhere.
+/// The core's resolution rule (`pr::remote_ref`) with the command line's
+/// answer to failure: print and exit. `missing` words the no-remote case,
+/// because the callers know different things: a PR base exists upstream
+/// but is not fetched, while an arbitrary revision may not exist anywhere.
 fn remote_ref(backend: &GitCli, branch: &str, missing: impl FnOnce() -> String) -> String {
-    let remotes = backend.remotes_with_branch(branch).unwrap_or_else(|error| {
-        eprintln!("{error}");
+    diffie_core::pr::remote_ref(backend, branch, missing).unwrap_or_else(|message| {
+        eprintln!("{message}");
         std::process::exit(1);
-    });
-    match remotes.as_slice() {
-        [remote] => format!("{remote}/{branch}"),
-        [] => {
-            eprintln!("{}", missing());
-            std::process::exit(1);
-        }
-        _ => {
-            eprintln!(
-                "`{branch}` is on more than one remote ({}); say which, e.g. `{}/{branch}`.",
-                remotes.join(", "),
-                remotes[0]
-            );
-            std::process::exit(1);
-        }
-    }
+    })
+}
+
+/// The branch a bare start compares against when nothing names one: what
+/// the remotes' HEAD records as the default branch, else `main`, else
+/// `master` - the first that can anchor a comparison here (a revision, or
+/// carried by exactly one remote, which the resolve step then takes).
+/// `None` keeps the uncommitted default instead of failing a bare start
+/// over a branch nobody named.
+fn default_target(backend: &GitCli) -> Option<String> {
+    let comparable = |branch: &String| {
+        backend.revision_exists(branch).unwrap_or(false)
+            || backend
+                .remotes_with_branch(branch)
+                .is_ok_and(|remotes| remotes.len() == 1)
+    };
+    backend
+        .default_branch()
+        .ok()
+        .flatten()
+        .into_iter()
+        .chain(["main".to_string(), "master".to_string()])
+        .find(comparable)
 }
 
 fn main() {
@@ -246,106 +254,39 @@ fn main() {
             }
         }
     }
+    // The code host, for the in-app picker; `--pr` connects the review to
+    // it right away. Only ever asked on the reviewer's explicit action.
+    let forge: Arc<dyn Forge> = Arc::new(GitHubCli::new(&path));
     // The review's pull request, kept for the window: publishing and
-    // approving exist only when the review was opened from one.
+    // approving exist only when the review was opened from one. The
+    // resolution itself is shared with the in-app picker (`pr::open`);
+    // only the picker may fetch - the command line prints the fetch to
+    // run instead.
     let mut connected = None;
     let pr_comparison = pr.map(|value| {
         let argument = match diffie_core::pr::parse(&value) {
             Ok(argument) => argument,
             Err(message) => exit_usage(&message),
         };
-        let forge: Arc<dyn Forge> = Arc::new(GitHubCli::new(&path));
-        let pull = match forge.pull_request(&argument) {
-            Ok(pull) => pull,
-            Err(error) => {
-                eprintln!("{error}");
+        let opened = diffie_core::pr::open(
+            &*backend,
+            &*forge,
+            &argument,
+            mode,
+            diffie_core::pr::FetchMode::Never,
+        );
+        let (pull, comparison) = match opened {
+            Ok(opened) => opened,
+            Err(message) => {
+                eprintln!("{message}");
                 std::process::exit(1);
             }
         };
         connected = Some(app::Pull {
-            forge,
-            request: pull.clone(),
+            forge: forge.clone(),
+            request: pull,
         });
-        use diffie_core::pr::PrState;
-        let exists = |revision: &str| -> bool {
-            backend.revision_exists(revision).unwrap_or_else(|error| {
-                eprintln!("{error}");
-                std::process::exit(1);
-            })
-        };
-        // For fetch hints only; with several remotes the user knows better
-        // than a guess.
-        let remote_hint = match backend.remotes().unwrap_or_default().as_slice() {
-            [only] => only.clone(),
-            _ => "<remote>".to_string(),
-        };
-        // The PR's exact head commit, never a branch lookup: a stale
-        // same-named branch must not silently show other content.
-        if !exists(&pull.source_commit) {
-            match pull.state {
-                PrState::Open if pull.cross_repository => eprintln!(
-                    "the pull request's head commit is not here: it comes from {owner}'s \
-                     fork. Add that fork as a remote, run `git fetch <fork> {branch}`, \
-                     then retry - diffie never fetches.",
-                    owner = pull.head_owner,
-                    branch = pull.source_branch,
-                ),
-                PrState::Open => eprintln!(
-                    "the pull request's head commit is not here; run \
-                     `git fetch {remote_hint} {branch}` and retry - diffie never fetches.",
-                    branch = pull.source_branch,
-                ),
-                // Merged or closed, the head branch is usually deleted, but
-                // GitHub keeps the commit reachable under refs/pull - also
-                // after a squash or rebase merge, which puts different
-                // commits on the base branch.
-                PrState::Merged | PrState::Closed => eprintln!(
-                    "the pull request's head commit is not here; run \
-                     `git fetch {remote_hint} refs/pull/{number}/head` and retry - \
-                     diffie never fetches.",
-                    number = pull.number,
-                ),
-            }
-            std::process::exit(1);
-        }
-        let target_rev = match pull.state {
-            // The base as the PR was compared against it: the live base
-            // already contains a merged PR, which would collapse the diff
-            // to nothing. gh's baseRefOid, not the merge commit's first
-            // parent - a base rebuilt under the PR moves that parent off
-            // the PR's own comparison and drags foreign commits in.
-            PrState::Merged => {
-                if !exists(&pull.target_commit) {
-                    eprintln!(
-                        "the pull request's base commit is not here; run \
-                         `git fetch {remote_hint}` and retry - diffie never fetches."
-                    );
-                    std::process::exit(1);
-                }
-                pull.target_commit.clone()
-            }
-            // Open (or closed unmerged), the base moves on, so follow its
-            // remote-tracking ref - never a same-named local branch, which
-            // can lag.
-            PrState::Open | PrState::Closed => {
-                let branch = &pull.target_branch;
-                remote_ref(&backend, branch, || {
-                    format!(
-                        "`{branch}` is not fetched here; run \
-                         `git fetch {remote_hint} {branch}` and retry - \
-                         diffie never fetches."
-                    )
-                })
-            }
-        };
-        Comparison {
-            source: pull.source_branch,
-            target: pull.target_branch,
-            source_rev: Some(pull.source_commit),
-            target_rev: Some(target_rev),
-            mode,
-            uncommitted: false,
-        }
+        comparison
     });
     let branch = backend.current_branch().ok().flatten();
     let working_tree = backend.has_working_tree().unwrap_or(false);
@@ -378,9 +319,28 @@ fn main() {
         )),
         [] => {
             // Opened plainly, the review is the uncommitted work going into
-            // the checked-out branch. A bare repository or a detached HEAD
-            // has no such review and falls back to branch against main.
-            if let Some(into) = branch.clone().filter(|_| working_tree) {
+            // the checked-out branch. A clean working tree has no such
+            // review, so the default becomes what the branch itself adds to
+            // the default branch (`diffie HEAD..main` spelled out) - but
+            // only when that reads as a review: a checked-out branch that is
+            // not the default itself, and a default branch to compare
+            // against (see `default_target`). A bare repository or a
+            // detached HEAD has neither and falls back to branch against
+            // the default.
+            let branch_into_default = (working_tree
+                && !backend.has_uncommitted_changes().unwrap_or(true))
+            .then(|| default_target(&backend))
+            .flatten()
+            .filter(|target| branch.as_deref().is_some_and(|name| name != target));
+            if let Some(target) = branch_into_default {
+                Comparison {
+                    source: branch.clone().unwrap_or_default(),
+                    target,
+                    mode,
+                    uncommitted: false,
+                    ..Default::default()
+                }
+            } else if let Some(into) = branch.clone().filter(|_| working_tree) {
                 Comparison {
                     source: "uncommitted".to_string(),
                     target: into,
@@ -392,7 +352,9 @@ fn main() {
                 Comparison {
                     // Name the review after the branch, not the literal HEAD.
                     source: branch.clone().unwrap_or_else(|| "HEAD".to_string()),
-                    target: "main".to_string(),
+                    // `main` when nothing better is known: the resolve step
+                    // then words the error.
+                    target: default_target(&backend).unwrap_or_else(|| "main".to_string()),
                     mode,
                     uncommitted: false,
                     ..Default::default()
@@ -558,6 +520,7 @@ fn main() {
                 cx.new(|cx| {
                     app::ReviewApp::new(
                         backend,
+                        forge,
                         app::Subject {
                             repository: name.into(),
                             worktree: worktree.map(Into::into),

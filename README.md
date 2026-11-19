@@ -20,6 +20,10 @@ A native desktop app for reviewing git changes across several commits or a
 whole branch, with comments on lines and selections. Rust and GPUI Kit, for
 macOS, Windows and Linux.
 
+<p align="center">
+  <img src="docs/screenshots/main-screen.png" alt="diffie reviewing a pull request: file tree, scope bar with the commit range, a split diff with a resolved review comment, and the hint bar">
+</p>
+
 This is an early alpha. Start with:
 
 - `docs/HANDOFF.md`: what exists, what was verified, what is next.

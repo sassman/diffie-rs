@@ -8,7 +8,7 @@
 //! forge it talks to; [`crate::github`] is the one implementation.
 
 use crate::model::{BlameLine, Oid};
-use crate::pr::{PrArgument, PullRequest, PullStatus};
+use crate::pr::{PrArgument, PrList, PrSummary, PullRequest, PullStatus};
 use crate::review::{
     Comment, Published, Reaction, ReactionKind, ReviewFile, ReviewSet, Side, Thread,
 };
@@ -36,6 +36,10 @@ pub trait Forge: Send + Sync {
 
     /// The pull request's state, branches and exact commits.
     fn pull_request(&self, argument: &PrArgument) -> Result<PullRequest, ForgeError>;
+
+    /// The repository's pull requests, newest activity first: enough per
+    /// row for the picker to show and choose, never the full description.
+    fn pull_requests(&self, which: PrList) -> Result<Vec<PrSummary>, ForgeError>;
 
     /// Where the pull request stands now: merged or not, the review
     /// decision, and the head commit's checks when it has any.
@@ -687,6 +691,10 @@ mod tests {
 
         fn pull_request(&self, _: &PrArgument) -> Result<PullRequest, ForgeError> {
             Ok(pull())
+        }
+
+        fn pull_requests(&self, _: PrList) -> Result<Vec<PrSummary>, ForgeError> {
+            Ok(Vec::new())
         }
 
         fn status(&self, _: &PullRequest) -> Result<PullStatus, ForgeError> {

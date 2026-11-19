@@ -4,9 +4,10 @@
 //! meant to be replaced by a `gix` + `imara-diff` backend behind the same
 //! [`ReviewBackend`] trait once the UI has settled; do not grow it beyond that.
 //!
-//! It never writes to the repository. Combining non-contiguous commits needs
-//! scratch objects, and those go to a temporary object directory that borrows
-//! the real one as an alternate.
+//! It never writes to the repository, with one sanctioned exception: a
+//! fetch on the reviewer's explicit action (see [`ReviewBackend::fetch`]).
+//! Combining non-contiguous commits needs scratch objects, and those go to
+//! a temporary object directory that borrows the real one as an alternate.
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -96,52 +97,6 @@ impl GitCli {
                 .and_then(|top| basename(Path::new(top.trim())))
         };
         Ok((project, worktree))
-    }
-
-    /// Whether `revision` names a commit here. Lets the command line reject
-    /// a typo before a window opens on an empty review.
-    pub fn revision_exists(&self, revision: &str) -> Result<bool> {
-        let spec = format!("{revision}^{{commit}}");
-        Ok(self
-            .try_read(&[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                "--end-of-options",
-                &spec,
-            ])?
-            .is_some())
-    }
-
-    /// The configured remotes, as `git remote` lists them. Lets the command
-    /// line name a remote in fetch hints without guessing.
-    pub fn remotes(&self) -> Result<Vec<String>> {
-        Ok(self
-            .read(&["remote"])?
-            .lines()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_string)
-            .collect())
-    }
-
-    /// The configured remotes whose fetched refs carry `branch`. Lets the
-    /// command line stand `o/x` in for `x` when exactly one remote knows the
-    /// branch, and name the candidates when several do.
-    pub fn remotes_with_branch(&self, branch: &str) -> Result<Vec<String>> {
-        let mut found = Vec::new();
-        for remote in self.remotes()? {
-            // The constant `refs/remotes/` prefix keeps the ref from being
-            // read as an option; `--verify` demands this exact ref.
-            let reference = format!("refs/remotes/{remote}/{branch}");
-            if self
-                .try_read(&["show-ref", "--verify", "--quiet", &reference])?
-                .is_some()
-            {
-                found.push(remote.to_string());
-            }
-        }
-        Ok(found)
     }
 
     fn command(&self) -> Command {
@@ -606,6 +561,81 @@ impl GitCli {
 }
 
 impl ReviewBackend for GitCli {
+    fn revision_exists(&self, revision: &str) -> Result<bool> {
+        let spec = format!("{revision}^{{commit}}");
+        Ok(self
+            .try_read(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                &spec,
+            ])?
+            .is_some())
+    }
+
+    fn has_uncommitted_changes(&self) -> Result<bool> {
+        // Like the uncommitted layer: untracked counts, ignored does not.
+        Ok(!self
+            .read(&["status", "--porcelain", "-z", "--no-renames"])?
+            .is_empty())
+    }
+
+    fn default_branch(&self) -> Result<Option<String>> {
+        let mut names: Vec<String> = Vec::new();
+        for remote in self.remotes()? {
+            // The constant `refs/remotes/` prefix keeps the ref from being
+            // read as an option.
+            let reference = format!("refs/remotes/{remote}/HEAD");
+            let Some(target) = self.try_read(&["symbolic-ref", "--quiet", &reference])? else {
+                continue;
+            };
+            let prefix = format!("refs/remotes/{remote}/");
+            if let Some(name) = target.trim().strip_prefix(&prefix)
+                && !names.iter().any(|known| known == name)
+            {
+                names.push(name.to_string());
+            }
+        }
+        Ok(match names.as_slice() {
+            [one] => Some(one.clone()),
+            // No remote says, or they disagree: no guess.
+            _ => None,
+        })
+    }
+
+    fn remotes(&self) -> Result<Vec<String>> {
+        Ok(self
+            .read(&["remote"])?
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    fn remotes_with_branch(&self, branch: &str) -> Result<Vec<String>> {
+        let mut found = Vec::new();
+        for remote in self.remotes()? {
+            // The constant `refs/remotes/` prefix keeps the ref from being
+            // read as an option; `--verify` demands this exact ref.
+            let reference = format!("refs/remotes/{remote}/{branch}");
+            if self
+                .try_read(&["show-ref", "--verify", "--quiet", &reference])?
+                .is_some()
+            {
+                found.push(remote.to_string());
+            }
+        }
+        Ok(found)
+    }
+
+    fn fetch(&self, remote: &str, refspecs: &[String]) -> Result<()> {
+        let mut args = vec!["fetch", "--quiet", "--end-of-options", remote];
+        args.extend(refspecs.iter().map(String::as_str));
+        self.read(&args).map(drop)
+    }
+
     fn resolve(&self, comparison: &Comparison) -> Result<Resolved> {
         // An uncommitted review diffs the working tree, so `head` is only
         // the anchor for merge-base and review bookkeeping.
