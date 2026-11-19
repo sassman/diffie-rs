@@ -37,8 +37,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # on the v0.9.1 tag, so every crate keeps the pinned version; the whole
 # family must come from one source or two copies of gpui-base collide.
 [patch.crates-io]
-# PoC only: the conflict resolver iterates against the local fork worktree.
-# Before merge this returns to the GitHub branch (diff-conflict-resolv).
+# Sanctioned for this branch only: the conflict resolver iterates against
+# the local fork checkout. The repository rule stays "the patch pulls from
+# GitHub" (AGENTS.md, constraint 2; fork branch diff-conflict-resolv).
 gpui-kit = { path = "../../../../gpui-kit-conflict-resolv/crates/kit" }
 gpui-component = { path = "../../../../gpui-kit-conflict-resolv/crates/component" }
 gpui-base = { path = "../../../../gpui-kit-conflict-resolv/crates/base" }

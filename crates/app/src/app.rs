@@ -21,8 +21,8 @@ use diffie_core::search::{SearchHit, search_patch};
 use crate::settings::{LayoutMode, Settings, WindowSettings};
 use diffie_core::time::ago;
 use diffie_core::{
-    BlameLine, ChangedRegion, Commit, Comparison, ConflictFile, FileState, FileStatus, FileSummary,
-    NewSide, Oid, RepoState, Resolved, ReviewBackend, Scope, ScopedPatch,
+    BlameLine, ChangedRegion, Commit, Comparison, ConflictFile, ConflictLabels, FileState,
+    FileStatus, FileSummary, NewSide, Oid, RepoState, Resolved, ReviewBackend, Scope, ScopedPatch,
 };
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
@@ -721,6 +721,9 @@ struct Draft {
 struct Loaded {
     repo_state: RepoState,
     conflicts: Vec<ConflictFile>,
+    /// One parse per entry in `conflicts`, same order, done off the UI
+    /// thread: a large conflicted file must not stall the window.
+    conflict_parses: Vec<Result<ConflictResolvState, String>>,
     resolved: Resolved,
     commits: Vec<Commit>,
     reviews: ReviewSet,
@@ -1067,6 +1070,10 @@ pub struct ReviewApp {
     conflict_seen: Vec<String>,
     /// One resolver per entry in `conflicts`, same order.
     conflict_views: Vec<ConflictView>,
+    /// The operation's side labels, held from the first sight of a
+    /// conflict: `conflicts` empties as files resolve, and the strip must
+    /// keep naming the real sides until the operation moves on.
+    op_labels: Option<ConflictLabels>,
     center: CenterView,
     /// Conflicts auto-selects once per operation; after that the manual
     /// choice stands until the repository is idle again.
@@ -1223,6 +1230,7 @@ impl ReviewApp {
             conflicts: Vec::new(),
             conflict_seen: Vec::new(),
             conflict_views: Vec::new(),
+            op_labels: None,
             center: CenterView::Review,
             conflicts_seen: false,
             op_running: false,
@@ -1447,6 +1455,7 @@ impl ReviewApp {
                 // commit, starts a fresh progress count.
                 if self.repo_state != loaded.repo_state {
                     self.conflict_seen.clear();
+                    self.op_labels = None;
                 }
                 self.repo_state = loaded.repo_state;
                 self.conflicts = loaded.conflicts;
@@ -1455,7 +1464,10 @@ impl ReviewApp {
                         self.conflict_seen.push(file.path.clone());
                     }
                 }
-                self.sync_conflict_views(cx);
+                if let Some(first) = self.conflicts.first() {
+                    self.op_labels.get_or_insert_with(|| first.labels.clone());
+                }
+                self.sync_conflict_views(loaded.conflict_parses, cx);
                 match self.repo_state {
                     RepoState::Idle => {
                         self.center = CenterView::Review;
@@ -1627,26 +1639,33 @@ impl ReviewApp {
     }
 
     /// Reconcile the mounted resolvers with the freshly loaded conflicts,
-    /// keeping entities whose working text is unchanged.
-    fn sync_conflict_views(&mut self, cx: &mut Context<Self>) {
+    /// keeping entities whose working text is unchanged. The parses were
+    /// made on the load's background task; a kept entity discards its
+    /// fresh parse, preserving the reviewer's picks.
+    fn sync_conflict_views(
+        &mut self,
+        parses: Vec<Result<ConflictResolvState, String>>,
+        cx: &mut Context<Self>,
+    ) {
         let mut old = std::mem::take(&mut self.conflict_views);
         self.conflict_views = self
             .conflicts
             .iter()
-            .map(|file| {
+            .zip(parses)
+            .map(|(file, parsed)| {
                 if let Some(ix) = old
                     .iter()
                     .position(|v| v.path == file.path && v.source == file.working)
                 {
                     return old.swap_remove(ix);
                 }
-                let body = match ConflictResolvState::parse(file.path.clone(), &file.working) {
+                let body = match parsed {
                     Ok(state) => {
                         let state = cx.new(|_| state);
                         let observe = cx.observe(&state, |_, _, cx| cx.notify());
                         ConflictBody::Resolver(state, observe)
                     }
-                    Err(error) => ConflictBody::Unparsed(error.to_string().into()),
+                    Err(error) => ConflictBody::Unparsed(error.into()),
                 };
                 ConflictView {
                     path: file.path.clone(),
@@ -1712,39 +1731,19 @@ impl ReviewApp {
         self.file_op(move |backend| backend.unresolve_file(&path), cx);
     }
 
-    /// Continue or abort off the UI thread, then the normal reload. Git's
-    /// complaint lands in the strip verbatim instead of replacing the view.
+    /// Continue or abort, through the same guard, background shape and
+    /// error surface as the per-file writes.
     fn run_op(&mut self, abort: bool, cx: &mut Context<Self>) {
-        if self.op_running || self.repo_state == RepoState::Idle {
-            return;
-        }
-        self.op_running = true;
-        self.op_error = None;
-        let backend = self.backend.clone();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    if abort {
-                        backend.abort_op()
-                    } else {
-                        backend.continue_op()
-                    }
-                    .map_err(|error| error.to_string())
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.op_running = false;
-                match result {
-                    Ok(()) => this.reload(cx),
-                    Err(error) => {
-                        this.op_error = Some(error.into());
-                        cx.notify();
-                    }
+        self.file_op(
+            move |backend| {
+                if abort {
+                    backend.abort_op()
+                } else {
+                    backend.continue_op()
                 }
-            });
-        })
-        .detach();
-        cx.notify();
+            },
+            cx,
+        );
     }
 
     /// Abort asks first: it throws away every resolution made so far.
@@ -4345,13 +4344,18 @@ impl ReviewApp {
     /// the operation stands, and the one button that moves it forward.
     fn render_conflict_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let rebase = matches!(self.repo_state, RepoState::Rebase { .. });
-        // The first conflict carries the operation's own side labels; with
-        // every file resolved the comparison's branches stand in.
-        let (source, target) = match self.conflicts.first() {
+        // The operation's own side labels, held even after the last file
+        // resolved; only a conflict-free operation falls back to the
+        // comparison's branches.
+        let labels = self
+            .op_labels
+            .as_ref()
+            .or_else(|| self.conflicts.first().map(|file| &file.labels));
+        let (source, target) = match labels {
             // A rebase replays the reviewer's commit onto the upstream; a
             // merge brings the upstream into the reviewer's branch.
-            Some(file) if rebase => (file.labels.yours.clone(), file.labels.upstream.clone()),
-            Some(file) => (file.labels.upstream.clone(), file.labels.yours.clone()),
+            Some(labels) if rebase => (labels.yours.clone(), labels.upstream.clone()),
+            Some(labels) => (labels.upstream.clone(), labels.yours.clone()),
             None => (
                 self.review.comparison.source.clone(),
                 self.review.comparison.target.clone(),
@@ -4408,10 +4412,9 @@ impl ReviewApp {
             )
     }
 
-    /// The center while the reviewer looks at conflicts. Only the shell:
-    /// the body under each header is the seam where the Kit fork's
-    /// `ConflictResolv` mounts, one three-pane block per file - the app
-    /// will feed it `ConflictFile` and listen for its events.
+    /// The center while the reviewer looks at conflicts: every file the
+    /// operation has touched, in one scroll - resolved ones collapsed to
+    /// their ticked header, the rest mounted as three-pane resolvers.
     fn render_conflicts(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let mono = cx.theme().mono_font_family.clone();
@@ -4507,10 +4510,20 @@ impl ReviewApp {
     ) -> AnyElement {
         let file = &self.conflicts[ix];
         let view = &self.conflict_views[ix];
-        let ready = match &view.body {
-            ConflictBody::Resolver(state, _) => state.read(cx).all_resolved(),
-            ConflictBody::Unparsed(_) => false,
-        };
+        // A binary file's texts are lossy decodes that must never be
+        // written back, and a file without text markers (a side deleted
+        // it) parses to zero blocks; "ready" in either case would stage
+        // content nobody chose, so both stay with the terminal for now.
+        let markerless = file.binary
+            || match &view.body {
+                ConflictBody::Resolver(state, _) => state.read(cx).block_count() == 0,
+                ConflictBody::Unparsed(_) => false,
+            };
+        let ready = !markerless
+            && match &view.body {
+                ConflictBody::Resolver(state, _) => state.read(cx).all_resolved(),
+                ConflictBody::Unparsed(_) => false,
+            };
         let (badge, badge_color) = if ready {
             ("ready", cx.theme().success)
         } else {
@@ -4518,6 +4531,15 @@ impl ReviewApp {
         };
         let path = file.path.clone();
         let body = match &view.body {
+            ConflictBody::Resolver(_, _) if markerless => div()
+                .px(px(10.))
+                .py(px(6.))
+                .text_color(cx.theme().muted_foreground)
+                .child(
+                    "No text conflict markers: a side deleted this file, or it is binary. \
+                     Resolve it in the terminal, then reload.",
+                )
+                .into_any_element(),
             ConflictBody::Resolver(state, _) => ConflictResolv::new(state)
                 .yours_label(format!("Your changes · {}", file.labels.yours))
                 .upstream_label(format!("Upstream changes · {}", file.labels.upstream))
@@ -6605,6 +6627,13 @@ fn load(
         RepoState::Idle => Vec::new(),
         _ => backend.conflicts().map_err(text)?,
     };
+    let conflict_parses = conflicts
+        .iter()
+        .map(|file| {
+            ConflictResolvState::parse(file.path.clone(), &file.working)
+                .map_err(|error| error.to_string())
+        })
+        .collect();
     let resolved = backend.resolve(comparison).map_err(text)?;
     let commits = backend.commits(&resolved).map_err(text)?;
     // Only now is it known what HEAD gained; the caller could only say
@@ -6808,6 +6837,7 @@ fn load(
     Ok(Loaded {
         repo_state,
         conflicts,
+        conflict_parses,
         resolved,
         commits,
         reviews,
