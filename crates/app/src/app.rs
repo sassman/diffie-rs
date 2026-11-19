@@ -33,6 +33,7 @@ use gpui_kit::component::{
         ToggleVariants as _,
     },
     checkbox::Checkbox,
+    conflict_resolv::{ConflictResolv, ConflictResolvState},
     diff::{
         Diff, DiffAnnotation, DiffChangeIndicator, DiffDecoration, DiffEvent, DiffFile, DiffFold,
         DiffGutterMarker, DiffHunkSeparator, DiffLinePosition, DiffLineRange, DiffMode, DiffSide,
@@ -625,6 +626,27 @@ enum CenterView {
     Conflicts,
 }
 
+/// One mounted conflict resolver. The parse source rides along so a reload
+/// only rebuilds the entity when the working text actually changed: the
+/// reviewer's picks survive the reloads that resolve, reopen and continue
+/// trigger.
+struct ConflictView {
+    path: String,
+    source: String,
+    body: ConflictBody,
+}
+
+enum ConflictBody {
+    /// The subscription keeps the app re-rendering on every pick made
+    /// inside the component.
+    Resolver(
+        Entity<ConflictResolvState>,
+        #[allow(dead_code)] Subscription,
+    ),
+    /// The marker parser's complaint, shown in place of a resolver.
+    Unparsed(SharedString),
+}
+
 /// One group of the commit picker: its heading row and the commits it lists.
 struct PickerSection {
     title: &'static str,
@@ -1038,10 +1060,13 @@ pub struct ReviewApp {
     repo_state: RepoState,
     /// The paths still unmerged. Empty means the operation can continue.
     conflicts: Vec<ConflictFile>,
-    /// The most files the current operation had unmerged at once:
-    /// `conflicts` only lists what is left, so progress needs a high-water
-    /// mark. A state change (a rebase stepping on) starts a fresh count.
-    conflict_peak: usize,
+    /// Every path the current operation has had unmerged, in first-seen
+    /// order: `conflicts` only lists what is left, so progress and the
+    /// ticked headers need the full set. A state change (a rebase stepping
+    /// on) starts a fresh list.
+    conflict_seen: Vec<String>,
+    /// One resolver per entry in `conflicts`, same order.
+    conflict_views: Vec<ConflictView>,
     center: CenterView,
     /// Conflicts auto-selects once per operation; after that the manual
     /// choice stands until the repository is idle again.
@@ -1196,7 +1221,8 @@ impl ReviewApp {
             publishing: false,
             repo_state: RepoState::Idle,
             conflicts: Vec::new(),
-            conflict_peak: 0,
+            conflict_seen: Vec::new(),
+            conflict_views: Vec::new(),
             center: CenterView::Review,
             conflicts_seen: false,
             op_running: false,
@@ -1420,11 +1446,16 @@ impl ReviewApp {
                 // A fresh operation, or a rebase stepping to its next
                 // commit, starts a fresh progress count.
                 if self.repo_state != loaded.repo_state {
-                    self.conflict_peak = 0;
+                    self.conflict_seen.clear();
                 }
                 self.repo_state = loaded.repo_state;
-                self.conflict_peak = self.conflict_peak.max(loaded.conflicts.len());
                 self.conflicts = loaded.conflicts;
+                for file in &self.conflicts {
+                    if !self.conflict_seen.contains(&file.path) {
+                        self.conflict_seen.push(file.path.clone());
+                    }
+                }
+                self.sync_conflict_views(cx);
                 match self.repo_state {
                     RepoState::Idle => {
                         self.center = CenterView::Review;
@@ -1593,6 +1624,92 @@ impl ReviewApp {
 
     fn can_abort_op(&self) -> bool {
         self.repo_state != RepoState::Idle && !self.op_running
+    }
+
+    /// Reconcile the mounted resolvers with the freshly loaded conflicts,
+    /// keeping entities whose working text is unchanged.
+    fn sync_conflict_views(&mut self, cx: &mut Context<Self>) {
+        let mut old = std::mem::take(&mut self.conflict_views);
+        self.conflict_views = self
+            .conflicts
+            .iter()
+            .map(|file| {
+                if let Some(ix) = old
+                    .iter()
+                    .position(|v| v.path == file.path && v.source == file.working)
+                {
+                    return old.swap_remove(ix);
+                }
+                let body = match ConflictResolvState::parse(file.path.clone(), &file.working) {
+                    Ok(state) => {
+                        let state = cx.new(|_| state);
+                        let observe = cx.observe(&state, |_, _, cx| cx.notify());
+                        ConflictBody::Resolver(state, observe)
+                    }
+                    Err(error) => ConflictBody::Unparsed(error.to_string().into()),
+                };
+                ConflictView {
+                    path: file.path.clone(),
+                    source: file.working.clone(),
+                    body,
+                }
+            })
+            .collect();
+    }
+
+    /// A per-file repository write (resolve or reopen) off the UI thread,
+    /// then the normal reload; shares `run_op`'s guard and error surface.
+    fn file_op(
+        &mut self,
+        op: impl FnOnce(&dyn ReviewBackend) -> diffie_core::backend::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.op_running || self.repo_state == RepoState::Idle {
+            return;
+        }
+        self.op_running = true;
+        self.op_error = None;
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { op(&*backend).map_err(|error| error.to_string()) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.op_running = false;
+                match result {
+                    Ok(()) => this.reload(cx),
+                    Err(error) => {
+                        this.op_error = Some(error.into());
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Write the middle pane into the working tree and stage it. The
+    /// backend refuses any path that is not unmerged, so a stale click
+    /// cannot write elsewhere.
+    fn mark_resolved(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(view) = self.conflict_views.iter().find(|v| v.path == path) else {
+            return;
+        };
+        let ConflictBody::Resolver(state, _) = &view.body else {
+            return;
+        };
+        let state = state.read(cx);
+        if !state.all_resolved() {
+            return;
+        }
+        let contents = state.result_text();
+        self.file_op(move |backend| backend.resolve_file(&path, &contents), cx);
+    }
+
+    /// Put the markers back for a file resolved earlier in this operation.
+    fn reopen(&mut self, path: String, cx: &mut Context<Self>) {
+        self.file_op(move |backend| backend.unresolve_file(&path), cx);
     }
 
     /// Continue or abort off the UI thread, then the normal reload. Git's
@@ -4240,7 +4357,7 @@ impl ReviewApp {
                 self.review.comparison.target.clone(),
             ),
         };
-        let total = self.conflict_peak;
+        let total = self.conflict_seen.len();
         let resolved = total.saturating_sub(self.conflicts.len());
         let standing = match self.repo_state {
             RepoState::Rebase {
@@ -4297,62 +4414,157 @@ impl ReviewApp {
     /// will feed it `ConflictFile` and listen for its events.
     fn render_conflicts(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        if self.conflicts.is_empty() {
-            // Resolved in the terminal, or by the last Mark resolved: the
-            // operation only waits for its continue.
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .text_sm()
-                .text_color(muted)
-                .child("Every conflict is resolved")
-                .child(format!(
-                    "Continue the {} from the bar above",
-                    self.op_noun()
-                ))
-                .into_any_element();
-        }
         let mono = cx.theme().mono_font_family.clone();
-        let warning = cx.theme().warning;
-        v_flex()
+        let rows = self
+            .conflict_seen
+            .iter()
+            .enumerate()
+            .map(|(seen_ix, path)| {
+                let Some(ix) = self.conflicts.iter().position(|f| &f.path == path) else {
+                    return self.render_resolved_file(seen_ix, path, &mono, cx);
+                };
+                self.render_conflict_file(ix, &mono, cx)
+            })
+            .collect::<Vec<_>>();
+        let column = v_flex()
             .id("conflicts")
             .size_full()
             .overflow_y_scroll()
-            .children(self.conflicts.iter().map(|file| {
-                v_flex()
-                    .w_full()
+            .children(rows);
+        if self.conflicts.is_empty() {
+            // Resolved in the terminal, or by the last Mark resolved: the
+            // operation only waits for its continue.
+            return column
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .gap_1()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("Every conflict is resolved")
+                        .child(format!(
+                            "Continue the {} from the bar above",
+                            self.op_noun()
+                        )),
+                )
+                .into_any_element();
+        }
+        column.into_any_element()
+    }
+
+    /// A resolved file keeps its place as a ticked 28px header; the work
+    /// stays reachable through Reopen until the operation continues.
+    fn render_resolved_file(
+        &self,
+        seen_ix: usize,
+        path: &str,
+        mono: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let owned = path.to_owned();
+        h_flex()
+            .flex_none()
+            .h(px(28.))
+            .px(px(10.))
+            .gap_2()
+            .bg(cx.theme().sidebar)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                Icon::new(IconName::Check)
+                    .small()
+                    .text_color(cx.theme().success),
+            )
+            .child(
+                div()
+                    .font_family(mono.clone())
+                    .text_color(cx.theme().muted_foreground)
+                    .child(path.to_owned()),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new(("conflict-reopen", seen_ix))
+                    .ghost()
+                    .xsmall()
+                    .label("Reopen")
+                    .disabled(self.op_running)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.reopen(owned.clone(), cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// One unresolved file: its header with the readiness badge and the
+    /// Mark resolved action, then the three-pane resolver.
+    fn render_conflict_file(
+        &self,
+        ix: usize,
+        mono: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let file = &self.conflicts[ix];
+        let view = &self.conflict_views[ix];
+        let ready = match &view.body {
+            ConflictBody::Resolver(state, _) => state.read(cx).all_resolved(),
+            ConflictBody::Unparsed(_) => false,
+        };
+        let (badge, badge_color) = if ready {
+            ("ready", cx.theme().success)
+        } else {
+            ("unresolved", cx.theme().warning)
+        };
+        let path = file.path.clone();
+        let body = match &view.body {
+            ConflictBody::Resolver(state, _) => ConflictResolv::new(state)
+                .yours_label(format!("Your changes · {}", file.labels.yours))
+                .upstream_label(format!("Upstream changes · {}", file.labels.upstream))
+                .into_any_element(),
+            ConflictBody::Unparsed(error) => div()
+                .px(px(10.))
+                .py(px(6.))
+                .text_color(cx.theme().danger)
+                .child(error.clone())
+                .into_any_element(),
+        };
+        v_flex()
+            .w_full()
+            .flex_none()
+            .child(
+                h_flex()
                     .flex_none()
-                    .child(
-                        h_flex()
-                            .flex_none()
-                            .h(px(28.))
-                            .px(px(10.))
-                            .gap_2()
-                            .bg(cx.theme().sidebar)
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .child(div().font_family(mono.clone()).child(file.path.clone()))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .px(px(6.))
-                                    .rounded(px(4.))
-                                    .text_size(px(10.5))
-                                    .bg(warning.opacity(0.15))
-                                    .text_color(warning)
-                                    .child("unresolved"),
-                            ),
-                    )
+                    .h(px(28.))
+                    .px(px(10.))
+                    .gap_2()
+                    .bg(cx.theme().sidebar)
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(div().font_family(mono.clone()).child(file.path.clone()))
                     .child(
                         div()
-                            .px(px(10.))
-                            .py(px(6.))
-                            .text_color(muted)
-                            .child("The conflict resolver mounts here"),
+                            .flex_none()
+                            .px(px(6.))
+                            .rounded(px(4.))
+                            .text_size(px(10.5))
+                            .bg(badge_color.opacity(0.15))
+                            .text_color(badge_color)
+                            .child(badge),
                     )
-            }))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new(("conflict-resolve", ix))
+                            .primary()
+                            .xsmall()
+                            .label("Mark resolved")
+                            .disabled(!ready || self.op_running)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.mark_resolved(path.clone(), cx);
+                            })),
+                    ),
+            )
+            .child(body)
             .into_any_element()
     }
 
