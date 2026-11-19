@@ -865,6 +865,10 @@ Decided (owner, 2026-11-19):
   Your changes and Upstream changes, suffixed with the concrete ref. The
   backend maps git's sides to these labels per operation - a rebase swaps
   git's ours and theirs - in one place, `git_cli.rs`.
+- The pane labels say which side is fresher: the yours pane carries its
+  tip's absolute date on the committer's clock, the upstream pane the
+  difference as "5 days newer" or "2 hours older" ("same age" within a
+  minute).
 - Resolution writes are click-driven and narrow (section 3). Mark resolved
   per file writes the result and stages it; Reopen regenerates the markers
   through git's resolve-undo. Continue and abort run git's own continue and

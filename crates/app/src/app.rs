@@ -19,7 +19,7 @@ use diffie_core::review::{
 use diffie_core::search::{SearchHit, search_patch};
 
 use crate::settings::{LayoutMode, Settings, WindowSettings};
-use diffie_core::time::ago;
+use diffie_core::time::{ago, relative_age};
 use diffie_core::{
     BlameLine, ChangedRegion, Commit, Comparison, ConflictFile, ConflictLabels, FileState,
     FileStatus, FileSummary, NewSide, Oid, RepoState, Resolved, ReviewBackend, Scope, ScopedPatch,
@@ -4540,10 +4540,24 @@ impl ReviewApp {
                      Resolve it in the terminal, then reload.",
                 )
                 .into_any_element(),
-            ConflictBody::Resolver(state, _) => ConflictResolv::new(state)
-                .yours_label(format!("Your changes · {}", file.labels.yours))
-                .upstream_label(format!("Upstream changes · {}", file.labels.upstream))
-                .into_any_element(),
+            ConflictBody::Resolver(state, _) => {
+                let labels = &file.labels;
+                let mut yours = format!("Your changes · {}", labels.yours);
+                let mut upstream = format!("Upstream changes · {}", labels.upstream);
+                // Which side is fresher: the yours pane anchors with its
+                // absolute date, the upstream pane answers relative to it.
+                if labels.yours_time != 0 && labels.upstream_time != 0 {
+                    yours = format!("{yours} · {}", labels.yours_date);
+                    upstream = format!(
+                        "{upstream} · {}",
+                        relative_age(labels.upstream_time, labels.yours_time)
+                    );
+                }
+                ConflictResolv::new(state)
+                    .yours_label(yours)
+                    .upstream_label(upstream)
+                    .into_any_element()
+            }
             ConflictBody::Unparsed(error) => div()
                 .px(px(10.))
                 .py(px(6.))

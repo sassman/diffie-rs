@@ -586,17 +586,60 @@ impl GitCli {
     /// stage swap in [`ReviewBackend::conflicts`] this is the one place that
     /// maps git's ours/theirs to yours/upstream; the git terms leave neither.
     fn conflict_labels(&self, rebase: bool) -> Result<ConflictLabels> {
-        if rebase {
-            Ok(ConflictLabels {
-                yours: self.replayed_title()?,
-                upstream: self.onto_name()?,
-            })
+        let (yours, upstream, yours_rev, upstream_rev) = if rebase {
+            (
+                self.replayed_title()?,
+                self.onto_name()?,
+                "REBASE_HEAD".to_string(),
+                self.onto_oid().unwrap_or_default(),
+            )
         } else {
-            Ok(ConflictLabels {
-                yours: self.current_branch()?.unwrap_or_else(|| "HEAD".to_string()),
-                upstream: self.merged_name()?,
-            })
+            let merged = std::fs::read_to_string(self.git_path("MERGE_HEAD")?)
+                .unwrap_or_default()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            (
+                self.current_branch()?.unwrap_or_else(|| "HEAD".to_string()),
+                self.merged_name()?,
+                "HEAD".to_string(),
+                merged,
+            )
+        };
+        let (yours_time, yours_date) = self.commit_clock(&yours_rev).unwrap_or_default();
+        let (upstream_time, _) = self.commit_clock(&upstream_rev).unwrap_or_default();
+        Ok(ConflictLabels {
+            yours,
+            upstream,
+            yours_date,
+            yours_time,
+            upstream_time,
+        })
+    }
+
+    /// A tip's clock: unix seconds for the newer/older phrasing, and the
+    /// committer's own wall-clock date for display - the reviewer thinks
+    /// in that clock, not in UTC.
+    fn commit_clock(&self, rev: &str) -> Option<(i64, String)> {
+        if rev.is_empty() {
+            return None;
         }
+        let line = self
+            .try_read(&[
+                "log",
+                "-1",
+                "--format=%ct%x09%cd",
+                "--date=format:%Y-%m-%d %H:%M",
+                "--end-of-options",
+                rev,
+                "--",
+            ])
+            .ok()
+            .flatten()?;
+        let (seconds, date) = line.trim().split_once('\t')?;
+        Some((seconds.parse().ok()?, date.to_string()))
     }
 
     /// The name of what a merge is bringing in: the quoted ref of the
@@ -620,17 +663,9 @@ impl GitCli {
     /// a ref pointing at the recorded onto commit - refs/heads sort before
     /// refs/remotes, so a local branch wins - or that commit's short id.
     fn onto_name(&self) -> Result<String> {
-        let onto = ["rebase-merge", "rebase-apply"]
-            .iter()
-            .find_map(|dir| {
-                let state = self.git_path(dir).ok()?;
-                std::fs::read_to_string(state.join("onto")).ok()
-            })
-            .map(|text| text.trim().to_string())
-            .unwrap_or_default();
-        if onto.is_empty() {
+        let Some(onto) = self.onto_oid() else {
             return Ok("upstream".to_string());
-        }
+        };
         // Several refs can sit on the onto commit; only the start entry
         // `git rebase <upstream>` wrote knows which one the user meant.
         if let Some(reflog) = self.try_read(&[
@@ -661,6 +696,19 @@ impl GitCli {
             .map(|output| output.trim().to_string())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| Oid::new(onto).short().to_string()))
+    }
+
+    /// The oid a rebase replays onto, from either backend's state
+    /// directory.
+    fn onto_oid(&self) -> Option<String> {
+        ["rebase-merge", "rebase-apply"]
+            .iter()
+            .find_map(|dir| {
+                let state = self.git_path(dir).ok()?;
+                std::fs::read_to_string(state.join("onto")).ok()
+            })
+            .map(|text| text.trim().to_string())
+            .filter(|oid| !oid.is_empty())
     }
 
     /// The replayed commit's title: rebase-merge/message, or the subject of

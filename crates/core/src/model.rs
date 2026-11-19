@@ -231,6 +231,14 @@ pub struct ConflictFile {
 pub struct ConflictLabels {
     pub yours: String,
     pub upstream: String,
+    /// When the reviewer's tip was committed, on the committer's own
+    /// clock ("2026-11-17 14:02"). The yours pane anchors the comparison
+    /// with this absolute date; the upstream pane is phrased relative to
+    /// it from the two times below. Empty when the tip could not be read.
+    pub yours_date: String,
+    /// The two tips' commit times, unix seconds; 0 when unreadable.
+    pub yours_time: i64,
+    pub upstream_time: i64,
 }
 
 /// The commit that wrote a line, and the line's number in that commit's
