@@ -30,6 +30,31 @@ fn git(directory: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+/// Like [`git`], but committing at a fixed instant so a test can assert
+/// the clocks the conflict labels carry.
+fn git_at(directory: &Path, date: &str, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Ada")
+        .env("GIT_AUTHOR_EMAIL", "ada@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Ada")
+        .env("GIT_COMMITTER_EMAIL", "ada@example.invalid")
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 fn lines(changed: &[(usize, &str)]) -> String {
     (1..=10)
         .map(|number| {
@@ -1413,18 +1438,37 @@ impl ConflictFixture {
         // diff3 markers carry the base section the resolver needs. Set on
         // the throwaway repository; the app never touches a repo's config.
         git(root, &["config", "merge.conflictStyle", "diff3"]);
+        // Fixed commit instants so the label tests can assert the tips'
+        // clocks: feat's tip is four days before main's, feat's first
+        // commit five days before.
         std::fs::write(root.join("t.txt"), "base line\n").unwrap();
         std::fs::write(root.join("calm.txt"), "calm\n").unwrap();
         git(root, &["add", "."]);
-        git(root, &["commit", "-q", "-m", "base"]);
+        git_at(
+            root,
+            "2026-11-01T10:00:00+01:00",
+            &["commit", "-q", "-m", "base"],
+        );
         git(root, &["checkout", "-q", "-b", "feat"]);
         std::fs::write(root.join("t.txt"), "feat line\n").unwrap();
-        git(root, &["commit", "-q", "-am", "feat rewrites t"]);
+        git_at(
+            root,
+            "2026-11-03T10:00:00+01:00",
+            &["commit", "-q", "-am", "feat rewrites t"],
+        );
         std::fs::write(root.join("calm.txt"), "calm feat\n").unwrap();
-        git(root, &["commit", "-q", "-am", "feat edits calm"]);
+        git_at(
+            root,
+            "2026-11-04T10:00:00+01:00",
+            &["commit", "-q", "-am", "feat edits calm"],
+        );
         git(root, &["checkout", "-q", "main"]);
         std::fs::write(root.join("t.txt"), "main line\n").unwrap();
-        git(root, &["commit", "-q", "-am", "main rewrites t"]);
+        git_at(
+            root,
+            "2026-11-08T10:00:00+01:00",
+            &["commit", "-q", "-am", "main rewrites t"],
+        );
         Self { directory }
     }
 
@@ -1493,6 +1537,13 @@ fn conflicts_name_the_sides_of_a_merge() {
     assert_eq!(file.upstream.as_deref(), Some("feat line\n"));
     assert_eq!(file.labels.yours, "main");
     assert_eq!(file.labels.upstream, "feat");
+    // The yours tip anchors the recency comparison: its absolute date on
+    // the committer's clock, and feat's tip four days behind it.
+    assert_eq!(file.labels.yours_date, "2026-11-08 10:00");
+    assert_eq!(
+        file.labels.yours_time - file.labels.upstream_time,
+        4 * 86_400
+    );
     // diff3 working text: both sides, the base section, all markers.
     assert!(file.working.contains("<<<<<<<"));
     assert!(file.working.contains("|||||||"));
@@ -1517,6 +1568,13 @@ fn conflicts_swap_the_sides_of_a_rebase() {
     assert_eq!(file.upstream.as_deref(), Some("main line\n"));
     assert_eq!(file.labels.yours, "feat rewrites t");
     assert_eq!(file.labels.upstream, "main");
+    // The replayed commit anchors the comparison; the onto tip is five
+    // days ahead of it.
+    assert_eq!(file.labels.yours_date, "2026-11-03 10:00");
+    assert_eq!(
+        file.labels.upstream_time - file.labels.yours_time,
+        5 * 86_400
+    );
     assert!(file.working.contains("<<<<<<<"));
 }
 
