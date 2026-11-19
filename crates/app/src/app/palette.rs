@@ -96,14 +96,14 @@ impl ReviewApp {
                 command: PaletteCommand::Back,
                 label: "Go back".into(),
                 keywords: &["return", "previous", "jump", "definition", "history"],
-                enabled: !self.back_stack.is_empty(),
+                enabled: !self.review.back_stack.is_empty(),
                 hint: Some(Box::new(JumpBack)),
             },
             PaletteEntry {
                 command: PaletteCommand::Forward,
                 label: "Go forward".into(),
                 keywords: &["next", "jump", "definition", "history"],
-                enabled: !self.forward_stack.is_empty(),
+                enabled: !self.review.forward_stack.is_empty(),
                 hint: Some(Box::new(JumpForward)),
             },
             PaletteEntry {
@@ -116,7 +116,7 @@ impl ReviewApp {
                 hint: None,
             },
         ];
-        if let Some(pull) = &self.pull {
+        if let Some(pull) = &self.review.pull {
             let number = pull.request.number;
             for with_comments in [true, false] {
                 entries.push(PaletteEntry {

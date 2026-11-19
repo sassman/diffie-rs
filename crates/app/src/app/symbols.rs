@@ -192,19 +192,19 @@ impl ReviewApp {
         // The views describe the revisions of the load they were built
         // for; entries and the link point into those.
         self.symbols.clear();
-        let Some(resolved) = self.resolved.clone() else {
+        let Some(resolved) = self.review.resolved.clone() else {
             return;
         };
         // A combined pick of non-contiguous commits is no tree git can
         // list; the branch tip stands in for it.
-        let new_rev = match &self.new_side {
+        let new_rev = match &self.review.new_side {
             Some(NewSide::Commit(id)) => id.clone(),
             _ => resolved.head.clone(),
         };
-        let shows_uncommitted = self.comparison.uncommitted
-            && (self.scope != ScopeKind::Custom || self.picked_uncommitted);
+        let shows_uncommitted = self.review.comparison.uncommitted
+            && (self.review.scope != ScopeKind::Custom || self.review.picked_uncommitted);
         let worktree: Vec<String> = if shows_uncommitted {
-            self.uncommitted_paths.iter().cloned().collect()
+            self.review.uncommitted_paths.iter().cloned().collect()
         } else {
             Vec::new()
         };
@@ -437,6 +437,7 @@ impl ReviewApp {
     fn synthetic_entry(&self, path: &str) -> bool {
         self.symbols.entry(path).is_some()
             || self
+                .review
                 .orphan_files
                 .iter()
                 .any(|file| file.path().as_ref() == path)
@@ -578,7 +579,7 @@ impl ReviewApp {
             );
         });
         self.mark_landing(key.clone(), DiffSide::Modified, line, cx);
-        self.current_file = Some(key);
+        self.review.current_file = Some(key);
         cx.notify();
     }
 
@@ -609,7 +610,7 @@ impl ReviewApp {
             .cloned()
             .collect();
         if self.show_other_revisions {
-            files.extend(self.orphan_files.iter().cloned());
+            files.extend(self.review.orphan_files.iter().cloned());
         }
         files.sort_by(|a, b| tree_order(a.path().as_ref(), b.path().as_ref()));
         files.extend(self.symbols.entries.iter().map(DefinitionEntry::file));
@@ -634,8 +635,8 @@ impl ReviewApp {
         self.symbols
             .entries
             .retain(|entry| entry.key.as_ref() != key);
-        if self.current_file.as_deref() == Some(key) {
-            self.current_file = None;
+        if self.review.current_file.as_deref() == Some(key) {
+            self.review.current_file = None;
         }
         self.sync_diff_files(cx);
         // Closing an entry below must not lose the reader's place above;
@@ -754,7 +755,7 @@ impl ReviewApp {
             .rsplit_once('/')
             .map_or(entry.path.as_str(), |(_, name)| name)
             .to_string();
-        let selected = self.current_file.as_ref() == Some(&entry.key);
+        let selected = self.review.current_file.as_ref() == Some(&entry.key);
         let target = entry.key.clone();
         let closing = entry.key.clone();
         let tip: SharedString = format!("{} - {}", entry.path, entry.note()).into();

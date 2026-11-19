@@ -288,7 +288,7 @@ impl ReviewApp {
         cx.notify();
         let backend = self.backend.clone();
         let forge = self.forge.clone();
-        let mode = self.comparison.mode;
+        let mode = self.review.comparison.mode;
         self._open_pull = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -314,10 +314,11 @@ impl ReviewApp {
     }
 
     /// Replaces what the window reviews, as if the app had been started on
-    /// the new comparison: every piece of per-review state resets, then
-    /// `reload` rebuilds the view. The window itself, the settings, the
-    /// theme and the palette stay. Kept next to nothing: every per-review
-    /// field of `ReviewApp` must be reset here or rebuilt by `install`.
+    /// the new comparison: the one `PerReview` value is swapped for a
+    /// fresh one, then `reload` rebuilds the view. The window itself, the
+    /// settings, the theme and the palette stay; the picker and search
+    /// inputs are cleared by `open_pull`, which has the window this async
+    /// completion lacks.
     fn adopt(&mut self, comparison: Comparison, pull: Option<Pull>, cx: &mut Context<Self>) {
         // A pending save still writes the old review file before the
         // review is replaced: directly when no save runs (the task
@@ -327,59 +328,17 @@ impl ReviewApp {
         if self.save_pending {
             if self.save_running {
                 self.parting_save = self
+                    .review
                     .reviews
                     .as_ref()
-                    .map(|set| (set.mine.clone(), self.review_path.clone()));
+                    .map(|set| (set.mine.clone(), self.review.review_path.clone()));
             } else {
                 self.write_review(cx);
             }
         }
-        self.comparison = comparison;
-        self.pull = pull;
-        self.publish_status = None;
-        self.pull_status = None;
-        self.pull_status_error = None;
-        self._pull_status = Task::ready(());
-        self.scope = ScopeKind::NewForMe;
-        self.picked = Vec::new();
-        self.picked_uncommitted = true;
-        self.uncommitted_paths = HashSet::new();
-        self.resolved = None;
-        self.commits = Arc::default();
-        self.files = Arc::default();
-        self.branch = Vec::new();
-        self.touched = HashMap::new();
-        self.new_side = None;
-        self.blobs = HashMap::new();
-        self.reviews = None;
-        self.review_path = PathBuf::new();
-        self.placed = Vec::new();
-        self.orphan_files = Vec::new();
-        self.comment_cursor = None;
-        self.unfolded = HashSet::new();
-        self.fading = HashSet::new();
-        self.back_stack = Vec::new();
-        self.forward_stack = Vec::new();
-        self.search_open = false;
-        self.search_all = false;
-        self.whole_patch = None;
-        self.search_hits = Vec::new();
-        self.search_all_hits = Vec::new();
-        self.search_cursor = None;
-        self.pending_jump = None;
-        self.pending_comment_jump = false;
-        self.collapsed_folders = HashSet::new();
-        self.last_picked = None;
-        self.hovered_commit = None;
-        self.hovered_line = None;
-        self.text_anchor = None;
-        self.text_lines = None;
-        self.pending_comment = None;
-        self.show_all_new = false;
-        self.show_all_reviewed = false;
-        self.draft = None;
-        self.answer = None;
-        self.current_file = None;
+        // The whole per-review value at once: the compiler keeps the swap
+        // complete, a field-by-field reset could silently miss one.
+        self.review = PerReview::fresh(comparison, pull);
         self.reload(cx);
     }
 }

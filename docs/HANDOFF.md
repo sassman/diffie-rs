@@ -309,7 +309,9 @@ palette-styled dialog listing open PRs first (drafts after the
 non-drafts), merged and closed behind a "Show merged and closed" row,
 each row with state, number, author, age and the checks' verdict in the
 PR widget's tones. Picking one swaps the current window over via
-`ReviewApp::adopt`, which resets every per-review field and reloads;
+`ReviewApp::adopt`, which swaps the one `PerReview` value (every
+per-review field lives in that struct, so the compiler keeps the reset
+complete) and reloads;
 `_open_pull` and the `pr_rows.generation` counter guard stale answers.
 
 A publish is separate steps, so each is testable alone:

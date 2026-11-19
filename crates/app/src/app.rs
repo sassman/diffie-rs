@@ -858,20 +858,13 @@ impl Default for FileView {
     }
 }
 
-pub struct ReviewApp {
-    backend: Arc<dyn ReviewBackend>,
-    repository: SharedString,
-    /// The linked worktree the review runs in, when it is not the primary
-    /// checkout; shown beside the project name.
-    worktree: Option<SharedString>,
+/// Everything that belongs to the review on screen, as one value: `adopt`
+/// replaces it wholesale, so the compiler keeps the swap complete. A new
+/// per-review field goes here, never on `ReviewApp` itself - there it
+/// would silently leak across a swap.
+struct PerReview {
     comparison: Comparison,
     pull: Option<Pull>,
-    /// The code host, for the picker's list and for opening a picked pull
-    /// request; `pull` carries the same forge once one is open. Only ever
-    /// asked on the reviewer's explicit action.
-    forge: Arc<dyn Forge>,
-    /// A publish or approval is on its way to the forge; one at a time.
-    publishing: bool,
     /// How the last publish went, and whether that was a failure. Its own
     /// line beside `notice`, which the next review save clears - and every
     /// publish ends in one.
@@ -905,23 +898,6 @@ pub struct ReviewApp {
     /// Synthetic snippet files for orphaned threads, kept apart from the
     /// Diff's set so toggle flips can join or withhold them.
     orphan_files: Vec<DiffFile>,
-    /// Symbol navigation: the lookup tables, the hovered link and the
-    /// definition entries joined to the Diff's set.
-    symbols: symbols::Symbols,
-    diff: Entity<DiffState>,
-    /// The reviewer's own split-or-unified choice. The view falls back to
-    /// Unified while the window is too narrow for a split, without losing it.
-    manual_mode: DiffMode,
-    /// The machine-wide settings file's state, kept current and written
-    /// behind `persist_settings`'s coalescing delay.
-    settings: Settings,
-    settings_pending: bool,
-    settings_running: bool,
-    /// Soft-wrap long lines instead of scrolling the diff horizontally.
-    wrap: bool,
-    /// Hide changes in amount of whitespace. The diff is rebuilt with
-    /// `--ignore-all-space`, so whitespace-only files drop out of the view.
-    ignore_whitespace: bool,
     /// The comment `n`/`p` last jumped to, so the walk continues from
     /// there instead of restarting at the top.
     comment_cursor: Option<String>,
@@ -938,19 +914,8 @@ pub struct ReviewApp {
     /// jump clears it: forward dies with new navigation, as in a browser.
     forward_stack: Vec<DiffLinePosition>,
     search_open: bool,
-    palette: Entity<palette::CommandState>,
-    pr_picker: Entity<palette::CommandState>,
-    /// What the pull-request picker shows; refetched every time it opens.
-    pr_rows: pr_picker::PrRows,
-    /// Replacing either task drops an answer in flight, so a reopened
-    /// picker or a second pick never installs a stale one.
-    _pr_rows: Task<()>,
-    _open_pull: Task<()>,
-    search_query: Entity<InputState>,
     /// Extend the search past the picked commits to the whole branch.
     search_all: bool,
-    /// The scoped patch's text, kept so the search sees what the view shows.
-    patch_text: Arc<String>,
     /// The whole-branch patch, fetched when the reviewer extends the search;
     /// keyed by the load revision that fetched it, so a reload drops it.
     whole_patch: Option<(usize, Arc<String>)>,
@@ -962,21 +927,13 @@ pub struct ReviewApp {
     /// Land on the first open comment after the reload a comment jump
     /// triggered by widening the scope.
     pending_comment_jump: bool,
-    _whole_patch: Task<()>,
     /// Folders the reviewer closed in the file panel, by full path.
     collapsed_folders: HashSet<String>,
-    runs: Vec<ChangedRun>,
-    picker_query: Entity<InputState>,
-    picker_focus: FocusHandle,
-    layout: Entity<ResizableState>,
     /// Shift-click anchors on the commit toggled last.
     last_picked: Option<Oid>,
     hovered_commit: Option<Oid>,
     /// The diff line under the pointer; carries the add-comment marker.
     hovered_line: Option<DiffLinePosition>,
-    /// Whether the primary button is held, tracked in the capture phase so
-    /// text-drag tracking survives handlers that stop propagation.
-    mouse_down: bool,
     /// The line under the pointer when the primary button went down; a text
     /// drag that ends later selected from here.
     text_anchor: Option<DiffLinePosition>,
@@ -994,6 +951,112 @@ pub struct ReviewApp {
     draft: Option<Draft>,
     answer: Option<Answer>,
     current_file: Option<SharedString>,
+}
+
+impl PerReview {
+    /// The state every review starts from, before its first load.
+    fn fresh(comparison: Comparison, pull: Option<Pull>) -> Self {
+        Self {
+            comparison,
+            pull,
+            publish_status: None,
+            pull_status: None,
+            pull_status_error: None,
+            _pull_status: Task::ready(()),
+            scope: ScopeKind::NewForMe,
+            picked: Vec::new(),
+            picked_uncommitted: true,
+            uncommitted_paths: HashSet::new(),
+            resolved: None,
+            commits: Arc::default(),
+            files: Arc::default(),
+            branch: Vec::new(),
+            touched: HashMap::new(),
+            new_side: None,
+            blobs: HashMap::new(),
+            reviews: None,
+            review_path: PathBuf::new(),
+            placed: Vec::new(),
+            orphan_files: Vec::new(),
+            comment_cursor: None,
+            unfolded: HashSet::new(),
+            fading: HashSet::new(),
+            back_stack: Vec::new(),
+            forward_stack: Vec::new(),
+            search_open: false,
+            search_all: false,
+            whole_patch: None,
+            search_hits: Vec::new(),
+            search_all_hits: Vec::new(),
+            search_cursor: None,
+            pending_jump: None,
+            pending_comment_jump: false,
+            collapsed_folders: HashSet::new(),
+            last_picked: None,
+            hovered_commit: None,
+            hovered_line: None,
+            text_anchor: None,
+            text_lines: None,
+            pending_comment: None,
+            show_all_new: false,
+            show_all_reviewed: false,
+            draft: None,
+            answer: None,
+            current_file: None,
+        }
+    }
+}
+
+pub struct ReviewApp {
+    backend: Arc<dyn ReviewBackend>,
+    repository: SharedString,
+    /// The linked worktree the review runs in, when it is not the primary
+    /// checkout; shown beside the project name.
+    worktree: Option<SharedString>,
+    /// The review on screen; see [`PerReview`].
+    review: PerReview,
+    /// The code host, for the picker's list and for opening a picked pull
+    /// request; `pull` carries the same forge once one is open. Only ever
+    /// asked on the reviewer's explicit action.
+    forge: Arc<dyn Forge>,
+    /// A publish or approval is on its way to the forge; one at a time.
+    publishing: bool,
+    /// Symbol navigation: the lookup tables, the hovered link and the
+    /// definition entries joined to the Diff's set.
+    symbols: symbols::Symbols,
+    diff: Entity<DiffState>,
+    /// The reviewer's own split-or-unified choice. The view falls back to
+    /// Unified while the window is too narrow for a split, without losing it.
+    manual_mode: DiffMode,
+    /// The machine-wide settings file's state, kept current and written
+    /// behind `persist_settings`'s coalescing delay.
+    settings: Settings,
+    settings_pending: bool,
+    settings_running: bool,
+    /// Soft-wrap long lines instead of scrolling the diff horizontally.
+    wrap: bool,
+    /// Hide changes in amount of whitespace. The diff is rebuilt with
+    /// `--ignore-all-space`, so whitespace-only files drop out of the view.
+    ignore_whitespace: bool,
+    palette: Entity<palette::CommandState>,
+    pr_picker: Entity<palette::CommandState>,
+    /// What the pull-request picker shows; refetched every time it opens.
+    pr_rows: pr_picker::PrRows,
+    /// Replacing either task drops an answer in flight, so a reopened
+    /// picker or a second pick never installs a stale one.
+    _pr_rows: Task<()>,
+    _open_pull: Task<()>,
+    search_query: Entity<InputState>,
+    /// The scoped patch's text, kept so the search sees what the view shows.
+    patch_text: Arc<String>,
+    _whole_patch: Task<()>,
+    runs: Vec<ChangedRun>,
+    picker_query: Entity<InputState>,
+    picker_focus: FocusHandle,
+    layout: Entity<ResizableState>,
+    /// Whether the primary button is held, tracked in the capture phase so
+    /// text-drag tracking survives handlers that stop propagation.
+    mouse_down: bool,
     show_other_revisions: bool,
     sidebar_visible: bool,
     loading: bool,
@@ -1076,7 +1139,7 @@ impl ReviewApp {
             cx.observe(&diff, |_, _, cx| cx.notify()),
             cx.subscribe(&diff, |this, _, event: &DiffEvent, cx| {
                 if let DiffEvent::SelectionChanged(Some(range)) = event {
-                    this.current_file = Some(range.path().clone());
+                    this.review.current_file = Some(range.path().clone());
                     cx.notify();
                 }
             }),
@@ -1099,29 +1162,9 @@ impl ReviewApp {
             backend,
             repository,
             worktree,
-            comparison,
-            pull,
+            review: PerReview::fresh(comparison, pull),
             forge,
             publishing: false,
-            publish_status: None,
-            pull_status: None,
-            pull_status_error: None,
-            _pull_status: Task::ready(()),
-            scope: ScopeKind::NewForMe,
-            picked: Vec::new(),
-            picked_uncommitted: true,
-            uncommitted_paths: HashSet::new(),
-            resolved: None,
-            commits: Arc::default(),
-            files: Arc::default(),
-            branch: Vec::new(),
-            touched: HashMap::new(),
-            new_side: None,
-            blobs: HashMap::new(),
-            reviews: None,
-            review_path: PathBuf::new(),
-            placed: Vec::new(),
-            orphan_files: Vec::new(),
             symbols: symbols::Symbols::new(window, cx),
             diff,
             manual_mode: mode,
@@ -1130,44 +1173,19 @@ impl ReviewApp {
             settings_running: false,
             wrap: false,
             ignore_whitespace: false,
-            comment_cursor: None,
-            unfolded: HashSet::new(),
-            fading: HashSet::new(),
-            back_stack: Vec::new(),
-            forward_stack: Vec::new(),
-            search_open: false,
             palette: cx.new(|cx| palette::CommandState::new(window, cx)),
             pr_picker: cx.new(|cx| palette::CommandState::new(window, cx)),
             pr_rows: Default::default(),
             _pr_rows: Task::ready(()),
             _open_pull: Task::ready(()),
             search_query,
-            search_all: false,
             patch_text: Arc::default(),
-            whole_patch: None,
-            search_hits: Vec::new(),
-            search_all_hits: Vec::new(),
-            search_cursor: None,
-            pending_jump: None,
-            pending_comment_jump: false,
             _whole_patch: Task::ready(()),
-            collapsed_folders: HashSet::new(),
             runs: Vec::new(),
             picker_query,
             picker_focus: cx.focus_handle(),
             layout: cx.new(|_| ResizableState::default()),
-            last_picked: None,
-            hovered_commit: None,
-            hovered_line: None,
             mouse_down: false,
-            text_anchor: None,
-            text_lines: None,
-            pending_comment: None,
-            show_all_new: false,
-            show_all_reviewed: false,
-            draft: None,
-            answer: None,
-            current_file: None,
             // On by default: the owner wants other revisions' comments in
             // view unless they are toggled away.
             show_other_revisions: true,
@@ -1192,12 +1210,12 @@ impl ReviewApp {
     // ---- loading -------------------------------------------------------
 
     fn core_scope(&self) -> Scope {
-        match self.scope {
+        match self.review.scope {
             ScopeKind::NewForMe => Scope::NewForMe,
             ScopeKind::WholeBranch => Scope::WholeBranch,
             ScopeKind::Custom => Scope::Commits {
-                picked: self.picked.clone(),
-                uncommitted: self.comparison.uncommitted && self.picked_uncommitted,
+                picked: self.review.picked.clone(),
+                uncommitted: self.review.comparison.uncommitted && self.review.picked_uncommitted,
             },
         }
     }
@@ -1208,9 +1226,9 @@ impl ReviewApp {
         self.loading = true;
         self.error = None;
         self.notice = None;
-        self.draft = None;
+        self.review.draft = None;
         let backend = self.backend.clone();
-        let comparison = self.comparison.clone();
+        let comparison = self.review.comparison.clone();
         let scope = self.core_scope();
         // A reload can find commits HEAD gained since the last load. Picking
         // every commit means "everything", so the load re-picks the fresh
@@ -1219,12 +1237,13 @@ impl ReviewApp {
         // Whoever reloads wants the present: the pull request may have been
         // merged, approved or turned red since the last look.
         self.refresh_pull_status(cx);
-        let extend_picks = self.scope == ScopeKind::Custom
+        let extend_picks = self.review.scope == ScopeKind::Custom
             && self
+                .review
                 .commits
                 .iter()
-                .all(|commit| self.picked.contains(&commit.id));
-        let mine = self.reviews.as_ref().map(|set| set.mine.clone());
+                .all(|commit| self.review.picked.contains(&commit.id));
+        let mine = self.review.reviews.as_ref().map(|set| set.mine.clone());
         let generation = self.review_generation;
         let ignore_whitespace = self.ignore_whitespace;
         tracing::debug!(revision, "reload requested");
@@ -1266,7 +1285,8 @@ impl ReviewApp {
             Ok(mut loaded) => {
                 self.patch_text = Arc::new(std::mem::take(&mut loaded.patch.text));
                 // The whole-branch cache belongs to the load that made it.
-                self.whole_patch = self
+                self.review.whole_patch = self
+                    .review
                     .whole_patch
                     .take()
                     .filter(|(cached, _)| *cached == revision);
@@ -1302,10 +1322,10 @@ impl ReviewApp {
                     .filter(|file| file.status == FileStatus::Deleted)
                     .map(|file| file.path.clone())
                     .collect();
-                self.orphan_files = loaded.orphan_files;
+                self.review.orphan_files = loaded.orphan_files;
                 let mut diff_files = loaded.files;
-                if self.show_other_revisions && !self.orphan_files.is_empty() {
-                    diff_files.extend(self.orphan_files.iter().cloned());
+                if self.show_other_revisions && !self.review.orphan_files.is_empty() {
+                    diff_files.extend(self.review.orphan_files.iter().cloned());
                     diff_files.sort_by(|a, b| tree_order(a.path().as_ref(), b.path().as_ref()));
                 }
                 self.diff.update(cx, |state, cx| {
@@ -1360,18 +1380,18 @@ impl ReviewApp {
                         cx,
                     );
                 });
-                self.resolved = Some(loaded.resolved);
-                self.commits = Arc::new(loaded.commits);
+                self.review.resolved = Some(loaded.resolved);
+                self.review.commits = Arc::new(loaded.commits);
                 if let Some(picked) = loaded.picked {
-                    self.picked = picked;
+                    self.review.picked = picked;
                 }
                 self.runs = loaded.runs;
-                self.files = Arc::new(loaded.patch.files);
-                self.branch = loaded.branch;
-                self.touched = loaded.touched;
-                self.uncommitted_paths = loaded.uncommitted_paths;
-                self.new_side = Some(loaded.patch.new_side);
-                self.blobs = loaded.blobs;
+                self.review.files = Arc::new(loaded.patch.files);
+                self.review.branch = loaded.branch;
+                self.review.touched = loaded.touched;
+                self.review.uncommitted_paths = loaded.uncommitted_paths;
+                self.review.new_side = Some(loaded.patch.new_side);
+                self.review.blobs = loaded.blobs;
                 // The reviewer kept working while the load ran: the live
                 // review file is newer than the snapshot the load carried,
                 // and installing that snapshot would wipe those edits from
@@ -1385,25 +1405,26 @@ impl ReviewApp {
                         .iter()
                         .map(|thread| thread.comment.id.clone())
                         .collect();
-                    if let Some(live) = self.reviews.take() {
+                    if let Some(live) = self.review.reviews.take() {
                         loaded.reviews.mine = live.mine;
                     }
                     loaded.placed.extend(
-                        self.placed
+                        self.review
+                            .placed
                             .drain(..)
                             .filter(|placed| !known.contains(&placed.id)),
                     );
                 }
-                self.reviews = Some(loaded.reviews);
-                self.review_path = loaded.review_path;
-                self.placed = loaded.placed;
+                self.review.reviews = Some(loaded.reviews);
+                self.review.review_path = loaded.review_path;
+                self.review.placed = loaded.placed;
                 // A fresh view reads from the top, so the first file still
                 // open for review - expanded and unticked - is the one `r`
                 // and the file stepper act on until the reader moves. The
                 // collapsed headers leading the list (reviewed, generated,
                 // removed) are not being read, and with no current file at
                 // all, `r` on the opening screen did nothing.
-                self.current_file = {
+                self.review.current_file = {
                     let diff = self.diff.read(cx);
                     diff.files()
                         .iter()
@@ -1416,14 +1437,14 @@ impl ReviewApp {
                 if loaded.completed_cleared {
                     self.save_review(cx);
                 }
-                if let Some((path, side, line)) = self.pending_jump.take() {
+                if let Some((path, side, line)) = self.review.pending_jump.take() {
                     self.show_hit(&path, side, line, cx);
                 }
-                if std::mem::take(&mut self.pending_comment_jump) {
-                    self.comment_cursor = None;
+                if std::mem::take(&mut self.review.pending_comment_jump) {
+                    self.review.comment_cursor = None;
                     self.jump_comment(true, cx);
                 }
-                if self.search_open {
+                if self.review.search_open {
                     self.run_search(cx);
                 }
                 self.build_symbol_views(cx);
@@ -1431,10 +1452,10 @@ impl ReviewApp {
             Err(error) => {
                 self.diff.update(cx, |state, cx| state.set_files([], cx));
                 self.symbols.clear();
-                self.files = Arc::default();
-                self.placed.clear();
-                self.pending_jump = None;
-                self.pending_comment_jump = false;
+                self.review.files = Arc::default();
+                self.review.placed.clear();
+                self.review.pending_jump = None;
+                self.review.pending_comment_jump = false;
                 self.error = Some(error.into());
             }
         }
@@ -1459,9 +1480,10 @@ impl ReviewApp {
         // ran, and the edit made meanwhile must still reach the old file.
         let parked = self.parting_save.take();
         let live = || {
-            self.reviews
+            self.review
+                .reviews
                 .as_ref()
-                .map(|set| (set.mine.clone(), self.review_path.clone()))
+                .map(|set| (set.mine.clone(), self.review.review_path.clone()))
         };
         let Some((mut file, path)) = parked.or_else(live) else {
             self.save_pending = false;
@@ -1495,57 +1517,59 @@ impl ReviewApp {
     // ---- scope and commits ---------------------------------------------
 
     fn set_scope(&mut self, scope: ScopeKind, cx: &mut Context<Self>) {
-        if self.scope == scope {
+        if self.review.scope == scope {
             return;
         }
         // An empty custom scope shows nothing; start it from every commit.
-        if scope == ScopeKind::Custom && self.picked.is_empty() {
-            self.picked = self
+        if scope == ScopeKind::Custom && self.review.picked.is_empty() {
+            self.review.picked = self
+                .review
                 .commits
                 .iter()
                 .map(|commit| commit.id.clone())
                 .collect();
         }
-        self.scope = scope;
+        self.review.scope = scope;
         self.reload(cx);
     }
 
     /// Entering the custom scope from another starts from "all checked",
     /// uncommitted layer included; unchecking then narrows from there.
     fn enter_custom(&mut self) {
-        if self.scope != ScopeKind::Custom {
-            self.picked = self
+        if self.review.scope != ScopeKind::Custom {
+            self.review.picked = self
+                .review
                 .commits
                 .iter()
                 .map(|commit| commit.id.clone())
                 .collect();
-            self.picked_uncommitted = true;
+            self.review.picked_uncommitted = true;
         }
-        self.scope = ScopeKind::Custom;
+        self.review.scope = ScopeKind::Custom;
     }
 
     fn toggle_commit(&mut self, id: &Oid, cx: &mut Context<Self>) {
         self.enter_custom();
-        match self.picked.iter().position(|picked| picked == id) {
+        match self.review.picked.iter().position(|picked| picked == id) {
             Some(index) => {
-                self.picked.remove(index);
+                self.review.picked.remove(index);
             }
-            None => self.picked.push(id.clone()),
+            None => self.review.picked.push(id.clone()),
         }
         self.reload(cx);
     }
 
     fn toggle_uncommitted(&mut self, cx: &mut Context<Self>) {
         self.enter_custom();
-        self.picked_uncommitted = !self.picked_uncommitted;
+        self.review.picked_uncommitted = !self.review.picked_uncommitted;
         self.reload(cx);
     }
 
     fn pick_many(&mut self, ids: Vec<Oid>, checked: bool, cx: &mut Context<Self>) {
         self.enter_custom();
-        self.picked.retain(|picked| !ids.contains(picked));
+        self.review.picked.retain(|picked| !ids.contains(picked));
         if checked {
-            self.picked.extend(ids);
+            self.review.picked.extend(ids);
         }
         self.reload(cx);
     }
@@ -1553,21 +1577,25 @@ impl ReviewApp {
     /// A click on a picker row. Shift checks the run from the last toggled
     /// commit; a plain click toggles one.
     fn picker_click(&mut self, id: &Oid, shift: bool, cx: &mut Context<Self>) {
-        let position =
-            |id: &Oid| -> Option<usize> { self.commits.iter().position(|commit| &commit.id == id) };
+        let position = |id: &Oid| -> Option<usize> {
+            self.review
+                .commits
+                .iter()
+                .position(|commit| &commit.id == id)
+        };
         if shift
-            && let Some(last) = self.last_picked.clone()
+            && let Some(last) = self.review.last_picked.clone()
             && let (Some(from), Some(to)) = (position(&last), position(id))
         {
-            let run: Vec<Oid> = self.commits[from.min(to)..=from.max(to)]
+            let run: Vec<Oid> = self.review.commits[from.min(to)..=from.max(to)]
                 .iter()
                 .map(|commit| commit.id.clone())
                 .collect();
-            self.last_picked = Some(id.clone());
+            self.review.last_picked = Some(id.clone());
             self.pick_many(run, true, cx);
             return;
         }
-        self.last_picked = Some(id.clone());
+        self.review.last_picked = Some(id.clone());
         self.toggle_commit(id, cx);
     }
 
@@ -1577,34 +1605,39 @@ impl ReviewApp {
         if self.publishing {
             return;
         }
-        std::mem::swap(&mut self.comparison.source, &mut self.comparison.target);
+        std::mem::swap(
+            &mut self.review.comparison.source,
+            &mut self.review.comparison.target,
+        );
         // A pinned revision (--pr) belongs to its display name; keep the
         // pairs together.
         std::mem::swap(
-            &mut self.comparison.source_rev,
-            &mut self.comparison.target_rev,
+            &mut self.review.comparison.source_rev,
+            &mut self.review.comparison.target_rev,
         );
-        self.picked.clear();
-        self.picked_uncommitted = true;
-        self.scope = ScopeKind::NewForMe;
+        self.review.picked.clear();
+        self.review.picked_uncommitted = true;
+        self.review.scope = ScopeKind::NewForMe;
         // The review file belongs to the other direction.
-        self.reviews = None;
+        self.review.reviews = None;
         self.reload(cx);
     }
 
     /// Index of the first commit that was already covered by the last
     /// completed review. Commits before it are new for this reviewer.
     fn reviewed_from(&self) -> Option<usize> {
-        let completed = self.reviews.as_ref()?.mine.completed.as_ref()?;
-        self.commits
+        let completed = self.review.reviews.as_ref()?.mine.completed.as_ref()?;
+        self.review
+            .commits
             .iter()
             .position(|commit| commit.id == completed.head)
     }
 
     fn in_scope(&self) -> HashSet<Oid> {
-        match self.scope {
-            ScopeKind::Custom => self.picked.iter().cloned().collect(),
+        match self.review.scope {
+            ScopeKind::Custom => self.review.picked.iter().cloned().collect(),
             _ => self
+                .review
                 .commits
                 .iter()
                 .map(|commit| commit.id.clone())
@@ -1615,8 +1648,9 @@ impl ReviewApp {
     // ---- files -----------------------------------------------------------
 
     fn review_state(&self, path: &str) -> ReviewState {
-        let blob = self.blobs.get(path).and_then(Option::as_ref);
-        self.reviews
+        let blob = self.review.blobs.get(path).and_then(Option::as_ref);
+        self.review
+            .reviews
             .as_ref()
             .map_or(ReviewState::NotReviewed, |set| {
                 set.mine.review_state(path, blob)
@@ -1629,17 +1663,20 @@ impl ReviewApp {
         if self.symbols.entry(path).is_some() {
             return;
         }
-        let (Some(set), Some(resolved)) = (self.reviews.as_mut(), self.resolved.as_ref()) else {
+        let (Some(set), Some(resolved)) =
+            (self.review.reviews.as_mut(), self.review.resolved.as_ref())
+        else {
             return;
         };
         if reviewed {
             // A deleted file ticks with no blob: the deletion is the content.
-            let blob = self.blobs.get(path).cloned().flatten();
+            let blob = self.review.blobs.get(path).cloned().flatten();
             set.mine.mark_reviewed(path, blob, resolved.head.clone());
             // Completion means the whole branch is reviewed, not the scope on
             // screen: a narrow scope must never set the "last review" marker.
             set.mine.complete_if_all_reviewed(
-                self.branch
+                self.review
+                    .branch
                     .iter()
                     .map(|(path, blob)| (path.as_str(), blob.as_ref())),
                 &resolved.head,
@@ -1662,7 +1699,7 @@ impl ReviewApp {
                 .iter()
                 .map(|file| file.path().clone())
                 .collect();
-            self.current_file = match paths.iter().position(|candidate| candidate == path) {
+            self.review.current_file = match paths.iter().position(|candidate| candidate == path) {
                 Some(index) if index + 1 < paths.len() => Some(paths[index + 1].clone()),
                 _ => Some(path.to_string().into()),
             };
@@ -1673,6 +1710,7 @@ impl ReviewApp {
     /// Scrolls to the file's first comment, expanding the file on the way.
     fn reveal_first_comment(&mut self, path: &SharedString, cx: &mut Context<Self>) {
         let Some(placed) = self
+            .review
             .placed
             .iter()
             .filter(|placed| placed.path == path.as_ref())
@@ -1685,7 +1723,7 @@ impl ReviewApp {
         self.remember_position(cx);
         self.diff
             .update(cx, |state, cx| state.scroll_to_line(position, cx));
-        self.current_file = Some(path.clone());
+        self.review.current_file = Some(path.clone());
         cx.notify();
     }
 
@@ -1693,7 +1731,8 @@ impl ReviewApp {
     /// them: they fold away in the diff, and a number that kept ticking
     /// after "Done" would nag about nothing.
     fn resolved_ids(&self) -> HashSet<&str> {
-        self.reviews
+        self.review
+            .reviews
             .as_ref()
             .map(|set| {
                 set.threads()
@@ -1716,6 +1755,7 @@ impl ReviewApp {
     /// given state, so a jump can probe before flipping anything.
     fn comment_stops_showing(&self, earlier_shown: bool) -> Vec<(String, String, Side, usize)> {
         let order: HashMap<&str, usize> = self
+            .review
             .files
             .iter()
             .enumerate()
@@ -1726,6 +1766,7 @@ impl ReviewApp {
         // 2026-11-13: folded cards are reachable by their line markers).
         let resolved = self.resolved_ids();
         let mut stops: Vec<(String, String, Side, usize)> = self
+            .review
             .placed
             .iter()
             .filter(|placed| earlier_shown || !placed.earlier())
@@ -1767,11 +1808,12 @@ impl ReviewApp {
             // Only open threads justify hunting: a review where everything
             // is resolved has no stop a wider scope could surface.
             let any = self
+                .review
                 .reviews
                 .as_ref()
                 .is_some_and(|set| set.threads().iter().any(|thread| !thread.resolved()));
-            if any && self.scope != ScopeKind::WholeBranch {
-                self.pending_comment_jump = true;
+            if any && self.review.scope != ScopeKind::WholeBranch {
+                self.review.pending_comment_jump = true;
                 self.set_scope(ScopeKind::WholeBranch, cx);
             }
             // Still nothing at the whole branch: the comments' files are not
@@ -1782,7 +1824,7 @@ impl ReviewApp {
         // scrolled off the page is abandoned and the walk re-anchors at the
         // viewport, mirroring the change keys, so after paging away the key
         // guides within the page the reader is looking at.
-        let at = self.comment_cursor.as_ref().and_then(|id| {
+        let at = self.review.comment_cursor.as_ref().and_then(|id| {
             let index = stops.iter().position(|(sid, ..)| sid == id)?;
             let (_, path, side, line) = &stops[index];
             let position =
@@ -1801,6 +1843,7 @@ impl ReviewApp {
             (Some(index), false) => index - 1,
             (None, forward) => {
                 let order: HashMap<&str, usize> = self
+                    .review
                     .files
                     .iter()
                     .enumerate()
@@ -1843,7 +1886,7 @@ impl ReviewApp {
         };
         let (id, path, side, line) = stops[next].clone();
         let side = diff_side(side);
-        self.comment_cursor = Some(id);
+        self.review.comment_cursor = Some(id);
         let path = SharedString::from(path);
         self.remember_position(cx);
         self.diff.update(cx, |state, cx| {
@@ -1853,7 +1896,7 @@ impl ReviewApp {
             state.set_focused_ranges([DiffLineRange::new(path.clone(), side, line, line)], cx);
             state.scroll_to_line(DiffLinePosition::new(path.clone(), side, line), cx);
         });
-        self.current_file = Some(path);
+        self.review.current_file = Some(path);
         cx.notify();
     }
 
@@ -1865,9 +1908,9 @@ impl ReviewApp {
     fn remember_position(&mut self, cx: &mut Context<Self>) {
         // A fresh jump orphans the forward trail, as in a browser: forward
         // only ever retraces back steps.
-        self.forward_stack.clear();
+        self.review.forward_stack.clear();
         if let Some(top) = self.diff.read(cx).top_line() {
-            Self::push_page(&mut self.back_stack, top);
+            Self::push_page(&mut self.review.back_stack, top);
         }
     }
 
@@ -1910,9 +1953,9 @@ impl ReviewApp {
             .map(|file| file.path().clone())
             .collect();
         let (from, to) = if back {
-            (&mut self.back_stack, &mut self.forward_stack)
+            (&mut self.review.back_stack, &mut self.review.forward_stack)
         } else {
-            (&mut self.forward_stack, &mut self.back_stack)
+            (&mut self.review.forward_stack, &mut self.review.back_stack)
         };
         while let Some(position) = from.pop() {
             if !paths.iter().any(|path| path == position.path()) {
@@ -1921,7 +1964,7 @@ impl ReviewApp {
             if let Some(top) = top.clone() {
                 Self::push_page(to, top);
             }
-            self.current_file = Some(position.path().clone());
+            self.review.current_file = Some(position.path().clone());
             self.diff
                 .update(cx, |state, cx| state.scroll_to_top_line(position, cx));
             cx.notify();
@@ -1935,7 +1978,7 @@ impl ReviewApp {
     /// jump needs no follow-up: it sets `current_file` itself.
     fn follow_mark(&mut self, cx: &mut Context<Self>) {
         if let Some(range) = self.diff.read(cx).focused_ranges().first() {
-            self.current_file = Some(range.path().clone());
+            self.review.current_file = Some(range.path().clone());
             cx.notify();
         }
     }
@@ -1948,7 +1991,7 @@ impl ReviewApp {
             tracing::trace!(%path, was_collapsed = was, "reveal file");
             state.scroll_to_file(&path, cx);
         });
-        self.current_file = Some(path);
+        self.review.current_file = Some(path);
         cx.notify();
     }
 
@@ -1964,6 +2007,7 @@ impl ReviewApp {
             return;
         }
         let current = self
+            .review
             .current_file
             .as_ref()
             .and_then(|path| paths.iter().position(|candidate| candidate == path));
@@ -2081,7 +2125,7 @@ impl ReviewApp {
             return;
         }
         self.show_other_revisions = on;
-        if !self.orphan_files.is_empty() {
+        if !self.review.orphan_files.is_empty() {
             let top = self.diff.read(cx).top_line();
             self.sync_diff_files(cx);
             self.diff.update(cx, |state, cx| {
@@ -2109,7 +2153,7 @@ impl ReviewApp {
     /// The line range of the current text drag, when there is one. A drag
     /// that crosses files or sides keeps only its end line.
     fn text_selection_range(&self) -> Option<DiffLineRange> {
-        let (start, end) = self.text_lines.clone()?;
+        let (start, end) = self.review.text_lines.clone()?;
         if start.path() == end.path() && start.side() == end.side() {
             Some(DiffLineRange::new(
                 end.path().clone(),
@@ -2149,7 +2193,7 @@ impl ReviewApp {
         // Focus once the box is in the element tree. Focusing right away works
         // from a click but not from the keyboard shortcut.
         cx.on_next_frame(window, |this, window, cx| {
-            if let Some(draft) = &this.draft {
+            if let Some(draft) = &this.review.draft {
                 draft.input.update(cx, |state, cx| state.focus(window, cx));
             }
         });
@@ -2163,7 +2207,7 @@ impl ReviewApp {
                 this.submit_draft(window, cx);
             }
         });
-        self.draft = Some(Draft {
+        self.review.draft = Some(Draft {
             range: range.clone(),
             input,
             selection,
@@ -2178,12 +2222,14 @@ impl ReviewApp {
     /// Blames the drafted lines so the box can say which commit the comment
     /// will attach to before it is saved.
     fn resolve_draft_commit(&mut self, range: DiffLineRange, cx: &mut Context<Self>) {
-        let (Some(new_side), Some(resolved)) = (self.new_side.clone(), self.resolved.clone())
+        let (Some(new_side), Some(resolved)) =
+            (self.review.new_side.clone(), self.review.resolved.clone())
         else {
             return;
         };
         let in_scope = self.in_scope();
         let fallback = self
+            .review
             .commits
             .iter()
             .find(|commit| in_scope.contains(&commit.id))
@@ -2212,7 +2258,7 @@ impl ReviewApp {
                     return;
                 }
                 let commit = origin.map_or(fallback, |origin| origin.commit);
-                if let Some(draft) = this.draft.as_mut()
+                if let Some(draft) = this.review.draft.as_mut()
                     && draft.editing.is_none()
                     && draft.range == range
                 {
@@ -2226,7 +2272,7 @@ impl ReviewApp {
 
     /// Opens the comment box over an existing comment with its body loaded.
     fn start_edit(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(set) = self.reviews.as_ref() else {
+        let Some(set) = self.review.reviews.as_ref() else {
             return;
         };
         let Some(comment) = set
@@ -2237,13 +2283,13 @@ impl ReviewApp {
         else {
             return;
         };
-        let Some(placed) = self.placed.iter().find(|placed| placed.id == id) else {
+        let Some(placed) = self.review.placed.iter().find(|placed| placed.id == id) else {
             return;
         };
         let side = diff_side(placed.side);
         let range = DiffLineRange::new(placed.path.clone(), side, placed.line, placed.line);
         self.start_comment(range, None, window, cx);
-        if let Some(draft) = self.draft.as_mut() {
+        if let Some(draft) = self.review.draft.as_mut() {
             draft.editing = Some(id.to_string());
             draft.commit = Some(comment.commit.short().to_string().into());
             let body = comment.body.trim_end().to_string();
@@ -2263,7 +2309,7 @@ impl ReviewApp {
         });
         // Focus once the box is in the element tree, like the comment box.
         cx.on_next_frame(window, |this, window, cx| {
-            if let Some(answer) = &this.answer {
+            if let Some(answer) = &this.review.answer {
                 answer.input.update(cx, |state, cx| state.focus(window, cx));
             }
         });
@@ -2275,7 +2321,7 @@ impl ReviewApp {
                 this.submit_answer(window, cx);
             }
         });
-        self.answer = Some(Answer {
+        self.review.answer = Some(Answer {
             comment: comment.to_string(),
             input,
             _submit: submit,
@@ -2284,15 +2330,15 @@ impl ReviewApp {
     }
 
     fn submit_answer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(answer) = self.answer.take() else {
+        let Some(answer) = self.review.answer.take() else {
             return;
         };
         let body = answer.input.read(cx).value().trim().to_string();
         if body.is_empty() {
-            self.answer = Some(answer);
+            self.review.answer = Some(answer);
             return;
         }
-        if let Some(set) = self.reviews.as_mut() {
+        if let Some(set) = self.review.reviews.as_mut() {
             set.mine.add_reply(&answer.comment, body, None);
             self.save_review(cx);
         }
@@ -2307,22 +2353,22 @@ impl ReviewApp {
     fn cancel_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Escape peels one layer at a time: an answer box first, then a
         // draft, then the search.
-        if self.answer.take().is_some() {
+        if self.review.answer.take().is_some() {
             self.focus_diff(window, cx);
             cx.notify();
             return;
         }
-        if self.draft.is_none() && self.search_open {
+        if self.review.draft.is_none() && self.review.search_open {
             self.close_search(window, cx);
             return;
         }
-        self.draft = None;
+        self.review.draft = None;
         self.focus_diff(window, cx);
         cx.notify();
     }
 
     fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_open = true;
+        self.review.search_open = true;
         // A selection seeds the needle: select a name, press `/`, and the
         // search asks where else the changeset touches it.
         let selected = gpui_kit::base::TextSelection::selected_text(window, cx);
@@ -2339,29 +2385,29 @@ impl ReviewApp {
     }
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_open = false;
-        self.search_cursor = None;
+        self.review.search_open = false;
+        self.review.search_cursor = None;
         self.focus_diff(window, cx);
         cx.notify();
     }
 
     fn run_search(&mut self, cx: &mut Context<Self>) {
         let needle = self.search_query.read(cx).value().trim().to_string();
-        self.search_cursor = None;
+        self.review.search_cursor = None;
         self.search_generation += 1;
         let generation = self.search_generation;
         if needle.is_empty() {
             // Nothing to scan; the bump above also outruns a scan in flight.
-            self.search_hits = Vec::new();
-            self.search_all_hits = Vec::new();
+            self.review.search_hits = Vec::new();
+            self.review.search_all_hits = Vec::new();
             cx.notify();
             return;
         }
         // The scan walks the whole patch text - tens of MB on a big branch -
         // so it leaves the UI thread; the generation discards outrun results.
         let patch = self.patch_text.clone();
-        let whole = match &self.whole_patch {
-            Some((revision, text)) if self.search_all && *revision == self.revision => {
+        let whole = match &self.review.whole_patch {
+            Some((revision, text)) if self.review.search_all && *revision == self.revision => {
                 Some(text.clone())
             }
             _ => None,
@@ -2380,8 +2426,8 @@ impl ReviewApp {
                 if this.search_generation != generation {
                     return;
                 }
-                this.search_hits = hits;
-                this.search_all_hits = all_hits;
+                this.review.search_hits = hits;
+                this.review.search_all_hits = all_hits;
                 cx.notify();
             });
         });
@@ -2392,6 +2438,7 @@ impl ReviewApp {
     /// has something to walk; the scoped view stays untouched.
     fn ensure_whole_patch(&mut self, cx: &mut Context<Self>) {
         if self
+            .review
             .whole_patch
             .as_ref()
             .is_some_and(|(revision, _)| *revision == self.revision)
@@ -2399,7 +2446,7 @@ impl ReviewApp {
             return;
         }
         let backend = self.backend.clone();
-        let comparison = self.comparison.clone();
+        let comparison = self.review.comparison.clone();
         let revision = self.revision;
         let ignore_whitespace = self.ignore_whitespace;
         self._whole_patch = cx.spawn(async move |this, cx| {
@@ -2420,7 +2467,7 @@ impl ReviewApp {
                 }
                 match result {
                     Ok(patch) => {
-                        this.whole_patch = Some((revision, Arc::new(patch.text)));
+                        this.review.whole_patch = Some((revision, Arc::new(patch.text)));
                         this.notice = None;
                         this.run_search(cx);
                     }
@@ -2438,33 +2485,33 @@ impl ReviewApp {
     }
 
     fn search_step(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let extended = self.search_all && self.scope != ScopeKind::WholeBranch;
+        let extended = self.review.search_all && self.review.scope != ScopeKind::WholeBranch;
         let hits = if extended {
-            &self.search_all_hits
+            &self.review.search_all_hits
         } else {
-            &self.search_hits
+            &self.review.search_hits
         };
         if hits.is_empty() {
             return;
         }
-        let next = match (self.search_cursor, forward) {
+        let next = match (self.review.search_cursor, forward) {
             (Some(index), true) => (index + 1) % hits.len(),
             (Some(index), false) => (index + hits.len() - 1) % hits.len(),
             (None, true) => 0,
             (None, false) => hits.len() - 1,
         };
-        self.search_cursor = Some(next);
+        self.review.search_cursor = Some(next);
         let hit = hits[next].clone();
         // In view means the scoped patch itself contains the hit; a ticked
         // file keeps a header-only entry in the file list, so a file-level
         // check would aim at lines the view does not hold.
-        if self.search_hits.contains(&hit) {
+        if self.review.search_hits.contains(&hit) {
             self.show_hit(&hit.path, hit.side, hit.line, cx);
         } else {
             // The hit sits outside the picked commits: widen to the whole
             // branch and land on it once the reload installs. An explicit
             // jump may change the scope; per-file state never does.
-            self.pending_jump = Some((hit.path, hit.side, hit.line));
+            self.review.pending_jump = Some((hit.path, hit.side, hit.line));
             self.set_scope(ScopeKind::WholeBranch, cx);
         }
         cx.notify();
@@ -2496,7 +2543,7 @@ impl ReviewApp {
             }
             state.scroll_to_line(DiffLinePosition::new(path.clone(), side, line), cx);
         });
-        self.current_file = Some(path);
+        self.review.current_file = Some(path);
     }
 
     fn submit_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2505,24 +2552,25 @@ impl ReviewApp {
     }
 
     fn submit_draft_inner(&mut self, cx: &mut Context<Self>) {
-        let Some(draft) = self.draft.take() else {
+        let Some(draft) = self.review.draft.take() else {
             return;
         };
         // Cmd/Ctrl+Enter can leave a trailing newline in the box.
         let body = draft.input.read(cx).value().trim().to_string();
         if body.is_empty() {
-            self.draft = Some(draft);
+            self.review.draft = Some(draft);
             return;
         }
         if let Some(id) = &draft.editing {
-            if let Some(set) = self.reviews.as_mut() {
+            if let Some(set) = self.review.reviews.as_mut() {
                 set.mine.edit_comment(id, body);
                 self.save_review(cx);
             }
             cx.notify();
             return;
         }
-        let (Some(new_side), Some(resolved)) = (self.new_side.clone(), self.resolved.clone())
+        let (Some(new_side), Some(resolved)) =
+            (self.review.new_side.clone(), self.review.resolved.clone())
         else {
             return;
         };
@@ -2549,6 +2597,7 @@ impl ReviewApp {
         let in_scope = self.in_scope();
         // Used when blame cannot answer: removed lines and combined views.
         let fallback = self
+            .review
             .commits
             .iter()
             .find(|commit| in_scope.contains(&commit.id))
@@ -2585,8 +2634,9 @@ impl ReviewApp {
                 // An uncommitted review has no in-scope commits at all, yet
                 // the working tree is exactly the revision under review: a
                 // fresh comment there is current, not from another revision.
-                let other_revision = !this.comparison.uncommitted && !in_scope.contains(&commit);
-                let Some(set) = this.reviews.as_mut() else {
+                let other_revision =
+                    !this.review.comparison.uncommitted && !in_scope.contains(&commit);
+                let Some(set) = this.review.reviews.as_mut() else {
                     return;
                 };
                 let from_selection = dragged.is_some();
@@ -2606,7 +2656,7 @@ impl ReviewApp {
                 // placement below belongs to the view the draft was typed
                 // in; on a stale revision the next reload places it instead.
                 if this.revision == revision {
-                    this.placed.push(Placed {
+                    this.review.placed.push(Placed {
                         id,
                         path,
                         side,
@@ -2626,15 +2676,15 @@ impl ReviewApp {
     }
 
     fn toggle_reaction(&mut self, id: &str, kind: ReactionKind, cx: &mut Context<Self>) {
-        if let Some(set) = self.reviews.as_mut() {
+        if let Some(set) = self.review.reviews.as_mut() {
             let given = set.mine.toggle_reaction(id, kind);
             if kind.resolves() {
                 if given && self.thread_resolved(id) {
                     self.grace_then_fold(id.to_string(), cx);
                 } else if !self.thread_resolved(id) {
                     // Open again: the session's fold state has nothing to say.
-                    self.unfolded.remove(id);
-                    self.fading.remove(id);
+                    self.review.unfolded.remove(id);
+                    self.review.fading.remove(id);
                 }
             }
             self.save_review(cx);
@@ -2643,7 +2693,7 @@ impl ReviewApp {
     }
 
     fn thread_resolved(&self, id: &str) -> bool {
-        self.reviews.as_ref().is_some_and(|set| {
+        self.review.reviews.as_ref().is_some_and(|set| {
             set.threads()
                 .iter()
                 .any(|thread| thread.comment.id == id && thread.resolved())
@@ -2655,15 +2705,15 @@ impl ReviewApp {
     /// landing, fades [`FOLD_FADE`], and is gone. Folding by hand or
     /// reopening during the grace calls the timer off.
     fn grace_then_fold(&mut self, id: String, cx: &mut Context<Self>) {
-        self.unfolded.insert(id.clone());
+        self.review.unfolded.insert(id.clone());
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(FOLD_GRACE).await;
             let fading = this
                 .update(cx, |this, cx| {
-                    if !this.unfolded.contains(&id) || !this.thread_resolved(&id) {
+                    if !this.review.unfolded.contains(&id) || !this.thread_resolved(&id) {
                         return false;
                     }
-                    this.fading.insert(id.clone());
+                    this.review.fading.insert(id.clone());
                     cx.notify();
                     true
                 })
@@ -2673,8 +2723,8 @@ impl ReviewApp {
             }
             cx.background_executor().timer(FOLD_FADE).await;
             let _ = this.update(cx, |this, cx| {
-                if this.fading.remove(&id) {
-                    this.unfolded.remove(&id);
+                if this.review.fading.remove(&id) {
+                    this.review.unfolded.remove(&id);
                 }
                 cx.notify();
             });
@@ -2686,21 +2736,21 @@ impl ReviewApp {
     /// away again. Session state only; the review file knows nothing of it.
     fn toggle_folded(&mut self, ids: &[String], unfold: bool, cx: &mut Context<Self>) {
         for id in ids {
-            self.fading.remove(id);
+            self.review.fading.remove(id);
             if unfold {
-                self.unfolded.insert(id.clone());
+                self.review.unfolded.insert(id.clone());
             } else {
-                self.unfolded.remove(id);
+                self.review.unfolded.remove(id);
             }
         }
         cx.notify();
     }
 
     fn delete_comment(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(set) = self.reviews.as_mut()
+        if let Some(set) = self.review.reviews.as_mut()
             && set.mine.delete_comment(id)
         {
-            self.placed.retain(|placed| placed.id != id);
+            self.review.placed.retain(|placed| placed.id != id);
             self.save_review(cx);
             cx.notify();
         }
@@ -2711,13 +2761,13 @@ impl ReviewApp {
     /// file forgets the comment only on its success, so a failed write
     /// never loses the thread - it stays on screen with a notice instead.
     fn archive_comment(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(set) = self.reviews.as_ref() else {
+        let Some(set) = self.review.reviews.as_ref() else {
             return;
         };
         let Some(taken) = set.mine.clone().take_comment(id) else {
             return;
         };
-        let path = ArchiveFile::path_for(&self.review_path);
+        let path = ArchiveFile::path_for(&self.review.review_path);
         let id = id.to_string();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -2731,19 +2781,20 @@ impl ReviewApp {
                         this.notice = Some(format!("comment not archived: {error}").into());
                     }
                     Ok(()) => {
-                        if let Some(set) = this.reviews.as_mut()
+                        if let Some(set) = this.review.reviews.as_mut()
                             && set.mine.take_comment(&id).is_some()
                         {
                             // An orphan's file exists only for its threads:
                             // reload, or an empty snippet entry lingers.
-                            let orphan = this.placed.iter().any(|placed| {
+                            let orphan = this.review.placed.iter().any(|placed| {
                                 placed.id == id
                                     && this
+                                        .review
                                         .orphan_files
                                         .iter()
                                         .any(|file| file.path().as_ref() == placed.path)
                             });
-                            this.placed.retain(|placed| placed.id != id);
+                            this.review.placed.retain(|placed| placed.id != id);
                             this.save_review(cx);
                             if orphan {
                                 this.reload(cx);
@@ -2758,7 +2809,7 @@ impl ReviewApp {
     }
 
     fn copy_comment_as_prompt(&self, id: &str, cx: &mut Context<Self>) {
-        if let Some(set) = &self.reviews
+        if let Some(set) = &self.review.reviews
             && let Some(thread) = set
                 .threads()
                 .into_iter()
@@ -2769,7 +2820,7 @@ impl ReviewApp {
     }
 
     fn copy_all_as_prompt(&self, cx: &mut Context<Self>) {
-        if let Some(set) = &self.reviews {
+        if let Some(set) = &self.review.reviews {
             let open: Vec<_> = set
                 .threads()
                 .into_iter()
@@ -2784,11 +2835,12 @@ impl ReviewApp {
     fn snapshot(&self, cx: &App) -> Snapshot {
         let mut threads = Vec::new();
         let mut resolved_markers: Vec<ResolvedMarker> = Vec::new();
-        if let Some(set) = &self.reviews {
+        if let Some(set) = &self.review.reviews {
             let set_threads = set.threads();
             let show_author = set_threads.iter().any(|thread| !thread.mine);
             for thread in set_threads {
                 let Some(placed) = self
+                    .review
                     .placed
                     .iter()
                     .find(|placed| placed.id == thread.comment.id)
@@ -2802,7 +2854,7 @@ impl ReviewApp {
                 // the marker stays while the card is open too, as the way
                 // to fold it again. Unfolding is session state only.
                 if thread.resolved() {
-                    let unfolded = self.unfolded.contains(&thread.comment.id);
+                    let unfolded = self.review.unfolded.contains(&thread.comment.id);
                     let marker = resolved_markers.iter_mut().find(|marker| {
                         marker.path == placed.path
                             && marker.side == placed.side
@@ -2869,6 +2921,7 @@ impl ReviewApp {
                     selection: thread.comment.selection.clone().map(Into::into),
                     other_revision: placed.other_revision,
                     orphan: self
+                        .review
                         .orphan_files
                         .iter()
                         .any(|file| file.path().as_ref() == placed.path),
@@ -2898,6 +2951,7 @@ impl ReviewApp {
                     reactions,
                     left: set.mine.reactions_left(&thread.comment.id),
                     answer_input: self
+                        .review
                         .answer
                         .as_ref()
                         .filter(|answer| answer.comment == thread.comment.id)
@@ -2906,22 +2960,24 @@ impl ReviewApp {
                     // Prominent only while the diff's focus mark is still the
                     // line the jump placed; a change-key press replaces the
                     // mark and the card falls back in line with the rest.
-                    active: self.comment_cursor.as_deref() == Some(thread.comment.id.as_str()) && {
-                        let mark = DiffLineRange::new(
-                            SharedString::from(placed.path.clone()),
-                            diff_side(placed.side),
-                            placed.line,
-                            placed.line,
-                        );
-                        self.diff.read(cx).focused_ranges() == std::slice::from_ref(&mark)
-                    },
-                    fading: self.fading.contains(&thread.comment.id),
+                    active: self.review.comment_cursor.as_deref()
+                        == Some(thread.comment.id.as_str())
+                        && {
+                            let mark = DiffLineRange::new(
+                                SharedString::from(placed.path.clone()),
+                                diff_side(placed.side),
+                                placed.line,
+                                placed.line,
+                            );
+                            self.diff.read(cx).focused_ranges() == std::slice::from_ref(&mark)
+                        },
+                    fading: self.review.fading.contains(&thread.comment.id),
                 });
             }
         }
         let in_scope_set = self.in_scope();
-        let shows_uncommitted = self.comparison.uncommitted
-            && (self.scope != ScopeKind::Custom || self.picked_uncommitted);
+        let shows_uncommitted = self.review.comparison.uncommitted
+            && (self.review.scope != ScopeKind::Custom || self.review.picked_uncommitted);
         // One walk over the placements instead of one per file and count.
         #[derive(Default)]
         struct Tally {
@@ -2931,7 +2987,7 @@ impl ReviewApp {
         }
         let mut tallies: HashMap<&str, Tally> = HashMap::new();
         let resolved = self.resolved_ids();
-        for placed in &self.placed {
+        for placed in &self.review.placed {
             // The header count is what still wants attention; a resolved
             // thread sits folded behind its marker, not in the number.
             if resolved.contains(placed.id.as_str()) {
@@ -2943,6 +2999,7 @@ impl ReviewApp {
             tally.changed_since += usize::from(placed.changed_since);
         }
         let files = self
+            .review
             .files
             .iter()
             .map(|file| {
@@ -2975,7 +3032,7 @@ impl ReviewApp {
                     }
                     _ => None,
                 };
-                let touched = self.touched.get(&file.path).map_or(0, |commits| {
+                let touched = self.review.touched.get(&file.path).map_or(0, |commits| {
                     commits
                         .iter()
                         .filter(|id| in_scope_set.contains(id))
@@ -2984,14 +3041,15 @@ impl ReviewApp {
                 let tally = tallies.get(file.path.as_str());
                 let uncommitted = shows_uncommitted
                     && file.state != FileState::UncommittedNotCombined
-                    && self.uncommitted_paths.contains(&file.path);
+                    && self.review.uncommitted_paths.contains(&file.path);
                 // The newest in-scope commit that touched a deleted path is
                 // the one that deleted it: nothing can touch the path after.
                 // A deletion carried by the uncommitted layer sits in no
                 // commit, so it names none and the tooltip falls back.
                 let removed_at = (file.status == FileStatus::Deleted && !uncommitted)
                     .then(|| {
-                        self.touched
+                        self.review
+                            .touched
                             .get(&file.path)?
                             .iter()
                             .find(|id| in_scope_set.contains(id))
@@ -3033,7 +3091,7 @@ impl ReviewApp {
                 )
             }))
             .collect();
-        let draft = self.draft.as_ref().map(|draft| {
+        let draft = self.review.draft.as_ref().map(|draft| {
             let range = &draft.range;
             let lines = if range.start() == range.end() {
                 format!("line {}", range.end())
@@ -3057,7 +3115,7 @@ impl ReviewApp {
             files,
             draft,
             resolved_markers,
-            hovered_line: self.hovered_line.clone(),
+            hovered_line: self.review.hovered_line.clone(),
         }
     }
 
@@ -3066,7 +3124,11 @@ impl ReviewApp {
             .threads
             .iter()
             .filter_map(|thread| {
-                let placed = self.placed.iter().find(|placed| placed.id == thread.id)?;
+                let placed = self
+                    .review
+                    .placed
+                    .iter()
+                    .find(|placed| placed.id == thread.id)?;
                 let side = diff_side(placed.side);
                 Some(DiffAnnotation::line(
                     thread.element.clone(),
@@ -3074,7 +3136,7 @@ impl ReviewApp {
                 ))
             })
             .collect();
-        if let Some(draft) = &self.draft {
+        if let Some(draft) = &self.review.draft {
             let range = &draft.range;
             annotations.push(DiffAnnotation::line(
                 "draft",
@@ -3128,18 +3190,21 @@ impl ReviewApp {
                 })
                 .child(div().text_color(muted).child("/"))
                 .child(marked(
-                    if self.comparison.uncommitted {
+                    if self.review.comparison.uncommitted {
                         Lucide::Pencil
                     } else {
                         Lucide::GitBranch
                     },
-                    self.comparison.source.clone(),
+                    self.review.comparison.source.clone(),
                 ))
                 .child(div().text_color(muted).child("going into"))
-                .child(marked(Lucide::GitBranch, self.comparison.target.clone()))
+                .child(marked(
+                    Lucide::GitBranch,
+                    self.review.comparison.target.clone(),
+                ))
                 // Swapping would make the working tree the target, which is
                 // nothing git can resolve.
-                .when(!self.comparison.uncommitted, |bar| {
+                .when(!self.review.comparison.uncommitted, |bar| {
                     bar.child(
                         Button::new("swap")
                             .outline()
@@ -3158,20 +3223,17 @@ impl ReviewApp {
                             })),
                     )
                 })
-                .child(
-                    div()
-                        .text_color(muted)
-                        .truncate()
-                        .child(if !self.comparison.uncommitted {
-                            "only what the branch adds"
-                        } else if self.comparison.source == "uncommitted" {
-                            "only what is not yet committed"
-                        } else {
-                            // Against another revision the diff also carries
-                            // commits, so "uncommitted" would understate it.
-                            "everything the working tree adds"
-                        }),
-                )
+                .child(div().text_color(muted).truncate().child(
+                    if !self.review.comparison.uncommitted {
+                        "only what the branch adds"
+                    } else if self.review.comparison.source == "uncommitted" {
+                        "only what is not yet committed"
+                    } else {
+                        // Against another revision the diff also carries
+                        // commits, so "uncommitted" would understate it.
+                        "everything the working tree adds"
+                    },
+                ))
                 .child(div().flex_1())
                 .child(
                     h_flex()
@@ -3184,7 +3246,7 @@ impl ReviewApp {
                         // stay out, so the native double click still works
                         // there.
                         .on_click(|_, _, cx| cx.stop_propagation())
-                        .when_some(self.pull.as_ref(), |controls, pull| {
+                        .when_some(self.review.pull.as_ref(), |controls, pull| {
                             controls.child(self.render_pull_menu(pull, cx))
                         })
                         .child(
@@ -3332,7 +3394,8 @@ impl ReviewApp {
     ) -> AnyElement {
         let id = commit.id.clone();
         let hover_id = commit.id.clone();
-        let checked = self.picked.contains(&commit.id) || self.scope != ScopeKind::Custom;
+        let checked =
+            self.review.picked.contains(&commit.id) || self.review.scope != ScopeKind::Custom;
         let muted = cx.theme().muted_foreground;
         let accent = comment_accent(cx);
         let mono = cx.theme().mono_font_family.clone();
@@ -3371,7 +3434,7 @@ impl ReviewApp {
             })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
-                    this.hovered_commit = Some(hover_id.clone());
+                    this.review.hovered_commit = Some(hover_id.clone());
                     cx.notify();
                 }
             }))
@@ -3408,9 +3471,9 @@ impl ReviewApp {
     /// The uncommitted layer's picker row, styled like a commit item, so the
     /// working-tree changes can be excluded from a custom scope explicitly.
     fn render_uncommitted_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let checked = self.picked_uncommitted || self.scope != ScopeKind::Custom;
+        let checked = self.review.picked_uncommitted || self.review.scope != ScopeKind::Custom;
         let muted = cx.theme().muted_foreground;
-        let files = self.uncommitted_paths.len();
+        let files = self.review.uncommitted_paths.len();
         h_flex()
             .id("pick-uncommitted")
             .w_full()
@@ -3468,13 +3531,15 @@ impl ReviewApp {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let muted = cx.theme().muted_foreground;
-        let ids: Vec<Oid> = self.commits[section.range.clone()]
+        let ids: Vec<Oid> = self.review.commits[section.range.clone()]
             .iter()
             .map(|commit| commit.id.clone())
             .collect();
         // Outside the custom scope every commit counts as checked.
-        let mut checked = if self.scope == ScopeKind::Custom {
-            ids.iter().filter(|id| self.picked.contains(id)).count()
+        let mut checked = if self.review.scope == ScopeKind::Custom {
+            ids.iter()
+                .filter(|id| self.review.picked.contains(id))
+                .count()
         } else {
             ids.len()
         };
@@ -3482,7 +3547,9 @@ impl ReviewApp {
         let mut len = ids.len();
         if section.with_uncommitted {
             len += 1;
-            checked += usize::from(self.picked_uncommitted || self.scope != ScopeKind::Custom);
+            checked += usize::from(
+                self.review.picked_uncommitted || self.review.scope != ScopeKind::Custom,
+            );
         }
         let all = checked == len && len > 0;
         let with_uncommitted = section.with_uncommitted;
@@ -3505,7 +3572,7 @@ impl ReviewApp {
                             // the layer to checked when leaving another
                             // scope, overriding this very click.
                             this.enter_custom();
-                            this.picked_uncommitted = *checked;
+                            this.review.picked_uncommitted = *checked;
                         }
                         this.pick_many(ids.clone(), *checked, cx)
                     })),
@@ -3524,7 +3591,7 @@ impl ReviewApp {
                             let checked = !all;
                             if with_uncommitted {
                                 this.enter_custom();
-                                this.picked_uncommitted = checked;
+                                this.review.picked_uncommitted = checked;
                             }
                             this.pick_many(title_ids.clone(), checked, cx)
                         }),
@@ -3563,7 +3630,7 @@ impl ReviewApp {
                 || commit.author.to_lowercase().contains(query)
                 || commit.id.short().to_lowercase().starts_with(query)
         };
-        let rows: Vec<&Commit> = self.commits[section.range.clone()]
+        let rows: Vec<&Commit> = self.review.commits[section.range.clone()]
             .iter()
             .filter(|commit| matches(commit))
             .collect();
@@ -3574,6 +3641,7 @@ impl ReviewApp {
         };
         for commit in &rows[..shown] {
             let head = self
+                .review
                 .commits
                 .first()
                 .is_some_and(|first| first.id == commit.id);
@@ -3599,9 +3667,9 @@ impl ReviewApp {
                     .text_color(cx.theme().muted_foreground)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if toggle == "New since your review" {
-                            this.show_all_new = true;
+                            this.review.show_all_new = true;
                         } else {
-                            this.show_all_reviewed = true;
+                            this.review.show_all_reviewed = true;
                         }
                         cx.notify();
                     })),
@@ -3613,7 +3681,7 @@ impl ReviewApp {
     /// The dropdown with the commit range on its trigger and the grouped,
     /// searchable commit list inside.
     fn render_commit_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let total = self.commits.len();
+        let total = self.review.commits.len();
         let muted = cx.theme().muted_foreground;
         let accent = comment_accent(cx);
         let mono = cx.theme().mono_font_family.clone();
@@ -3621,11 +3689,12 @@ impl ReviewApp {
 
         // The range button's parts: count, hash range, skipped note.
         let positions: Vec<usize> = self
+            .review
             .commits
             .iter()
             .enumerate()
             .filter(|(_, commit)| {
-                self.scope != ScopeKind::Custom || self.picked.contains(&commit.id)
+                self.review.scope != ScopeKind::Custom || self.review.picked.contains(&commit.id)
             })
             .map(|(index, _)| index)
             .collect();
@@ -3633,8 +3702,8 @@ impl ReviewApp {
         let range_text = match (positions.first(), positions.last()) {
             (Some(newest), Some(oldest)) => Some(format!(
                 "{} … {}",
-                self.commits[*oldest].id.short(),
-                self.commits[*newest].id.short()
+                self.review.commits[*oldest].id.short(),
+                self.review.commits[*newest].id.short()
             )),
             _ => None,
         };
@@ -3644,11 +3713,11 @@ impl ReviewApp {
         };
 
         // Which unchecked commits sit between checked ones.
-        let skipped_set: HashSet<Oid> = if self.scope == ScopeKind::Custom {
+        let skipped_set: HashSet<Oid> = if self.review.scope == ScopeKind::Custom {
             match (positions.first(), positions.last()) {
-                (Some(first), Some(last)) => self.commits[*first..=*last]
+                (Some(first), Some(last)) => self.review.commits[*first..=*last]
                     .iter()
-                    .filter(|commit| !self.picked.contains(&commit.id))
+                    .filter(|commit| !self.review.picked.contains(&commit.id))
                     .map(|commit| commit.id.clone())
                     .collect(),
                 _ => HashSet::new(),
@@ -3657,17 +3726,20 @@ impl ReviewApp {
             HashSet::new()
         };
         let comment_counts: HashMap<Oid, usize> =
-            self.reviews.as_ref().map_or_else(HashMap::new, |set| {
-                let mut counts = HashMap::new();
-                for thread in set.threads() {
-                    // A commit's badge matches the tree's: open threads only.
-                    if thread.resolved() {
-                        continue;
+            self.review
+                .reviews
+                .as_ref()
+                .map_or_else(HashMap::new, |set| {
+                    let mut counts = HashMap::new();
+                    for thread in set.threads() {
+                        // A commit's badge matches the tree's: open threads only.
+                        if thread.resolved() {
+                            continue;
+                        }
+                        *counts.entry(thread.comment.commit.clone()).or_insert(0) += 1;
                     }
-                    *counts.entry(thread.comment.commit.clone()).or_insert(0) += 1;
-                }
-                counts
-            });
+                    counts
+                });
 
         let context = PickerContext {
             query: self.picker_query.read(cx).value().trim().to_lowercase(),
@@ -3679,7 +3751,8 @@ impl ReviewApp {
         };
 
         // The uncommitted layer only earns a row when it has changes to show.
-        let uncommitted_entry = self.comparison.uncommitted && !self.uncommitted_paths.is_empty();
+        let uncommitted_entry =
+            self.review.comparison.uncommitted && !self.review.uncommitted_paths.is_empty();
         let split_at = self.reviewed_from().unwrap_or(total);
         let mut list = v_flex().w_full().gap_0p5();
         list = self.render_picker_section(
@@ -3689,7 +3762,7 @@ impl ReviewApp {
                 range: 0..split_at,
                 heading_color: blue_light,
                 bordered: false,
-                expanded: self.show_all_new,
+                expanded: self.review.show_all_new,
                 with_uncommitted: uncommitted_entry,
             },
             &context,
@@ -3702,7 +3775,7 @@ impl ReviewApp {
                 range: split_at..total,
                 heading_color: muted,
                 bordered: split_at > 0,
-                expanded: self.show_all_reviewed,
+                expanded: self.review.show_all_reviewed,
                 with_uncommitted: false,
             },
             &context,
@@ -3791,6 +3864,7 @@ impl ReviewApp {
         let muted = cx.theme().muted_foreground;
         let accent = comment_accent(cx);
         let threads = self
+            .review
             .reviews
             .as_ref()
             .map(|set| set.threads())
@@ -3804,6 +3878,7 @@ impl ReviewApp {
         // hides. Named, so the count never promises more than the window
         // delivers.
         let orphans: HashSet<&str> = self
+            .review
             .orphan_files
             .iter()
             .map(|file| file.path().as_ref())
@@ -3813,6 +3888,7 @@ impl ReviewApp {
             .filter(|thread| !thread.resolved())
             .filter(|thread| {
                 let placed = self
+                    .review
                     .placed
                     .iter()
                     .any(|placed| placed.id == thread.comment.id);
@@ -3853,6 +3929,7 @@ impl ReviewApp {
         // Orphan snippet entries only carry comments; they are not files
         // to review and stay out of the progress.
         let reviewable = self
+            .review
             .files
             .iter()
             .filter(|file| file.state != FileState::NotInComparison)
@@ -3873,7 +3950,7 @@ impl ReviewApp {
 
     fn render_scope_bar(&self, reviewed: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        let explanation = match self.scope {
+        let explanation = match self.review.scope {
             ScopeKind::NewForMe => "Each file is compared with the version you last ticked",
             ScopeKind::WholeBranch => "Everything the branch adds",
             ScopeKind::Custom => "Combined diff of the checked commits",
@@ -3907,7 +3984,7 @@ impl ReviewApp {
                     .gap_0p5()
                     .child(
                         nav_button("nav-back", Lucide::ArrowLeft, format!("Back ({back_key})"))
-                            .disabled(self.back_stack.is_empty())
+                            .disabled(self.review.back_stack.is_empty())
                             .on_click(cx.listener(|this, _, _, cx| this.jump_back(cx))),
                     )
                     .child(
@@ -3916,7 +3993,7 @@ impl ReviewApp {
                             Lucide::ArrowRight,
                             format!("Forward ({forward_key})"),
                         )
-                        .disabled(self.forward_stack.is_empty())
+                        .disabled(self.review.forward_stack.is_empty())
                         .on_click(cx.listener(|this, _, _, cx| this.jump_forward(cx))),
                     )
                     .child(
@@ -3944,17 +4021,17 @@ impl ReviewApp {
                     .child(
                         Toggle::new("scope-new")
                             .label("New for me")
-                            .checked(self.scope == ScopeKind::NewForMe),
+                            .checked(self.review.scope == ScopeKind::NewForMe),
                     )
                     .child(
                         Toggle::new("scope-whole")
                             .label("Whole branch")
-                            .checked(self.scope == ScopeKind::WholeBranch),
+                            .checked(self.review.scope == ScopeKind::WholeBranch),
                     )
                     .child(
                         Toggle::new("scope-custom")
                             .label("Custom")
-                            .checked(self.scope == ScopeKind::Custom),
+                            .checked(self.review.scope == ScopeKind::Custom),
                     )
                     .on_click(cx.listener(|this, checks: &Vec<bool>, _, cx| {
                         let kind = match checks.iter().position(|checked| *checked) {
@@ -3974,17 +4051,17 @@ impl ReviewApp {
 
     fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        let extended = self.search_all && self.scope != ScopeKind::WholeBranch;
+        let extended = self.review.search_all && self.review.scope != ScopeKind::WholeBranch;
         let count = if self.search_query.read(cx).value().trim().is_empty() {
             None
         } else if extended {
             Some(format!(
                 "{} in view · {} across all commits",
-                self.search_hits.len(),
-                self.search_all_hits.len()
+                self.review.search_hits.len(),
+                self.review.search_all_hits.len()
             ))
         } else {
-            Some(match self.search_hits.len() {
+            Some(match self.review.search_hits.len() {
                 0 => "no matches".to_string(),
                 1 => "1 match".to_string(),
                 n => format!("{n} matches"),
@@ -4025,15 +4102,15 @@ impl ReviewApp {
             .when_some(count, |bar, count| {
                 bar.child(div().text_color(muted).child(count))
             })
-            .when(self.scope != ScopeKind::WholeBranch, |bar| {
+            .when(self.review.scope != ScopeKind::WholeBranch, |bar| {
                 bar.child(
                     Checkbox::new("search-all")
                         .xsmall()
                         .label("All commits")
-                        .checked(self.search_all)
+                        .checked(self.review.search_all)
                         .on_change(cx.listener(|this, checked: &bool, _, cx| {
-                            this.search_all = *checked;
-                            if this.search_all {
+                            this.review.search_all = *checked;
+                            if this.review.search_all {
                                 this.ensure_whole_patch(cx);
                             }
                             this.run_search(cx);
@@ -4060,7 +4137,7 @@ impl ReviewApp {
         comments: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let file = &self.files[index];
+        let file = &self.review.files[index];
         let muted = cx.theme().muted_foreground;
         let mono = cx.theme().mono_font_family.clone();
         let path = SharedString::from(file.path.clone());
@@ -4078,7 +4155,7 @@ impl ReviewApp {
         let unchanged = file.state == FileState::UnchangedSinceReview;
         let orphan = file.state == FileState::NotInComparison;
         let quiet = state == ReviewState::Reviewed || unchanged || is_generated(&file.path);
-        let selected = self.current_file.as_ref() == Some(&path);
+        let selected = self.review.current_file.as_ref() == Some(&path);
         let target = path.clone();
         let counts = |count: usize, sign: char, color: Hsla| {
             (count > 0).then(|| {
@@ -4159,7 +4236,7 @@ impl ReviewApp {
     /// Whether any ancestor folder of `path` is shut in the file panel.
     fn folder_shut(&self, path: &str) -> bool {
         path.match_indices('/')
-            .any(|(at, _)| self.collapsed_folders.contains(&path[..at]))
+            .any(|(at, _)| self.review.collapsed_folders.contains(&path[..at]))
     }
 
     fn render_sidebar(&self, reviewed: usize, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4186,7 +4263,7 @@ impl ReviewApp {
         }
         let mut rows = Vec::new();
         let mut previous: Vec<String> = Vec::new();
-        for (index, file) in self.files.iter().enumerate() {
+        for (index, file) in self.review.files.iter().enumerate() {
             // Orphan entries follow the earlier-comments toggle, as in the
             // Diff, so panel and main content stay in step.
             if file.state == FileState::NotInComparison && !self.show_other_revisions {
@@ -4202,7 +4279,8 @@ impl ReviewApp {
             // The first collapsed ancestor hides everything beneath it; its
             // own row stays, showing the closed folder.
             let shut = (0..folders.len()).find(|depth| {
-                self.collapsed_folders
+                self.review
+                    .collapsed_folders
                     .contains(folders[..=*depth].join("/").as_str())
             });
             for (depth, part) in folders.iter().enumerate().skip(common) {
@@ -4230,7 +4308,7 @@ impl ReviewApp {
         // where a verdict folds the card away.
         let resolved = self.resolved_ids();
         let mut open: HashMap<String, usize> = HashMap::new();
-        for placed in &self.placed {
+        for placed in &self.review.placed {
             if !resolved.contains(placed.id.as_str()) {
                 *open.entry(placed.path.clone()).or_default() += 1;
             }
@@ -4259,7 +4337,8 @@ impl ReviewApp {
                             .text_color(muted)
                             .child(format!(
                                 "FILES · {} · {reviewed} REVIEWED",
-                                self.files
+                                self.review
+                                    .files
                                     .iter()
                                     .filter(|file| file.state != FileState::NotInComparison)
                                     .count()
@@ -4309,9 +4388,10 @@ impl ReviewApp {
                                         .child(label.clone())
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             let path = toggled.to_string();
-                                            let collapsed = !this.collapsed_folders.remove(&path);
+                                            let collapsed =
+                                                !this.review.collapsed_folders.remove(&path);
                                             if collapsed {
-                                                this.collapsed_folders.insert(path.clone());
+                                                this.review.collapsed_folders.insert(path.clone());
                                             }
                                             // The diff follows the panel: a shut
                                             // folder collapses its files in the main
@@ -4319,6 +4399,7 @@ impl ReviewApp {
                                             // files not under another shut folder.
                                             let prefix = format!("{path}/");
                                             let affected: Vec<SharedString> = this
+                                                .review
                                                 .files
                                                 .iter()
                                                 .filter(|file| {
@@ -4337,7 +4418,7 @@ impl ReviewApp {
                                 }
                                 TreeRow::File { index, depth } => {
                                     let comments = open
-                                        .get(this.files[*index].path.as_str())
+                                        .get(this.review.files[*index].path.as_str())
                                         .copied()
                                         .unwrap_or(0);
                                     this.render_file_row(*index, *depth, comments, cx)
@@ -4373,7 +4454,7 @@ impl ReviewApp {
                 .child(error.clone())
                 .into_any_element();
         }
-        if self.loading && self.files.is_empty() {
+        if self.loading && self.review.files.is_empty() {
             return h_flex()
                 .track_focus(&focus)
                 .size_full()
@@ -4387,6 +4468,7 @@ impl ReviewApp {
         // Orphan entries hidden by the earlier-comments toggle leave nothing
         // on screen; without this the view was a blank sheet, not a message.
         let visible = self
+            .review
             .files
             .iter()
             .any(|file| file.state != FileState::NotInComparison || self.show_other_revisions);
@@ -4421,6 +4503,7 @@ impl ReviewApp {
         // added and removed fills on those lines.
         let span_tint = comment_accent(cx).opacity(0.16);
         let selection_spans = self
+            .review
             .placed
             .iter()
             .filter(|placed| placed.selection)
@@ -4436,6 +4519,7 @@ impl ReviewApp {
                 .with_background(span_tint)
             });
         let draft_span = self
+            .review
             .draft
             .as_ref()
             .filter(|draft| draft.selection.is_some())
@@ -4443,8 +4527,9 @@ impl ReviewApp {
         // Search hits fill their whole line: the Kit decorates lines, not
         // character spans, and the last fill supplied wins on overlap.
         let search_spans = self
+            .review
             .search_open
-            .then(|| self.search_hits.iter())
+            .then(|| self.review.search_hits.iter())
             .into_iter()
             .flatten()
             .map(move |hit| {
@@ -4460,8 +4545,9 @@ impl ReviewApp {
         // The matched characters themselves get a louder fill over the line
         // wash, so a long hit line still shows where the needle sits.
         let span_highlights: Vec<DiffSpanHighlight> = self
+            .review
             .search_open
-            .then(|| self.search_hits.iter())
+            .then(|| self.review.search_hits.iter())
             .into_iter()
             .flatten()
             .flat_map(|hit| {
@@ -4556,8 +4642,8 @@ impl ReviewApp {
                     // Row leave events arrive after the next row's enter, so a
                     // None here is usually stale; the last line stays until a
                     // new one reports.
-                    if position.is_some() && this.hovered_line != position {
-                        this.hovered_line = position.clone();
+                    if position.is_some() && this.review.hovered_line != position {
+                        this.review.hovered_line = position.clone();
                         changed = true;
                         tracing::trace!(
                             mouse_down = this.mouse_down,
@@ -4569,11 +4655,12 @@ impl ReviewApp {
                     // A text drag in progress keeps its end on the pointer.
                     if this.mouse_down
                         && selecting
-                        && let (Some(start), Some(end)) = (this.text_anchor.clone(), position)
+                        && let (Some(start), Some(end)) =
+                            (this.review.text_anchor.clone(), position)
                     {
                         let lines = Some((start, end));
-                        if this.text_lines != lines {
-                            this.text_lines = lines;
+                        if this.review.text_lines != lines {
+                            this.review.text_lines = lines;
                             changed = true;
                         }
                     }
@@ -5009,7 +5096,7 @@ impl ReviewApp {
         if self.publishing {
             bar = bar.child("Publishing…");
         }
-        if let Some((status, failed)) = &self.publish_status {
+        if let Some((status, failed)) = &self.review.publish_status {
             bar = bar.child(
                 div()
                     .flex_1()
@@ -5019,7 +5106,7 @@ impl ReviewApp {
                     .child(status.clone()),
             );
         }
-        let position = self.current_file.as_ref().and_then(|current| {
+        let position = self.review.current_file.as_ref().and_then(|current| {
             let files = self.diff.read(cx).files();
             let index = files.iter().position(|file| file.path() == current)?;
             Some(format!("File {} of {}", index + 1, files.len()))
@@ -5637,15 +5724,16 @@ impl Render for ReviewApp {
         self.fit_mode_to_width(window, cx);
         // A click or Escape elsewhere ends the text selection; the
         // remembered lines and the menu payload go with it.
-        if (self.text_lines.is_some() || self.pending_comment.is_some())
+        if (self.review.text_lines.is_some() || self.review.pending_comment.is_some())
             && !gpui_kit::base::TextSelection::has_selection(window, cx)
             && !self.mouse_down
         {
-            self.text_lines = None;
-            self.pending_comment = None;
+            self.review.text_lines = None;
+            self.review.pending_comment = None;
         }
         // The scope bar and the sidebar both show it; counted once per frame.
         let reviewed = self
+            .review
             .files
             .iter()
             .filter(|file| file.state != FileState::NotInComparison)
@@ -5653,7 +5741,7 @@ impl Render for ReviewApp {
             .count();
         v_flex()
             .id("review")
-            .key_context(if self.draft.is_some() || self.answer.is_some() {
+            .key_context(if self.review.draft.is_some() || self.review.answer.is_some() {
                 "Review"
             } else {
                 "Review Reading"
@@ -5676,9 +5764,9 @@ impl Render for ReviewApp {
                     return;
                 }
                 this.mouse_down = true;
-                this.text_anchor = this.hovered_line.clone();
+                this.review.text_anchor = this.review.hovered_line.clone();
                 tracing::trace!(
-                    anchor = ?this.text_anchor.as_ref().map(|p| (p.path().to_string(), p.line())),
+                    anchor = ?this.review.text_anchor.as_ref().map(|p| (p.path().to_string(), p.line())),
                     "selection anchored"
                 );
             }))
@@ -5690,8 +5778,8 @@ impl Render for ReviewApp {
                     this.mouse_down = false;
                     tracing::trace!(
                         has_selection = gpui_kit::base::TextSelection::has_selection(window, cx),
-                        anchor = ?this.text_anchor.as_ref().map(|p| (p.path().to_string(), p.line())),
-                        hovered = ?this.hovered_line.as_ref().map(|p| (p.path().to_string(), p.line())),
+                        anchor = ?this.review.text_anchor.as_ref().map(|p| (p.path().to_string(), p.line())),
+                        hovered = ?this.review.hovered_line.as_ref().map(|p| (p.path().to_string(), p.line())),
                         gutter_selection = this.diff.read(cx).selected_lines().is_some(),
                         text = ?gpui_kit::base::TextSelection::selected_text(window, cx)
                             .chars()
@@ -5701,9 +5789,9 @@ impl Render for ReviewApp {
                     );
                     if gpui_kit::base::TextSelection::has_selection(window, cx) {
                         if let (Some(start), Some(end)) =
-                            (this.text_anchor.clone(), this.hovered_line.clone())
+                            (this.review.text_anchor.clone(), this.review.hovered_line.clone())
                         {
-                            this.text_lines = Some((start, end));
+                            this.review.text_lines = Some((start, end));
                         }
                         // Everything the comment needs is captured here: the
                         // right-click that opens the context menu clears the
@@ -5717,7 +5805,7 @@ impl Render for ReviewApp {
                             (text.chars().count() > 1).then_some((range, Some(text)))
                         });
                         if let Some(payload) = payload {
-                            this.pending_comment = Some(payload);
+                            this.review.pending_comment = Some(payload);
                             tracing::trace!("comment payload captured");
                         }
                     }
@@ -5775,8 +5863,8 @@ impl Render for ReviewApp {
                 // Hover is never cleared on leave (leave events lag), so a
                 // reload can strand it on a commit the new list no longer
                 // has; Space must not toggle a ghost into the picked set.
-                if let Some(id) = this.hovered_commit.clone()
-                    && this.commits.iter().any(|commit| commit.id == id)
+                if let Some(id) = this.review.hovered_commit.clone()
+                    && this.review.commits.iter().any(|commit| commit.id == id)
                 {
                     this.picker_click(&id, false, cx);
                 }
@@ -5790,7 +5878,7 @@ impl Render for ReviewApp {
             .on_action(cx.listener(|this, _: &MarkReviewed, _, cx| {
                 // Only sets, never clears: un-reviewing is deliberate and
                 // stays on the checkbox, out of reach of a stray keypress.
-                if let Some(path) = this.current_file.clone()
+                if let Some(path) = this.review.current_file.clone()
                     && this.review_state(&path) != ReviewState::Reviewed
                 {
                     this.set_reviewed(&path, true, cx);
@@ -5850,7 +5938,7 @@ impl Render for ReviewApp {
             }))
             .child(self.render_title(cx))
             .child(self.render_scope_bar(reviewed, cx))
-            .when(self.search_open, |root| {
+            .when(self.review.search_open, |root| {
                 root.child(self.render_search_bar(cx))
             })
             .child({
@@ -5869,7 +5957,7 @@ impl Render for ReviewApp {
                         .context_menu(move |menu, _, cx| {
                             let payload = owner
                                 .upgrade()
-                                .and_then(|app| app.read(cx).pending_comment.clone());
+                                .and_then(|app| app.read(cx).review.pending_comment.clone());
                             let text = payload.as_ref().and_then(|(_, text)| text.clone());
                             // The line under the right-click, for a fresh
                             // line comment with no selection - the way to
@@ -5877,7 +5965,7 @@ impl Render for ReviewApp {
                             // owns the gutter's +.
                             let line = owner
                                 .upgrade()
-                                .and_then(|app| app.read(cx).hovered_line.clone());
+                                .and_then(|app| app.read(cx).review.hovered_line.clone());
                             let symbol = owner
                                 .upgrade()
                                 .and_then(|app| app.read(cx).pointed_symbol());
@@ -5917,8 +6005,8 @@ impl Render for ReviewApp {
                                             return;
                                         };
                                         let _ = comment_owner.update(cx, |this, cx| {
-                                            this.pending_comment = None;
-                                            this.text_lines = None;
+                                            this.review.pending_comment = None;
+                                            this.review.text_lines = None;
                                             this.start_comment(range, selection, window, cx);
                                         });
                                     }),
