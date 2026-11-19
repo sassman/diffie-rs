@@ -261,42 +261,41 @@ impl Forge for GitHubCli {
         })
     }
 
-    /// One `gh pr list` per state; the picker's page, not the archive.
-    /// Like a bare `--pr` number, gh resolves the repository from this
-    /// checkout's remotes.
+    /// One `gh pr list` call; the picker's page, not the archive. Like a
+    /// bare `--pr` number, gh resolves the repository from this checkout's
+    /// remotes.
     fn pull_requests(&self, which: PrList) -> Result<Vec<PrSummary>, ForgeError> {
-        // gh's `--state closed` is GraphQL's CLOSED, which excludes
-        // merged; finished means both, so two calls.
-        let states: &[&str] = match which {
-            PrList::Open => &["open"],
-            PrList::Finished => &["merged", "closed"],
+        // gh's `--state closed` includes merged pull requests (search
+        // semantics, not GraphQL's CLOSED), so finished is one call and
+        // the `state` field tells merged and closed apart.
+        let state = match which {
+            PrList::Open => "open",
+            PrList::Finished => "closed",
         };
+        let stdout = self.run(|command| {
+            command
+                .args(["pr", "list", "--state", state])
+                .args(["--limit", PR_PAGE])
+                .args([
+                    "--json",
+                    "number,title,author,updatedAt,isDraft,state,statusCheckRollup",
+                    // One @tsv line per pull request; the rollup rides
+                    // along as one column of `status;conclusion;state`
+                    // triples so the line count stays one per row.
+                    "--jq",
+                    ".[] | [(.number|tostring), .title, .author.login // \"\", \
+                     .updatedAt, (.isDraft|tostring), .state, \
+                     ([.statusCheckRollup // [] | .[] | \
+                     [(.status // \"\"), (.conclusion // \"\"), (.state // \"\")] \
+                     | join(\";\")] | join(\",\"))] | @tsv",
+                ]);
+        })?;
         let mut rows = Vec::new();
-        for state in states {
-            let stdout = self.run(|command| {
-                command
-                    .args(["pr", "list", "--state", state])
-                    .args(["--limit", PR_PAGE])
-                    .args([
-                        "--json",
-                        "number,title,author,updatedAt,isDraft,state,statusCheckRollup",
-                        // One @tsv line per pull request; the rollup rides
-                        // along as one column of `status;conclusion;state`
-                        // triples so the line count stays one per row.
-                        "--jq",
-                        ".[] | [(.number|tostring), .title, .author.login // \"\", \
-                         .updatedAt, (.isDraft|tostring), .state, \
-                         ([.statusCheckRollup // [] | .[] | \
-                         [(.status // \"\"), (.conclusion // \"\"), (.state // \"\")] \
-                         | join(\";\")] | join(\",\"))] | @tsv",
-                    ]);
-            })?;
-            for line in stdout.lines().filter(|line| !line.is_empty()) {
-                rows.push(parse_summary(line)?);
-            }
+        for line in stdout.lines().filter(|line| !line.is_empty()) {
+            rows.push(parse_summary(line)?);
         }
-        // Newest activity first; one order across the two finished calls.
-        rows.sort_by(|a, b| b.updated.cmp(&a.updated));
+        // Newest activity first.
+        rows.sort_by_key(|row| std::cmp::Reverse(row.updated));
         Ok(rows)
     }
 
@@ -511,8 +510,7 @@ fn check_verdict(status_conclusion_state: (&str, &str, &str)) -> CheckState {
         (_, "SUCCESS" | "NEUTRAL" | "SKIPPED", _) | (_, _, "SUCCESS") => CheckState::Passing,
         (
             _,
-            "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE"
-            | "STALE",
+            "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "STALE",
             _,
         )
         | (_, _, "FAILURE" | "ERROR") => CheckState::Failing,
@@ -831,12 +829,12 @@ esac
     }
 
     #[test]
-    fn a_finished_list_folds_the_merged_and_closed_calls_into_one_order() {
+    fn a_finished_list_carries_merged_and_closed_in_one_call() {
+        // gh's `--state closed` includes merged pull requests; the rows
+        // tell them apart by the state field.
         let gh = FakeGh::new(concat!(
-            r#"  *"pr list --state merged"*) printf '"#,
-            r#"3\tLanded\tcarol\t2026-11-10T09:00:00Z\tfalse\tMERGED\tCOMPLETED;FAILURE;\n' ;;"#,
-            "\n",
             r#"  *"pr list --state closed"*) printf '"#,
+            r#"3\tLanded\tcarol\t2026-11-10T09:00:00Z\tfalse\tMERGED\tCOMPLETED;FAILURE;\n"#,
             r#"5\tAbandoned\tdave\t2026-11-12T09:00:00Z\tfalse\tCLOSED\t\n' ;;"#
         ));
         let rows = gh.forge().pull_requests(PrList::Finished).unwrap();
