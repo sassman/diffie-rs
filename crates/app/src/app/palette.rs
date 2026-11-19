@@ -10,7 +10,6 @@ use std::cell::Cell;
 use super::*;
 use diffie_core::forge::Verdict;
 use gpui_kit::Action;
-use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::command::{Command, CommandItem};
 use gpui_kit::component::kbd::Kbd;
 
@@ -26,6 +25,8 @@ enum PaletteCommand {
     Forward,
     OpenPullRequest,
     Approve { with_comments: bool },
+    ContinueOp,
+    AbortOp,
 }
 
 struct PaletteEntry {
@@ -115,6 +116,23 @@ impl ReviewApp {
                 enabled: !self.publishing,
                 hint: None,
             },
+            // Greyed while the repository is idle: the pair only acts on an
+            // interrupted merge or rebase, but staying listed teaches that
+            // it exists.
+            PaletteEntry {
+                command: PaletteCommand::ContinueOp,
+                label: format!("Continue {}", self.op_noun()).into(),
+                keywords: &["conflict", "resolve", "merge", "rebase"],
+                enabled: self.can_continue_op(),
+                hint: None,
+            },
+            PaletteEntry {
+                command: PaletteCommand::AbortOp,
+                label: format!("Abort {}", self.op_noun()).into(),
+                keywords: &["conflict", "cancel", "merge", "rebase"],
+                enabled: self.can_abort_op(),
+                hint: None,
+            },
         ];
         if let Some(pull) = &self.review.pull {
             let number = pull.request.number;
@@ -151,6 +169,8 @@ impl ReviewApp {
             PaletteCommand::Approve { with_comments } => {
                 self.publish(Verdict::Approve, with_comments, cx)
             }
+            PaletteCommand::ContinueOp => self.run_op(false, cx),
+            PaletteCommand::AbortOp => self.confirm_abort(window, cx),
         }
     }
 
