@@ -135,6 +135,14 @@ When calling git:
   `docs/mockup/main-screen.html` disagree, the mockup wins unless the design
   document says otherwise.
 
+## Worktrees
+
+Linked worktrees live under `.worktrees/`, with the branch prefix as its
+own folder: the worktree for `feat/open-pr-palette` is
+`.worktrees/feat/open-pr-palette`, for `ci/release-pipeline` it is
+`.worktrees/ci/release-pipeline`; a branch without a prefix sits directly
+in `.worktrees/`. Do not create worktrees anywhere else.
+
 ## Commands
 
 ```sh
