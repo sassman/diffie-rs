@@ -4766,6 +4766,18 @@ impl ReviewApp {
             })
             .child(div().flex_1().min_w_0().truncate().child(name.to_string()))
             .when(comments > 0, |row| row.child(comment_badge(comments, cx)))
+            .when_some(self.conflict_badge(&file.path), |row, resolved| {
+                let color = if resolved {
+                    cx.theme().success
+                } else {
+                    cx.theme().warning
+                };
+                row.child(
+                    Icon::new(Lucide::GitMergeConflict)
+                        .xsmall()
+                        .text_color(color),
+                )
+            })
             .when(state == ReviewState::Reviewed, |row| {
                 row.child(
                     Icon::new(IconName::Check)
@@ -4786,6 +4798,21 @@ impl ReviewApp {
                 },
             )
             .into_any_element()
+    }
+
+    /// The tree's conflict marker for a path: unresolved in warning,
+    /// resolved in success, nothing outside an interrupted operation.
+    fn conflict_badge(&self, path: &str) -> Option<bool> {
+        if self.repo_state == RepoState::Idle {
+            return None;
+        }
+        if self.conflicts.iter().any(|file| file.path == path) {
+            return Some(false);
+        }
+        self.conflict_seen
+            .iter()
+            .any(|seen| seen == path)
+            .then_some(true)
     }
 
     /// Whether any ancestor folder of `path` is shut in the file panel.
