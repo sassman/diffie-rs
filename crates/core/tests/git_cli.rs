@@ -1171,6 +1171,18 @@ fn worktree_file_reads_what_is_on_disk() {
 }
 
 #[test]
+fn default_branch_is_what_the_remotes_head_records() {
+    // A clone records the remote's default branch; a repository without
+    // remotes has nobody to say.
+    let (_directory, local, _head, _base) = clone_behind_upstream();
+    let backend = GitCli::open(&local).unwrap();
+    assert_eq!(backend.default_branch().unwrap().as_deref(), Some("main"));
+
+    let fixture = Fixture::new();
+    assert_eq!(fixture.backend().default_branch().unwrap(), None);
+}
+
+#[test]
 fn has_uncommitted_changes_counts_edits_and_untracked_files() {
     let fixture = Fixture::new();
     let root = fixture.directory.path();

@@ -19,7 +19,8 @@ Usage: diffie [-C <path>] [<revision> [<revision>]] [--every-difference]
 
 Reads in the merge direction. With no revision, reviews the uncommitted
 changes going into the checked-out branch - and with a clean working
-tree, what the branch itself adds going into main. With one revision, reviews
+tree, what the branch itself adds going into the default branch (what
+the remotes' HEAD names, else main, else master). With one revision, reviews
 everything the working tree adds going into it. With two revisions (or A..B),
 reviews the first going into the second: `diffie topic main` is topic's
 changes going into main. A revision only a remote has is taken from there
@@ -79,15 +80,26 @@ fn remote_ref(backend: &GitCli, branch: &str, missing: impl FnOnce() -> String) 
     }
 }
 
-/// Whether `main` can anchor the clean-tree default: it is a revision
-/// here, or exactly one remote carries it (the resolve step then takes
-/// that remote's ref). Anything else keeps the uncommitted default
-/// instead of failing a bare start over a branch nobody named.
-fn main_comparable(backend: &GitCli) -> bool {
-    backend.revision_exists("main").unwrap_or(false)
-        || backend
-            .remotes_with_branch("main")
-            .is_ok_and(|remotes| remotes.len() == 1)
+/// The branch a bare start compares against when nothing names one: what
+/// the remotes' HEAD records as the default branch, else `main`, else
+/// `master` - the first that can anchor a comparison here (a revision, or
+/// carried by exactly one remote, which the resolve step then takes).
+/// `None` keeps the uncommitted default instead of failing a bare start
+/// over a branch nobody named.
+fn default_target(backend: &GitCli) -> Option<String> {
+    let comparable = |branch: &String| {
+        backend.revision_exists(branch).unwrap_or(false)
+            || backend
+                .remotes_with_branch(branch)
+                .is_ok_and(|remotes| remotes.len() == 1)
+    };
+    backend
+        .default_branch()
+        .ok()
+        .flatten()
+        .into_iter()
+        .chain(["main".to_string(), "master".to_string()])
+        .find(comparable)
 }
 
 fn main() {
@@ -325,18 +337,21 @@ fn main() {
             // Opened plainly, the review is the uncommitted work going into
             // the checked-out branch. A clean working tree has no such
             // review, so the default becomes what the branch itself adds to
-            // main (`diffie HEAD..main` spelled out) - but only when that
-            // reads as a review: a branch that is not main itself, and a
-            // main to compare against. A bare repository or a detached HEAD
-            // has neither and falls back to branch against main.
-            let branch_into_main = working_tree
-                && !backend.has_uncommitted_changes().unwrap_or(true)
-                && branch.as_deref().is_some_and(|name| name != "main")
-                && main_comparable(&backend);
-            if branch_into_main {
+            // the default branch (`diffie HEAD..main` spelled out) - but
+            // only when that reads as a review: a checked-out branch that is
+            // not the default itself, and a default branch to compare
+            // against (see `default_target`). A bare repository or a
+            // detached HEAD has neither and falls back to branch against
+            // the default.
+            let branch_into_default = (working_tree
+                && !backend.has_uncommitted_changes().unwrap_or(true))
+            .then(|| default_target(&backend))
+            .flatten()
+            .filter(|target| branch.as_deref().is_some_and(|name| name != target));
+            if let Some(target) = branch_into_default {
                 Comparison {
                     source: branch.clone().unwrap_or_default(),
-                    target: "main".to_string(),
+                    target,
                     mode,
                     uncommitted: false,
                     ..Default::default()
@@ -353,7 +368,9 @@ fn main() {
                 Comparison {
                     // Name the review after the branch, not the literal HEAD.
                     source: branch.clone().unwrap_or_else(|| "HEAD".to_string()),
-                    target: "main".to_string(),
+                    // `main` when nothing better is known: the resolve step
+                    // then words the error.
+                    target: default_target(&backend).unwrap_or_else(|| "main".to_string()),
                     mode,
                     uncommitted: false,
                     ..Default::default()

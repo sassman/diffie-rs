@@ -125,6 +125,13 @@ pub trait ReviewBackend: Send + Sync {
     /// files. Decides the bare invocation's default comparison.
     fn has_uncommitted_changes(&self) -> Result<bool>;
 
+    /// The repository's default branch as the clone recorded it: the
+    /// branch the remotes' HEAD points at (`refs/remotes/<remote>/HEAD`),
+    /// when the remotes that say agree on one name. `None` otherwise - a
+    /// remote added by hand records no HEAD, and git is never asked over
+    /// the network for one.
+    fn default_branch(&self) -> Result<Option<String>>;
+
     /// The configured remotes, as `git remote` lists them. Names a remote
     /// in fetch hints without guessing.
     fn remotes(&self) -> Result<Vec<String>>;

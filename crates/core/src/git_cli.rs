@@ -581,6 +581,29 @@ impl ReviewBackend for GitCli {
             .is_empty())
     }
 
+    fn default_branch(&self) -> Result<Option<String>> {
+        let mut names: Vec<String> = Vec::new();
+        for remote in self.remotes()? {
+            // The constant `refs/remotes/` prefix keeps the ref from being
+            // read as an option.
+            let reference = format!("refs/remotes/{remote}/HEAD");
+            let Some(target) = self.try_read(&["symbolic-ref", "--quiet", &reference])? else {
+                continue;
+            };
+            let prefix = format!("refs/remotes/{remote}/");
+            if let Some(name) = target.trim().strip_prefix(&prefix)
+                && !names.iter().any(|known| known == name)
+            {
+                names.push(name.to_string());
+            }
+        }
+        Ok(match names.as_slice() {
+            [one] => Some(one.clone()),
+            // No remote says, or they disagree: no guess.
+            _ => None,
+        })
+    }
+
     fn remotes(&self) -> Result<Vec<String>> {
         Ok(self
             .read(&["remote"])?
