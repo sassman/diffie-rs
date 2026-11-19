@@ -4439,7 +4439,7 @@ impl ReviewApp {
             // as a link, with no fill to hide the row's own colours.
             .chain(self.symbols.link.as_ref().map(|link| {
                 DiffSpanHighlight::new(link.position.clone(), link.span.clone())
-                    .without_background()
+                    .with_background(gpui_kit::transparent_black())
                     .with_foreground(cx.theme().link)
                     .with_underline()
             }))
