@@ -46,7 +46,9 @@ id starts with <id> (--prompt prints the ids), writing the agent's own
 review file. Replies are conversation, never verdict: resolving stays a
 human reaction in the app. --session records the agent conversation the
 answer came from (default: $CLAUDE_SESSION_ID); the app then offers
-`claude --resume <id>` behind the answer's robot badge.";
+`claude --resume <id>` behind the answer's robot badge.
+
+--version (-V) prints the version and exits.";
 
 fn exit_usage(message: &str) -> ! {
     eprintln!("{message}\n\n{USAGE}");
@@ -110,6 +112,10 @@ fn main() {
         match text.as_str() {
             "--help" | "-h" => {
                 println!("{USAGE}");
+                return;
+            }
+            "--version" | "-V" => {
+                println!("diffie {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             "--every-difference" => mode = CompareMode::EveryDifference,
