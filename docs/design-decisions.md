@@ -857,10 +857,13 @@ Decided (owner, 2026-11-19):
   Upstream changes right. Conflict blocks stay aligned across the panes via
   spacer rows; only the outer column scrolls vertically, each pane scrolls
   its long lines horizontally.
-- The middle pane is a real editor. Picks (take a side, take both, undo
-  block) splice text into it, and free typing works anywhere; a hand edit
-  inside a block marks it resolved by hand. Raw conflict markers never
-  appear in it.
+- Editing in the middle pane is block-scoped (owner, 2026-11-20,
+  narrowing the earlier free-typing intent): a block's result region
+  becomes editable once it has a pick (take a side, take both), typing
+  there flips the block to hand-edited, and Enter at the region's edges
+  adds lines above and below. Context lines stay read-only; undo returns
+  the block to its base lines, read-only. Raw conflict markers never
+  appear in the pane.
 - The strings "ours" and "theirs" never appear in the UI. The panes are
   Your changes and Upstream changes, suffixed with the concrete ref. The
   backend maps git's sides to these labels per operation - a rebase swaps
@@ -889,3 +892,6 @@ Open:
 
 - A keyboard model for the conflict view beyond the palette.
 - Whether comments can attach to lines inside the conflict view.
+- The block editor scrolls its long lines within its own width instead
+  of following the pane's horizontal scroll, so columns can shear at a
+  resolved block; whether the pane should drive one shared offset.

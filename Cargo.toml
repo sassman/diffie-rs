@@ -37,10 +37,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # on the v0.9.1 tag, so every crate keeps the pinned version; the whole
 # family must come from one source or two copies of gpui-base collide.
 [patch.crates-io]
-gpui-kit = { git = "https://github.com/sassman/gpui-kit", branch = "diff-conflict-resolv" }
-gpui-component = { git = "https://github.com/sassman/gpui-kit", branch = "diff-conflict-resolv" }
-gpui-base = { git = "https://github.com/sassman/gpui-kit", branch = "diff-conflict-resolv" }
-gpui-kit-assets = { git = "https://github.com/sassman/gpui-kit", branch = "diff-conflict-resolv" }
+gpui-kit = { git = "https://github.com/sassman/gpui-kit", branch = "diff-conflict-edit" }
+gpui-component = { git = "https://github.com/sassman/gpui-kit", branch = "diff-conflict-edit" }
+gpui-base = { git = "https://github.com/sassman/gpui-kit", branch = "diff-conflict-edit" }
+gpui-kit-assets = { git = "https://github.com/sassman/gpui-kit", branch = "diff-conflict-edit" }
 
 [profile.dev]
 # GPUI is slow unoptimised; keep our own crates fast to rebuild.
