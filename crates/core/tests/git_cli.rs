@@ -1539,7 +1539,7 @@ fn predicted_conflicts_see_the_collision_before_any_merge_starts() {
 
     let predicted = fixture
         .backend()
-        .predicted_conflicts("feat", "main")
+        .predicted_conflicts("feat", None, "main", None)
         .unwrap();
 
     assert_eq!(predicted.len(), 1);
@@ -1571,9 +1571,73 @@ fn predicted_conflicts_stay_empty_for_branches_that_merge_cleanly() {
 
     let predicted = fixture
         .backend()
-        .predicted_conflicts("docs", "feat")
+        .predicted_conflicts("docs", None, "feat", None)
         .unwrap();
     assert_eq!(predicted, Vec::new());
+}
+
+#[test]
+fn predicted_conflicts_follow_the_pin_once_a_name_has_moved() {
+    let fixture = ConflictFixture::new();
+    let pinned = git(fixture.root(), &["rev-parse", "main"]);
+
+    // While the name and the pin agree, the name labels the markers.
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("feat", None, "main", Some(&pinned))
+        .unwrap();
+    let merged = predicted[0].merged.as_deref().unwrap();
+    assert!(merged.contains(">>>>>>> main"), "{merged}");
+
+    // Once main moves on, the review stays pinned: the forecast merges
+    // the pinned tip's content and the markers carry the pin.
+    git(fixture.root(), &["checkout", "-q", "main"]);
+    std::fs::write(fixture.root().join("t.txt"), "main line moved on\n").unwrap();
+    git(
+        fixture.root(),
+        &["commit", "-q", "-am", "main rewrites t again"],
+    );
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("feat", None, "main", Some(&pinned))
+        .unwrap();
+    let merged = predicted[0].merged.as_deref().unwrap();
+    assert!(merged.contains("main line\n"), "{merged}");
+    assert!(!merged.contains("main line moved on"), "{merged}");
+    assert!(merged.contains(&format!(">>>>>>> {pinned}")), "{merged}");
+}
+
+#[test]
+fn predicted_conflicts_keep_a_path_git_would_quote() {
+    let fixture = ConflictFixture::new();
+    // Added differently on both sides: a two-way conflict on a name that
+    // a C-quoting listing would mangle under LC_ALL=C.
+    git(fixture.root(), &["checkout", "-q", "feat"]);
+    std::fs::write(fixture.root().join("grüße.txt"), "feat greets\n").unwrap();
+    git(fixture.root(), &["add", "grüße.txt"]);
+    git(
+        fixture.root(),
+        &["commit", "-q", "-m", "feat adds greetings"],
+    );
+    git(fixture.root(), &["checkout", "-q", "main"]);
+    std::fs::write(fixture.root().join("grüße.txt"), "main greets\n").unwrap();
+    git(fixture.root(), &["add", "grüße.txt"]);
+    git(
+        fixture.root(),
+        &["commit", "-q", "-m", "main adds greetings"],
+    );
+
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("feat", None, "main", None)
+        .unwrap();
+    let greeting = predicted
+        .iter()
+        .find(|conflict| conflict.path == "grüße.txt")
+        .expect("the quoted-name path is listed verbatim");
+    let merged = greeting.merged.as_deref().unwrap();
+    assert!(merged.contains("feat greets"), "{merged}");
+    assert!(merged.contains("main greets"), "{merged}");
 }
 
 fn count_files(directory: &Path) -> usize {
