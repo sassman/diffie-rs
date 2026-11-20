@@ -56,9 +56,9 @@ use gpui_kit::component::{
 use gpui_kit::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClipboardItem, Context,
     ElementId, Entity, FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, WeakEntity, Window, WindowBounds, deferred, div,
-    prelude::FluentBuilder as _, px, rgb,
+    KeyBinding, ParentElement as _, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window,
+    WindowBounds, deferred, div, prelude::FluentBuilder as _, px, rgb,
 };
 
 mod palette;
@@ -140,6 +140,9 @@ use commands::*;
 /// open.
 const DIFF: Option<&str> = Some("Reading > Diff");
 const REVIEW: Option<&str> = Some("Review");
+/// The conflicts center's own context, mirroring the Diff's: the jump
+/// keys work there too, and still never while a comment box is open.
+const CONFLICTS: Option<&str> = Some("Reading > Conflicts");
 
 /// Resolving folds the card away, but not under the pointer: the thread
 /// stays for this grace, then fades over [`FOLD_FADE`] into its line
@@ -205,6 +208,8 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("]", NextChange, DIFF),
         KeyBinding::new("[", PreviousChange, DIFF),
+        KeyBinding::new("]", NextChange, CONFLICTS),
+        KeyBinding::new("[", PreviousChange, CONFLICTS),
         KeyBinding::new("}", NextFile, DIFF),
         KeyBinding::new("{", PreviousFile, DIFF),
         KeyBinding::new("s", ToggleMode, DIFF),
@@ -1143,6 +1148,14 @@ pub struct ReviewApp {
     /// Conflicts auto-selects once per operation; after that the manual
     /// choice stands until the repository is idle again.
     conflicts_seen: bool,
+    /// The conflicts column's scroll, so `]` and `[` can bring a file's
+    /// start into view; the handle tracks the column's children.
+    conflicts_scroll: ScrollHandle,
+    /// Focus for the conflicts column: the jump keys dispatch along the
+    /// focus path, exactly like the Diff's single letters.
+    conflicts_focus: FocusHandle,
+    /// The conflicted file the jump keys last landed on.
+    conflict_cursor: Option<usize>,
     /// One continue or abort at a time; strip and palette grey behind it.
     op_running: bool,
     /// Git's own words when continue or abort failed, shown in the strip.
@@ -1305,6 +1318,9 @@ impl ReviewApp {
             op_labels: None,
             center: CenterView::Review,
             conflicts_seen: false,
+            conflicts_scroll: ScrollHandle::new(),
+            conflicts_focus: cx.focus_handle(),
+            conflict_cursor: None,
             op_running: false,
             op_error: None,
             symbols: symbols::Symbols::new(window, cx),
@@ -1559,7 +1575,7 @@ impl ReviewApp {
                 if let Some(first) = self.conflicts.first() {
                     self.op_labels.get_or_insert_with(|| first.labels.clone());
                 }
-                if self.repo_state == RepoState::Idle && self.forecast_resolving() {
+                if self.forecast_resolving() {
                     // The same resolvers, fed from the predicted merge: the
                     // entity reuse on an unchanged source keeps the
                     // reviewer's picks across background reloads.
@@ -2049,8 +2065,9 @@ impl ReviewApp {
     }
 
     /// The conscious step: one dialog naming remote, branch and pull
-    /// request before anything leaves the machine. The resolved texts are
-    /// read from the mounted resolvers here, never from a stored copy.
+    /// request before anything leaves the machine. Only words here - the
+    /// payload is gathered when Push is clicked, so a reload or an edit
+    /// between opening and confirming can never ship a stale resolution.
     fn confirm_push_resolution(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.push_resolution_blockers(cx).is_some() {
             return;
@@ -2059,6 +2076,41 @@ impl ReviewApp {
             return;
         };
         let Some(Ok(remote)) = self.review.push_remote.clone() else {
+            return;
+        };
+        let request = &pull.request;
+        let title = format!("Push the resolution to {remote}/{}?", request.source_branch);
+        let description = format!(
+            "Adds a merge commit of {} to pull request #{}. The branch on {remote} \
+             moves by this push alone; nothing is forced.",
+            request.target_branch, request.number
+        );
+        let owner = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let owner = owner.clone();
+            alert
+                .confirm()
+                .title(title.clone())
+                .description(description.clone())
+                .ok_text("Push")
+                .on_ok(move |_, _, cx| {
+                    let _ = owner.update(cx, |this, cx| this.start_resolution_push(cx));
+                    true
+                })
+        });
+    }
+
+    fn start_resolution_push(&mut self, cx: &mut Context<Self>) {
+        // Everything re-checked and re-read now, not when the dialog
+        // opened: the forecast may have moved under it.
+        if let Some(reason) = self.push_resolution_blockers(cx) {
+            self.review.publish_status = Some((format!("Not pushed - {reason}").into(), true));
+            cx.notify();
+            return;
+        }
+        let (Some(pull), Some(Ok(remote))) =
+            (self.review.pull.as_ref(), self.review.push_remote.clone())
+        else {
             return;
         };
         let request = &pull.request;
@@ -2079,43 +2131,24 @@ impl ReviewApp {
             })
             .collect();
         let push = ResolutionPush {
-            remote: remote.clone(),
+            remote,
             branch: request.source_branch.clone(),
             source: request.source_commit.clone(),
-            target: request.target_commit.clone(),
+            // The base the resolvers actually resolved against: the
+            // forecast's resolved target tip, not the forge's possibly
+            // older base snapshot - the merge must match what was seen.
+            target: self
+                .review
+                .resolved
+                .as_ref()
+                .map(|resolved| resolved.target_head.as_str().to_string())
+                .unwrap_or_else(|| request.target_commit.clone()),
             message: format!(
                 "Merge branch '{}' into {}",
                 request.target_branch, request.source_branch
             ),
             resolutions,
         };
-        let title = format!("Push the resolution to {remote}/{}?", push.branch);
-        let description = format!(
-            "Adds a merge commit of {} to pull request #{}. The branch on {remote} \
-             moves by this push alone; nothing is forced.",
-            request.target_branch, request.number
-        );
-        let owner = cx.weak_entity();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let owner = owner.clone();
-            let push = push.clone();
-            alert
-                .confirm()
-                .title(title.clone())
-                .description(description.clone())
-                .ok_text("Push")
-                .on_ok(move |_, _, cx| {
-                    let push = push.clone();
-                    let _ = owner.update(cx, |this, cx| this.start_resolution_push(push, cx));
-                    true
-                })
-        });
-    }
-
-    fn start_resolution_push(&mut self, push: ResolutionPush, cx: &mut Context<Self>) {
-        if self.op_running {
-            return;
-        }
         self.op_running = true;
         self.op_error = None;
         let backend = self.backend.clone();
@@ -2148,7 +2181,12 @@ impl ReviewApp {
                         this.reload(cx);
                     }
                     Err(error) => {
-                        this.op_error = Some(error.into());
+                        // The strip that shows op_error only exists during
+                        // an interrupted operation; a forecast push fails
+                        // in an idle window, so the pull request's own
+                        // status line carries it.
+                        this.review.publish_status =
+                            Some((format!("Resolution push failed - {error}").into(), true));
                         cx.notify();
                     }
                 }
@@ -3931,17 +3969,25 @@ impl ReviewApp {
                                             .tooltip("Conflicts view")
                                             .checked(conflicts),
                                     )
-                                    .on_click(cx.listener(|this, checks: &Vec<bool>, _, cx| {
-                                        // Clicking the checked segment clears
-                                        // the group; an either-or keeps the
-                                        // current choice instead.
-                                        this.center = match checks.iter().position(|on| *on) {
-                                            Some(0) => CenterView::Review,
-                                            Some(_) => CenterView::Conflicts,
-                                            None => return,
-                                        };
-                                        cx.notify();
-                                    })),
+                                    .on_click(cx.listener(
+                                        |this, checks: &Vec<bool>, window, cx| {
+                                            // Clicking the checked segment clears
+                                            // the group; an either-or keeps the
+                                            // current choice instead.
+                                            this.center = match checks.iter().position(|on| *on) {
+                                                Some(0) => CenterView::Review,
+                                                Some(_) => CenterView::Conflicts,
+                                                None => return,
+                                            };
+                                            // Focus follows the switch, so the
+                                            // jump keys work without a click
+                                            // into the column first.
+                                            if this.center == CenterView::Conflicts {
+                                                window.focus(&this.conflicts_focus, cx);
+                                            }
+                                            cx.notify();
+                                        },
+                                    )),
                             )
                         })
                         .child(
@@ -4847,8 +4893,11 @@ impl ReviewApp {
             .collect::<Vec<_>>();
         let column = v_flex()
             .id("conflicts")
+            .key_context("Conflicts")
+            .track_focus(&self.conflicts_focus)
             .size_full()
             .overflow_y_scroll()
+            .track_scroll(&self.conflicts_scroll)
             .children(rows);
         if self.conflicts.is_empty() {
             // Resolved in the terminal, or by the last Mark resolved: the
@@ -4920,8 +4969,11 @@ impl ReviewApp {
             .collect::<Vec<_>>();
         v_flex()
             .id("conflicts")
+            .key_context("Conflicts")
+            .track_focus(&self.conflicts_focus)
             .size_full()
             .overflow_y_scroll()
+            .track_scroll(&self.conflicts_scroll)
             .child(header)
             .children(rows)
             .into_any_element()
@@ -5011,10 +5063,13 @@ impl ReviewApp {
                     )
                     .child(div().flex_1())
                     .when(conflict.merged.is_some(), |row| {
+                        // A ticked file stays untickable even after its
+                        // resolver was reopened, or the stale tick could
+                        // never be cleared.
                         row.child(self.render_resolved_box(
                             &path,
                             ticked,
-                            ready && !self.op_running,
+                            (ready || ticked) && !self.op_running,
                             cx,
                         ))
                     }),
@@ -5350,6 +5405,30 @@ impl ReviewApp {
             .then_some(true)
     }
 
+    /// `]` and `[` in the conflicts center walk the conflicted files,
+    /// scrolling each file's start into view. Jumps between the blocks
+    /// inside a file wait on the keyboard model (section 20, Open).
+    fn jump_conflict(&mut self, direction: isize, cx: &mut Context<Self>) {
+        let count = if self.forecast_resolving() {
+            self.review.predicted.len()
+        } else {
+            self.conflict_seen.len()
+        };
+        if count == 0 {
+            return;
+        }
+        let cursor = match self.conflict_cursor {
+            Some(cursor) => (cursor as isize + direction).clamp(0, count as isize - 1) as usize,
+            None if direction > 0 => 0,
+            None => count - 1,
+        };
+        self.conflict_cursor = Some(cursor);
+        // The forecast column leads with its summary row.
+        let child = cursor + usize::from(self.forecast_resolving());
+        self.conflicts_scroll.scroll_to_item(child);
+        cx.notify();
+    }
+
     /// The header's swap between a file's review diff and the forecast of
     /// how the merge would conflict on it.
     fn toggle_forecast(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -5461,6 +5540,11 @@ impl ReviewApp {
             // Orphan entries follow the earlier-comments toggle, as in the
             // Diff, so panel and main content stay in step.
             if file.state == FileState::NotInComparison && !self.show_other_revisions {
+                continue;
+            }
+            // The conflicts center is about its conflicted files alone;
+            // the rest of the comparison would only be noise beside it.
+            if self.showing_conflicts() && self.conflict_badge(&file.path).is_none() {
                 continue;
             }
             let mut folders: Vec<String> = file.path.split('/').map(String::from).collect();
@@ -7109,6 +7193,10 @@ impl Render for ReviewApp {
                 },
             ))
             .on_action(cx.listener(|this, _: &NextChange, _, cx| {
+                if this.showing_conflicts() {
+                    this.jump_conflict(1, cx);
+                    return;
+                }
                 this.remember_position(cx);
                 this.diff.update(cx, |state, cx| state.next_change(cx));
                 this.follow_mark(cx);
@@ -7121,6 +7209,10 @@ impl Render for ReviewApp {
                 this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PreviousChange, _, cx| {
+                if this.showing_conflicts() {
+                    this.jump_conflict(-1, cx);
+                    return;
+                }
                 this.remember_position(cx);
                 this.diff.update(cx, |state, cx| state.previous_change(cx));
                 this.follow_mark(cx);
@@ -7460,21 +7552,22 @@ fn load(
     // Only a pinned source names a pull request's head; resolving the
     // remote here lets the confirm dialog name it without a backend call
     // on the UI thread.
+    // The head branch rarely has a remote-tracking ref here - the picker's
+    // fetch pins the commit instead of fetching the branch - so the remote
+    // falls back to the one carrying the base branch.
     let push_remote = (comparison.source_rev.is_some() && !predicted.is_empty()).then(|| {
-        match backend.remotes_with_branch(&comparison.source) {
-            Ok(remotes) => match remotes.as_slice() {
-                [remote] => Ok(remote.clone()),
-                [] => Err(format!(
-                    "`{}` is on no configured remote",
-                    comparison.source
-                )),
-                _ => Err(format!(
-                    "`{}` is on more than one remote ({}); push by hand",
-                    comparison.source,
-                    remotes.join(", ")
-                )),
-            },
-            Err(error) => Err(error.to_string()),
+        let single = |branch: &str| {
+            backend
+                .remotes_with_branch(branch)
+                .ok()
+                .and_then(|mut remotes| (remotes.len() == 1).then(|| remotes.remove(0)))
+        };
+        match single(&comparison.source).or_else(|| single(&comparison.target)) {
+            Some(remote) => Ok(remote),
+            None => Err(format!(
+                "no single remote carries `{}` or `{}`; push by hand",
+                comparison.source, comparison.target
+            )),
         }
     });
     let resolved = backend.resolve(comparison).map_err(text)?;
