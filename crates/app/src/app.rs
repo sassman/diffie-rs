@@ -22,8 +22,8 @@ use crate::settings::{LayoutMode, Settings, WindowSettings};
 use diffie_core::time::{ago, relative_age};
 use diffie_core::{
     BlameLine, ChangedRegion, Commit, Comparison, ConflictFile, ConflictLabels, FileState,
-    FileStatus, FileSummary, NewSide, Oid, PredictedConflict, RepoState, Resolved, ReviewBackend,
-    Scope, ScopedPatch,
+    FileStatus, FileSummary, NewSide, Oid, PredictedConflict, RepoState, ResolutionPush, Resolved,
+    ReviewBackend, Scope, ScopedPatch,
 };
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
@@ -34,7 +34,7 @@ use gpui_kit::component::{
         ToggleVariants as _,
     },
     checkbox::Checkbox,
-    conflict_resolv::{ConflictResolv, ConflictResolvState},
+    conflict_resolv::{ConflictResolv, ConflictResolvEvent, ConflictResolvState},
     diff::{
         Diff, DiffAnnotation, DiffChangeIndicator, DiffDecoration, DiffEvent, DiffFile, DiffFold,
         DiffGutterMarker, DiffHunkSeparator, DiffLinePosition, DiffLineRange, DiffMode, DiffSide,
@@ -56,9 +56,9 @@ use gpui_kit::component::{
 use gpui_kit::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClipboardItem, Context,
     ElementId, Entity, FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, WeakEntity, Window, WindowBounds, deferred, div,
-    prelude::FluentBuilder as _, px, rgb,
+    KeyBinding, ParentElement as _, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window,
+    WindowBounds, deferred, div, prelude::FluentBuilder as _, px, rgb,
 };
 
 mod palette;
@@ -140,6 +140,9 @@ use commands::*;
 /// open.
 const DIFF: Option<&str> = Some("Reading > Diff");
 const REVIEW: Option<&str> = Some("Review");
+/// The conflicts center's own context, mirroring the Diff's: the jump
+/// keys work there too, and still never while a comment box is open.
+const CONFLICTS: Option<&str> = Some("Reading > Conflicts");
 
 /// Resolving folds the card away, but not under the pointer: the thread
 /// stays for this grace, then fades over [`FOLD_FADE`] into its line
@@ -205,6 +208,8 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("]", NextChange, DIFF),
         KeyBinding::new("[", PreviousChange, DIFF),
+        KeyBinding::new("]", NextChange, CONFLICTS),
+        KeyBinding::new("[", PreviousChange, CONFLICTS),
         KeyBinding::new("}", NextFile, DIFF),
         KeyBinding::new("{", PreviousFile, DIFF),
         KeyBinding::new("s", ToggleMode, DIFF),
@@ -638,14 +643,31 @@ struct ConflictView {
 }
 
 enum ConflictBody {
-    /// The subscription keeps the app re-rendering on every pick made
-    /// inside the component.
+    /// The resolver and the small view that renders it. Typing in a
+    /// block editor repaints that view alone; the app's subscription
+    /// reacts to picks and undo, never to Edited, so a keystroke does
+    /// not re-render the window.
     Resolver(
         Entity<ConflictResolvState>,
+        Entity<ResolverView>,
         #[allow(dead_code)] Subscription,
     ),
     /// The marker parser's complaint, shown in place of a resolver.
     Unparsed(SharedString),
+}
+
+/// One resolver's own view: the per-keystroke repaint stops here instead
+/// of re-rendering every resolver and the window's chrome around them.
+struct ResolverView {
+    state: Entity<ConflictResolvState>,
+    labels: ConflictLabels,
+    _observe: Subscription,
+}
+
+impl Render for ResolverView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        render_resolver(&self.state, &self.labels)
+    }
 }
 
 /// One group of the commit picker: its heading row and the commits it lists.
@@ -754,6 +776,15 @@ struct Loaded {
     /// both empty during an interrupted operation.
     predicted: Vec<PredictedConflict>,
     predicted_files: Vec<DiffFile>,
+    /// One parse per markered entry in `predicted`, same order, done off
+    /// the UI thread like `conflict_parses`: a pull-request review
+    /// resolves the forecast in-app.
+    forecast_parses: Vec<Result<ConflictResolvState, String>>,
+    /// The forecast panes' labels, present with a non-empty forecast.
+    forecast_labels: Option<ConflictLabels>,
+    /// Where a resolution push would go (a pinned review only), or why
+    /// nowhere.
+    push_remote: Option<std::result::Result<String, String>>,
 }
 
 /// What annotation and header callbacks may read. They receive an `App`, not
@@ -971,6 +1002,17 @@ struct PerReview {
     /// The moved-block folds of this load, the one canonical set every
     /// `set_files` re-applies: the diff state starts its folds over.
     folds: Vec<DiffFold>,
+    /// Forecast conflicts the reviewer ticked resolved, by path. Only a
+    /// confirmation flag: the resolved texts stay in the mounted
+    /// resolvers until the confirmed push reads them, so a later edit
+    /// can never ship a stale copy.
+    pr_resolved: HashSet<String>,
+    /// The forecast resolver panes' labels: the two branch names with
+    /// their tips' clocks.
+    forecast_labels: Option<ConflictLabels>,
+    /// The one remote a resolution push would go to, or why there is
+    /// none; resolved during the load so the confirm dialog can name it.
+    push_remote: Option<std::result::Result<String, String>>,
     /// The comment `n`/`p` last jumped to, so the walk continues from
     /// there instead of restarting at the top.
     comment_cursor: Option<String>,
@@ -1056,6 +1098,9 @@ impl PerReview {
             predicted_shown: HashSet::new(),
             plain_files: HashMap::new(),
             folds: Vec::new(),
+            pr_resolved: HashSet::new(),
+            forecast_labels: None,
+            push_remote: None,
             comment_cursor: None,
             unfolded: HashSet::new(),
             fading: HashSet::new(),
@@ -1120,6 +1165,12 @@ pub struct ReviewApp {
     /// Conflicts auto-selects once per operation; after that the manual
     /// choice stands until the repository is idle again.
     conflicts_seen: bool,
+    /// The conflicts column's scroll, so `]` and `[` can bring a file's
+    /// start into view; the handle tracks the column's children.
+    conflicts_scroll: ScrollHandle,
+    /// Focus for the conflicts column: the jump keys dispatch along the
+    /// focus path, exactly like the Diff's single letters.
+    conflicts_focus: FocusHandle,
     /// One continue or abort at a time; strip and palette grey behind it.
     op_running: bool,
     /// Git's own words when continue or abort failed, shown in the strip.
@@ -1282,6 +1333,8 @@ impl ReviewApp {
             op_labels: None,
             center: CenterView::Review,
             conflicts_seen: false,
+            conflicts_scroll: ScrollHandle::new(),
+            conflicts_focus: cx.focus_handle(),
             op_running: false,
             op_error: None,
             symbols: symbols::Symbols::new(window, cx),
@@ -1456,6 +1509,11 @@ impl ReviewApp {
                 self.review
                     .predicted_shown
                     .retain(|path| self.review.predicted_files.contains_key(path));
+                self.review.forecast_labels = loaded.forecast_labels;
+                self.review.push_remote = loaded.push_remote;
+                self.review
+                    .pr_resolved
+                    .retain(|path| self.review.predicted_files.contains_key(path));
                 let mut diff_files = loaded.files;
                 if self.show_other_revisions && !self.review.orphan_files.is_empty() {
                     diff_files.extend(self.review.orphan_files.iter().cloned());
@@ -1531,10 +1589,51 @@ impl ReviewApp {
                 if let Some(first) = self.conflicts.first() {
                     self.op_labels.get_or_insert_with(|| first.labels.clone());
                 }
-                self.sync_conflict_views(loaded.conflict_parses, cx);
+                if self.forecast_resolving() {
+                    // The same resolvers, fed from the predicted merge: the
+                    // entity reuse on an unchanged source keeps the
+                    // reviewer's picks across background reloads. Clocks
+                    // can be missing (an unreadable tip); the pane names
+                    // still say which side is which.
+                    let labels =
+                        self.review
+                            .forecast_labels
+                            .clone()
+                            .unwrap_or_else(|| ConflictLabels {
+                                yours: self.review.comparison.source.clone(),
+                                upstream: self.review.comparison.target.clone(),
+                                yours_date: String::new(),
+                                yours_time: 0,
+                                upstream_time: 0,
+                            });
+                    let sources = self
+                        .review
+                        .predicted
+                        .iter()
+                        .filter_map(|conflict| {
+                            Some((
+                                conflict.path.clone(),
+                                conflict.merged.clone()?,
+                                labels.clone(),
+                            ))
+                        })
+                        .collect();
+                    self.sync_conflict_views(sources, loaded.forecast_parses, cx);
+                } else {
+                    let sources = self
+                        .conflicts
+                        .iter()
+                        .map(|file| (file.path.clone(), file.working.clone(), file.labels.clone()))
+                        .collect();
+                    self.sync_conflict_views(sources, loaded.conflict_parses, cx);
+                }
                 match self.repo_state {
                     RepoState::Idle => {
-                        self.center = CenterView::Review;
+                        // The forecast's Conflicts center survives reloads;
+                        // without one there is nothing to stay on.
+                        if !self.forecast_resolving() {
+                            self.center = CenterView::Review;
+                        }
                         self.conflicts_seen = false;
                     }
                     _ => {
@@ -1688,8 +1787,23 @@ impl ReviewApp {
         }
     }
 
+    /// A pull-request review with a conflict forecast resolves it in-app:
+    /// the Conflicts center works on the predicted merge, and the result
+    /// leaves the app only through the explicitly confirmed push.
+    fn forecast_resolving(&self) -> bool {
+        self.repo_state == RepoState::Idle
+            && self.review.pull.is_some()
+            && !self.review.predicted.is_empty()
+    }
+
+    /// The Review | Conflicts switch exists for an interrupted operation
+    /// and for a pull-request forecast alike.
+    fn conflicts_center_available(&self) -> bool {
+        self.repo_state != RepoState::Idle || self.forecast_resolving()
+    }
+
     fn showing_conflicts(&self) -> bool {
-        self.repo_state != RepoState::Idle && self.center == CenterView::Conflicts
+        self.conflicts_center_available() && self.center == CenterView::Conflicts
     }
 
     /// Continue only moves git forward once nothing is left unmerged;
@@ -1708,34 +1822,48 @@ impl ReviewApp {
     /// fresh parse, preserving the reviewer's picks.
     fn sync_conflict_views(
         &mut self,
+        sources: Vec<(String, String, ConflictLabels)>,
         parses: Vec<Result<ConflictResolvState, String>>,
         cx: &mut Context<Self>,
     ) {
         let mut old = std::mem::take(&mut self.conflict_views);
-        self.conflict_views = self
-            .conflicts
-            .iter()
+        self.conflict_views = sources
+            .into_iter()
             .zip(parses)
-            .map(|(file, parsed)| {
+            .map(|((path, source, labels), parsed)| {
                 if let Some(ix) = old
                     .iter()
-                    .position(|v| v.path == file.path && v.source == file.working)
+                    .position(|v| v.path == path && v.source == source)
                 {
-                    return old.swap_remove(ix);
+                    let kept = old.swap_remove(ix);
+                    // The relative ages can shift between loads; the kept
+                    // view just takes the fresh labels.
+                    if let ConflictBody::Resolver(_, view, _) = &kept.body {
+                        view.update(cx, |view, _| view.labels = labels);
+                    }
+                    return kept;
                 }
                 let body = match parsed {
                     Ok(state) => {
                         let state = cx.new(|_| state);
-                        let observe = cx.observe(&state, |_, _, cx| cx.notify());
-                        ConflictBody::Resolver(state, observe)
+                        let view = cx.new(|cx| ResolverView {
+                            state: state.clone(),
+                            labels,
+                            _observe: cx.observe(&state, |_, _, cx| cx.notify()),
+                        });
+                        // Picks and undo move badges, ticks and counts;
+                        // Edited is every keystroke and moves none of them.
+                        let subscribe =
+                            cx.subscribe(&state, |_, _, event: &ConflictResolvEvent, cx| {
+                                if !matches!(event, ConflictResolvEvent::Edited) {
+                                    cx.notify();
+                                }
+                            });
+                        ConflictBody::Resolver(state, view, subscribe)
                     }
                     Err(error) => ConflictBody::Unparsed(error.into()),
                 };
-                ConflictView {
-                    path: file.path.clone(),
-                    source: file.working.clone(),
-                    body,
-                }
+                ConflictView { path, source, body }
             })
             .collect();
     }
@@ -1779,11 +1907,18 @@ impl ReviewApp {
         let Some(view) = self.conflict_views.iter().find(|v| v.path == path) else {
             return;
         };
-        let ConflictBody::Resolver(state, _) = &view.body else {
+        let ConflictBody::Resolver(state, ..) = &view.body else {
             return;
         };
         let state = state.read(cx);
         if !state.all_resolved() {
+            return;
+        }
+        // A forecast resolution stays in the app: the tick is only the
+        // reviewer's confirmation, the text leaves through the push.
+        if self.forecast_resolving() {
+            self.review.pr_resolved.insert(path);
+            cx.notify();
             return;
         }
         let contents = state.result_text();
@@ -1792,6 +1927,12 @@ impl ReviewApp {
 
     /// Put the markers back for a file resolved earlier in this operation.
     fn reopen(&mut self, path: String, cx: &mut Context<Self>) {
+        // A forecast tick never wrote anywhere; unticking is just that.
+        if self.forecast_resolving() {
+            self.review.pr_resolved.remove(&path);
+            cx.notify();
+            return;
+        }
         self.file_op(move |backend| backend.unresolve_file(&path), cx);
     }
 
@@ -1909,6 +2050,199 @@ impl ReviewApp {
                     true
                 })
         });
+    }
+
+    // ---- resolving a pull request's forecast -----------------------------
+
+    /// Why the resolution cannot be pushed right now, or `None` when it
+    /// can. The reasons double as the action's tooltip, so the path to
+    /// the push is always spelled out.
+    fn push_resolution_blockers(&self, cx: &App) -> Option<String> {
+        if !self.forecast_resolving() {
+            return Some("No conflict forecast to resolve".into());
+        }
+        let Some(pull) = self.review.pull.as_ref() else {
+            return Some("No pull request connected".into());
+        };
+        if pull.request.cross_repository {
+            return Some(format!(
+                "The head branch lives in {}'s fork; resolve it on the forge",
+                pull.request.head_owner
+            ));
+        }
+        if pull.request.state != diffie_core::pr::PrState::Open {
+            return Some("The pull request is no longer open".into());
+        }
+        match &self.review.push_remote {
+            Some(Ok(_)) => {}
+            Some(Err(reason)) => return Some(reason.clone()),
+            None => return Some("The push remote is not resolved yet".into()),
+        }
+        if self
+            .review
+            .predicted
+            .iter()
+            .any(|conflict| conflict.merged.is_none())
+        {
+            return Some(
+                "A conflicted file cannot be resolved here (binary, or a side deleted it)".into(),
+            );
+        }
+        let ticked_and_whole = |conflict: &PredictedConflict| {
+            self.review.pr_resolved.contains(&conflict.path)
+                && self.conflict_views.iter().any(|view| {
+                    view.path == conflict.path
+                        && matches!(
+                            &view.body,
+                            ConflictBody::Resolver(state, ..) if state.read(cx).all_resolved()
+                        )
+                })
+        };
+        if !self
+            .review
+            .predicted
+            .iter()
+            .filter(|conflict| conflict.merged.is_some())
+            .all(ticked_and_whole)
+        {
+            return Some("Resolve and tick every conflicted file first".into());
+        }
+        if self.op_running {
+            return Some("An operation is already running".into());
+        }
+        None
+    }
+
+    /// The conscious step: one dialog naming remote, branch and pull
+    /// request before anything leaves the machine. Only words here - the
+    /// payload is gathered when Push is clicked, so a reload or an edit
+    /// between opening and confirming can never ship a stale resolution.
+    fn confirm_push_resolution(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.push_resolution_blockers(cx).is_some() {
+            return;
+        }
+        let Some(pull) = self.review.pull.as_ref() else {
+            return;
+        };
+        let Some(Ok(remote)) = self.review.push_remote.clone() else {
+            return;
+        };
+        let request = &pull.request;
+        let title = format!("Push the resolution to {remote}/{}?", request.source_branch);
+        let description = format!(
+            "Adds a merge commit of {} to pull request #{}. The branch on {remote} \
+             moves by this push alone; nothing is forced.",
+            request.target_branch, request.number
+        );
+        let owner = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let owner = owner.clone();
+            alert
+                .confirm()
+                .title(title.clone())
+                .description(description.clone())
+                .ok_text("Push")
+                .on_ok(move |_, _, cx| {
+                    let _ = owner.update(cx, |this, cx| this.start_resolution_push(cx));
+                    true
+                })
+        });
+    }
+
+    fn start_resolution_push(&mut self, cx: &mut Context<Self>) {
+        // Everything re-checked and re-read now, not when the dialog
+        // opened: the forecast may have moved under it.
+        if let Some(reason) = self.push_resolution_blockers(cx) {
+            self.review.publish_status = Some((format!("Not pushed - {reason}").into(), true));
+            cx.notify();
+            return;
+        }
+        let (Some(pull), Some(Ok(remote))) =
+            (self.review.pull.as_ref(), self.review.push_remote.clone())
+        else {
+            return;
+        };
+        let request = &pull.request;
+        let resolutions: Vec<(String, String)> = self
+            .review
+            .predicted
+            .iter()
+            .filter(|conflict| conflict.merged.is_some())
+            .filter_map(|conflict| {
+                let view = self
+                    .conflict_views
+                    .iter()
+                    .find(|view| view.path == conflict.path)?;
+                let ConflictBody::Resolver(state, ..) = &view.body else {
+                    return None;
+                };
+                Some((conflict.path.clone(), state.read(cx).result_text()))
+            })
+            .collect();
+        let push = ResolutionPush {
+            remote,
+            branch: request.source_branch.clone(),
+            source: request.source_commit.clone(),
+            // The base the resolvers actually resolved against: the
+            // forecast's resolved target tip, not the forge's possibly
+            // older base snapshot - the merge must match what was seen.
+            target: self
+                .review
+                .resolved
+                .as_ref()
+                .map(|resolved| resolved.target_head.as_str().to_string())
+                .unwrap_or_else(|| request.target_commit.clone()),
+            message: format!(
+                "Merge branch '{}' into {}",
+                request.target_branch, request.source_branch
+            ),
+            resolutions,
+        };
+        self.op_running = true;
+        self.op_error = None;
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend
+                        .push_resolution(&push)
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.op_running = false;
+                match result {
+                    Ok(commit) => {
+                        // The pull request's head moved: re-pin the review
+                        // on the pushed merge so the reload shows it and
+                        // the forecast comes back clean.
+                        let id = commit.as_str().to_string();
+                        if let Some(pull) = &mut this.review.pull {
+                            pull.request.source_commit = id.clone();
+                        }
+                        this.review.comparison.source_rev = Some(id);
+                        this.review.pr_resolved.clear();
+                        this.review.publish_status = Some((
+                            format!("Conflict resolution pushed as {}", commit.short()).into(),
+                            false,
+                        ));
+                        this.center = CenterView::Review;
+                        this.reload(cx);
+                    }
+                    Err(error) => {
+                        // The strip that shows op_error only exists during
+                        // an interrupted operation; a forecast push fails
+                        // in an idle window, so the pull request's own
+                        // status line carries it.
+                        this.review.publish_status =
+                            Some((format!("Resolution push failed - {error}").into(), true));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     // ---- scope and commits ---------------------------------------------
@@ -3661,39 +3995,84 @@ impl ReviewApp {
                         .when_some(self.review.pull.as_ref(), |controls, pull| {
                             controls.child(self.render_pull_menu(pull, cx))
                         })
-                        // Review or Conflicts, only while an operation is
-                        // interrupted; the pair mirrors split/unified.
-                        .when(self.repo_state != RepoState::Idle, |controls| {
+                        // Review or Conflicts, while an operation is
+                        // interrupted or a pull-request forecast is there
+                        // to resolve; the pair mirrors split/unified.
+                        .when(self.conflicts_center_available(), |controls| {
                             let conflicts = self.center == CenterView::Conflicts;
+                            let open = self.open_conflicts();
+                            let warning = cx.theme().warning;
+                            let group = ToggleGroup::new("center")
+                                .outline()
+                                .segmented()
+                                .single()
+                                .small()
+                                .child(
+                                    Toggle::new("center-review")
+                                        .icon(Icon::new(Lucide::FileDiff))
+                                        .tooltip("Review view")
+                                        .checked(!conflicts),
+                                )
+                                .child(
+                                    Toggle::new("center-conflicts")
+                                        .icon({
+                                            let icon = Icon::new(Lucide::GitMergeConflict);
+                                            // Open conflicts tint the segment
+                                            // so the switch is seen, not
+                                            // hunted for.
+                                            if open > 0 {
+                                                icon.text_color(warning)
+                                            } else {
+                                                icon
+                                            }
+                                        })
+                                        .tooltip("Conflicts view")
+                                        .checked(conflicts),
+                                )
+                                .on_click(cx.listener(|this, checks: &Vec<bool>, window, cx| {
+                                    // Clicking the checked segment clears
+                                    // the group; an either-or keeps the
+                                    // current choice instead.
+                                    this.center = match checks.iter().position(|on| *on) {
+                                        Some(0) => CenterView::Review,
+                                        Some(_) => CenterView::Conflicts,
+                                        None => return,
+                                    };
+                                    // Focus follows the switch, so the
+                                    // jump keys work without a click
+                                    // into the column first.
+                                    if this.center == CenterView::Conflicts {
+                                        window.focus(&this.conflicts_focus, cx);
+                                    }
+                                    cx.notify();
+                                }));
                             controls.child(
-                                ToggleGroup::new("center")
-                                    .outline()
-                                    .segmented()
-                                    .single()
-                                    .small()
-                                    .child(
-                                        Toggle::new("center-review")
-                                            .icon(Icon::new(Lucide::FileDiff))
-                                            .tooltip("Review view")
-                                            .checked(!conflicts),
-                                    )
-                                    .child(
-                                        Toggle::new("center-conflicts")
-                                            .icon(Icon::new(Lucide::GitMergeConflict))
-                                            .tooltip("Conflicts view")
-                                            .checked(conflicts),
-                                    )
-                                    .on_click(cx.listener(|this, checks: &Vec<bool>, _, cx| {
-                                        // Clicking the checked segment clears
-                                        // the group; an either-or keeps the
-                                        // current choice instead.
-                                        this.center = match checks.iter().position(|on| *on) {
-                                            Some(0) => CenterView::Review,
-                                            Some(_) => CenterView::Conflicts,
-                                            None => return,
-                                        };
-                                        cx.notify();
-                                    })),
+                                div()
+                                    .relative()
+                                    .child(group)
+                                    // The count rides the group's corner like
+                                    // a notification badge, in the comment
+                                    // badge's shape; it falls off at zero.
+                                    .when(open > 0, |wrapped| {
+                                        wrapped.child(
+                                            div().absolute().top(px(-5.)).right(px(-5.)).child(
+                                                h_flex()
+                                                    .flex_none()
+                                                    .h(px(13.))
+                                                    .min_w(px(13.))
+                                                    .px(px(4.))
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .rounded_full()
+                                                    .bg(warning)
+                                                    .text_color(cx.theme().background)
+                                                    .text_size(px(9.5))
+                                                    .line_height(px(13.))
+                                                    .font_medium()
+                                                    .child(open.to_string()),
+                                            ),
+                                        )
+                                    }),
                             )
                         })
                         .child(
@@ -4582,6 +4961,9 @@ impl ReviewApp {
     /// operation has touched, in one scroll - resolved ones collapsed to
     /// their ticked header, the rest mounted as three-pane resolvers.
     fn render_conflicts(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.forecast_resolving() {
+            return self.render_forecast_conflicts(cx);
+        }
         let muted = cx.theme().muted_foreground;
         let mono = cx.theme().mono_font_family.clone();
         let rows = self
@@ -4596,8 +4978,11 @@ impl ReviewApp {
             .collect::<Vec<_>>();
         let column = v_flex()
             .id("conflicts")
+            .key_context("Conflicts")
+            .track_focus(&self.conflicts_focus)
             .size_full()
             .overflow_y_scroll()
+            .track_scroll(&self.conflicts_scroll)
             .children(rows);
         if self.conflicts.is_empty() {
             // Resolved in the terminal, or by the last Mark resolved: the
@@ -4620,6 +5005,150 @@ impl ReviewApp {
                 .into_any_element();
         }
         column.into_any_element()
+    }
+
+    /// The Conflicts center of a pull-request forecast: the same
+    /// resolvers, working on the predicted merge; the tick is in-memory
+    /// and the result leaves only through the confirmed push.
+    fn render_forecast_conflicts(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let mono = cx.theme().mono_font_family.clone();
+        let resolvable = self
+            .review
+            .predicted
+            .iter()
+            .filter(|conflict| conflict.merged.is_some())
+            .count();
+        let ticked = self.review.pr_resolved.len();
+        let number = self
+            .review
+            .pull
+            .as_ref()
+            .map(|pull| pull.request.number)
+            .unwrap_or_default();
+        let hint = if self.push_resolution_blockers(cx).is_none() {
+            format!("Push to pull request #{number} from its menu or the palette")
+        } else {
+            format!("Resolved {ticked} of {resolvable} files")
+        };
+        let header = h_flex()
+            .flex_none()
+            .h(px(28.))
+            .px(px(10.))
+            .gap_2()
+            .bg(cx.theme().sidebar)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .text_size(px(12.))
+            .child(div().text_color(muted).child(format!(
+                "Would conflict with {} - resolve here, then push to the pull request",
+                self.review.comparison.target
+            )))
+            .child(div().flex_1())
+            .child(div().text_color(muted).child(hint));
+        let rows = self
+            .review
+            .predicted
+            .iter()
+            .map(|conflict| self.render_forecast_file(conflict, &mono, cx))
+            .collect::<Vec<_>>();
+        v_flex()
+            .id("conflicts")
+            .key_context("Conflicts")
+            .track_focus(&self.conflicts_focus)
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.conflicts_scroll)
+            .child(header)
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// One forecast file: the resolver on the predicted merge, or the
+    /// note for a file the app cannot resolve (which also blocks the
+    /// push, so nothing markered ever reaches the pull request).
+    fn render_forecast_file(
+        &self,
+        conflict: &PredictedConflict,
+        mono: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // A ticked file folds to its header, like a staged file in an
+        // operation: the resolver stays mounted but is not rebuilt every
+        // frame, which also keeps a long forecast column light.
+        if self.review.pr_resolved.contains(&conflict.path) {
+            return self.render_resolved_file(&conflict.path, mono, cx);
+        }
+        let path = conflict.path.clone();
+        let view = self
+            .conflict_views
+            .iter()
+            .find(|view| view.path == conflict.path);
+        let ready = matches!(
+            view.map(|view| &view.body),
+            Some(ConflictBody::Resolver(state, ..)) if state.read(cx).all_resolved()
+        );
+        let (badge, badge_color) = if conflict.merged.is_none() {
+            ("on the forge", cx.theme().warning)
+        } else if ready {
+            ("ready", cx.theme().success)
+        } else {
+            ("unresolved", cx.theme().warning)
+        };
+        let body = match (conflict.merged.as_ref(), view.map(|view| &view.body)) {
+            (None, _) => div()
+                .px(px(10.))
+                .py(px(6.))
+                .text_color(cx.theme().muted_foreground)
+                .child(
+                    "No text conflict to resolve here: a side deleted this file, or it is \
+                     binary. Resolve it on the forge; until then the push stays off.",
+                )
+                .into_any_element(),
+            (Some(_), Some(ConflictBody::Resolver(_, view, _))) => view.clone().into_any_element(),
+            (Some(_), Some(ConflictBody::Unparsed(error))) => div()
+                .px(px(10.))
+                .py(px(6.))
+                .text_color(cx.theme().danger)
+                .child(error.clone())
+                .into_any_element(),
+            (Some(_), None) => div().into_any_element(),
+        };
+        v_flex()
+            .w_full()
+            .flex_none()
+            .child(
+                h_flex()
+                    .flex_none()
+                    .h(px(28.))
+                    .px(px(10.))
+                    .gap_2()
+                    .bg(cx.theme().sidebar)
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(div().font_family(mono.clone()).child(conflict.path.clone()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(6.))
+                            .rounded(px(4.))
+                            .text_size(px(10.5))
+                            .bg(badge_color.opacity(0.15))
+                            .text_color(badge_color)
+                            .child(badge),
+                    )
+                    .child(div().flex_1())
+                    .when(conflict.merged.is_some(), |row| {
+                        row.child(self.render_resolved_box(
+                            &path,
+                            false,
+                            ready && !self.op_running,
+                            cx,
+                        ))
+                    }),
+            )
+            .child(body)
+            .into_any_element()
     }
 
     /// A resolved file keeps its place as a ticked 28px header; the work
@@ -4670,12 +5199,12 @@ impl ReviewApp {
         // content nobody chose, so both stay with the terminal for now.
         let markerless = file.binary
             || match &view.body {
-                ConflictBody::Resolver(state, _) => state.read(cx).block_count() == 0,
+                ConflictBody::Resolver(state, ..) => state.read(cx).block_count() == 0,
                 ConflictBody::Unparsed(_) => false,
             };
         let ready = !markerless
             && match &view.body {
-                ConflictBody::Resolver(state, _) => state.read(cx).all_resolved(),
+                ConflictBody::Resolver(state, ..) => state.read(cx).all_resolved(),
                 ConflictBody::Unparsed(_) => false,
             };
         let (badge, badge_color) = if ready {
@@ -4685,7 +5214,7 @@ impl ReviewApp {
         };
         let path = file.path.clone();
         let body = match &view.body {
-            ConflictBody::Resolver(_, _) if markerless => div()
+            ConflictBody::Resolver(..) if markerless => div()
                 .px(px(10.))
                 .py(px(6.))
                 .text_color(cx.theme().muted_foreground)
@@ -4694,24 +5223,7 @@ impl ReviewApp {
                      Resolve it in the terminal, then reload.",
                 )
                 .into_any_element(),
-            ConflictBody::Resolver(state, _) => {
-                let labels = &file.labels;
-                let mut yours = format!("Your changes · {}", labels.yours);
-                let mut upstream = format!("Upstream changes · {}", labels.upstream);
-                // Which side is fresher: the yours pane anchors with its
-                // absolute date, the upstream pane answers relative to it.
-                if labels.yours_time != 0 && labels.upstream_time != 0 {
-                    yours = format!("{yours} · {}", labels.yours_date);
-                    upstream = format!(
-                        "{upstream} · {}",
-                        relative_age(labels.upstream_time, labels.yours_time)
-                    );
-                }
-                ConflictResolv::new(state)
-                    .yours_label(yours)
-                    .upstream_label(upstream)
-                    .into_any_element()
-            }
+            ConflictBody::Resolver(_, view, _) => view.clone().into_any_element(),
             ConflictBody::Unparsed(error) => div()
                 .px(px(10.))
                 .py(px(6.))
@@ -4966,6 +5478,93 @@ impl ReviewApp {
             .then_some(true)
     }
 
+    /// How many conflicted files still want attention: the unmerged
+    /// paths of an interrupted operation, or the forecast files not yet
+    /// ticked. Feeds the center switch's badge.
+    fn open_conflicts(&self) -> usize {
+        if self.repo_state != RepoState::Idle {
+            self.conflicts.len()
+        } else if self.forecast_resolving() {
+            self.review
+                .predicted
+                .iter()
+                .filter(|conflict| !self.review.pr_resolved.contains(&conflict.path))
+                .count()
+        } else {
+            0
+        }
+    }
+
+    /// `]` and `[` in the conflicts center walk the files that still
+    /// have blocks to pick, from wherever the viewport stands: the next
+    /// such file below its top, or the previous one above, aligned to
+    /// the column's top. A file with nothing left to solve is no stop.
+    /// Jumps between the blocks inside one file wait on the keyboard
+    /// model (section 20, Open).
+    fn jump_conflict(&mut self, direction: isize, cx: &mut Context<Self>) {
+        let unsolved = |path: &str| {
+            self.conflict_views.iter().any(|view| {
+                view.path == path
+                    && matches!(
+                        &view.body,
+                        ConflictBody::Resolver(state, ..)
+                            if state.read(cx).block_count() > 0
+                                && !state.read(cx).all_resolved()
+                    )
+            })
+        };
+        // Child indices in the scroll column; the forecast column leads
+        // with its summary row.
+        let lead = usize::from(self.forecast_resolving());
+        let targets: Vec<usize> = if self.forecast_resolving() {
+            self.review
+                .predicted
+                .iter()
+                .enumerate()
+                .filter(|(_, conflict)| {
+                    !self.review.pr_resolved.contains(&conflict.path) && unsolved(&conflict.path)
+                })
+                .map(|(ix, _)| ix + lead)
+                .collect()
+        } else {
+            self.conflict_seen
+                .iter()
+                .enumerate()
+                .filter(|(_, path)| unsolved(path))
+                .map(|(ix, _)| ix + lead)
+                .collect()
+        };
+        if targets.is_empty() {
+            return;
+        }
+        let top = self.conflicts_scroll.bounds().top();
+        // Just past the alignment line, so the file already sitting on it
+        // is never its own jump target.
+        let epsilon = px(4.);
+        let child_top = |ix: usize| {
+            self.conflicts_scroll
+                .bounds_for_item(ix)
+                .map(|bounds| bounds.top())
+        };
+        let target = if direction > 0 {
+            targets
+                .iter()
+                .copied()
+                .find(|ix| child_top(*ix).is_some_and(|t| t > top + epsilon))
+        } else {
+            targets
+                .iter()
+                .copied()
+                .rev()
+                .find(|ix| child_top(*ix).is_some_and(|t| t < top - epsilon))
+        };
+        let Some(target) = target else {
+            return;
+        };
+        self.conflicts_scroll.scroll_to_top_of_item(target);
+        cx.notify();
+    }
+
     /// The header's swap between a file's review diff and the forecast of
     /// how the merge would conflict on it.
     fn toggle_forecast(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -5077,6 +5676,11 @@ impl ReviewApp {
             // Orphan entries follow the earlier-comments toggle, as in the
             // Diff, so panel and main content stay in step.
             if file.state == FileState::NotInComparison && !self.show_other_revisions {
+                continue;
+            }
+            // The conflicts center is about its conflicted files alone;
+            // the rest of the comparison would only be noise beside it.
+            if self.showing_conflicts() && self.conflict_badge(&file.path).is_none() {
                 continue;
             }
             let mut folders: Vec<String> = file.path.split('/').map(String::from).collect();
@@ -6059,6 +6663,25 @@ fn render_resolved_marker(
         .into_any_element()
 }
 
+/// The three-pane resolver with its labelled panes: the yours pane
+/// anchors with its tip's absolute date, the upstream pane answers
+/// relative to it.
+fn render_resolver(state: &Entity<ConflictResolvState>, labels: &ConflictLabels) -> AnyElement {
+    let mut yours = format!("Your changes · {}", labels.yours);
+    let mut upstream = format!("Upstream changes · {}", labels.upstream);
+    if labels.yours_time != 0 && labels.upstream_time != 0 {
+        yours = format!("{yours} · {}", labels.yours_date);
+        upstream = format!(
+            "{upstream} · {}",
+            relative_age(labels.upstream_time, labels.yours_time)
+        );
+    }
+    ConflictResolv::new(state)
+        .yours_label(yours)
+        .upstream_label(upstream)
+        .into_any_element()
+}
+
 fn render_thread(thread: &ThreadView, owner: WeakEntity<ReviewApp>, cx: &mut App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let accent = comment_accent(cx);
@@ -6706,6 +7329,10 @@ impl Render for ReviewApp {
                 },
             ))
             .on_action(cx.listener(|this, _: &NextChange, _, cx| {
+                if this.showing_conflicts() {
+                    this.jump_conflict(1, cx);
+                    return;
+                }
                 this.remember_position(cx);
                 this.diff.update(cx, |state, cx| state.next_change(cx));
                 this.follow_mark(cx);
@@ -6718,6 +7345,10 @@ impl Render for ReviewApp {
                 this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PreviousChange, _, cx| {
+                if this.showing_conflicts() {
+                    this.jump_conflict(-1, cx);
+                    return;
+                }
                 this.remember_position(cx);
                 this.diff.update(cx, |state, cx| state.previous_change(cx));
                 this.follow_mark(cx);
@@ -6990,7 +7621,7 @@ fn load(
     // comparison would collide on. Advisory - a forecast the backend
     // cannot compute (unrelated histories, an unresolvable side) must
     // not take the review down, it just warns about nothing.
-    let predicted = match repo_state {
+    let (predicted, forecast_labels) = match repo_state {
         RepoState::Idle => {
             // An uncommitted comparison's source ("working tree") is no
             // revision to merge: the forecast rides on the tip beneath
@@ -7009,16 +7640,32 @@ fn load(
             // back to the pinned revision for a name that has moved on or
             // does not resolve (a pull request's branch may exist only as
             // its pinned commit).
-            backend
+            let predicted = backend
                 .predicted_conflicts(
                     &source,
                     comparison.source_rev.as_deref(),
                     &comparison.target,
                     comparison.target_rev.as_deref(),
                 )
-                .unwrap_or_default()
+                .unwrap_or_default();
+            let labels = (!predicted.is_empty())
+                .then(|| {
+                    backend
+                        .forecast_labels(
+                            &source,
+                            comparison.source_rev.as_deref().unwrap_or(&source),
+                            &comparison.target,
+                            comparison
+                                .target_rev
+                                .as_deref()
+                                .unwrap_or(&comparison.target),
+                        )
+                        .ok()
+                })
+                .flatten();
+            (predicted, labels)
         }
-        _ => Vec::new(),
+        _ => (Vec::new(), None),
     };
     let predicted_files: Vec<DiffFile> = predicted
         .iter()
@@ -7028,6 +7675,37 @@ fn load(
         })
         .filter(|file| !file.conflicts().is_empty())
         .collect();
+    let forecast_parses: Vec<Result<ConflictResolvState, String>> = predicted
+        .iter()
+        .filter_map(|conflict| {
+            let merged = conflict.merged.as_deref()?;
+            Some(
+                ConflictResolvState::parse(conflict.path.clone(), merged)
+                    .map_err(|error| error.to_string()),
+            )
+        })
+        .collect();
+    // Only a pinned source names a pull request's head; resolving the
+    // remote here lets the confirm dialog name it without a backend call
+    // on the UI thread.
+    // The head branch rarely has a remote-tracking ref here - the picker's
+    // fetch pins the commit instead of fetching the branch - so the remote
+    // falls back to the one carrying the base branch.
+    let push_remote = (comparison.source_rev.is_some() && !predicted.is_empty()).then(|| {
+        let single = |branch: &str| {
+            backend
+                .remotes_with_branch(branch)
+                .ok()
+                .and_then(|mut remotes| (remotes.len() == 1).then(|| remotes.remove(0)))
+        };
+        match single(&comparison.source).or_else(|| single(&comparison.target)) {
+            Some(remote) => Ok(remote),
+            None => Err(format!(
+                "no single remote carries `{}` or `{}`; push by hand",
+                comparison.source, comparison.target
+            )),
+        }
+    });
     let resolved = backend.resolve(comparison).map_err(text)?;
     let commits = backend.commits(&resolved).map_err(text)?;
     // Only now is it known what HEAD gained; the caller could only say
@@ -7234,6 +7912,9 @@ fn load(
         conflict_parses,
         predicted,
         predicted_files,
+        forecast_parses,
+        forecast_labels,
+        push_remote,
         resolved,
         commits,
         reviews,

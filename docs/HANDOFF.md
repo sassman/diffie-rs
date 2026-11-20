@@ -67,6 +67,16 @@ first code: a working core and a first UI scaffold wired to it.
   commands). The forecast is advisory: a backend that cannot compute it
   loads the review without one. The Cargo patch pulls the fork branch
   `diff-conflict-predict` from GitHub, per the repository rule.
+  **A pull-request review resolves its forecast and pushes it** (branch
+  `feat/conflict-pr-push`): the Conflicts center opens on the predicted
+  merge with the same three-pane resolvers, the Resolved tick stays
+  in-memory, and one confirm-always action in the PR menu and the
+  palette pushes a merge commit of the base into the PR's head branch -
+  built from objects alone (`push_resolution`), plain push, re-pinning
+  the review on the pushed merge. Same-repository PRs only; fork PRs
+  and unresolvable files (binary, deleted side) block the push with the
+  reason spelled out. Constraint 5 carries the two sanctioned
+  exceptions.
 
 ## Verification status
 
@@ -112,6 +122,8 @@ Be exact about this when you report further work.
 | Conflict forecast backend: `predicted_conflicts` sees the collision between two branches before any merge starts, markers with both sides' lines and name labels in the merged text, nothing written into the repository's object store, the repository staying idle, a cleanly merging pair predicting nothing | Covered by core tests against a throwaway repository (`crates/core/tests/git_cli.rs`) |
 | Conflict forecast on screen, 2026-11-20, against a pre-merge fixture: the tree's conflict glyph on both colliding rows, "would conflict with main" and the Show conflict button on both file headers (`docs/screenshots/conflict-forecast.png`), and after a driven click the swap itself - the body became the predicted merge with Current and Incoming parts and **no Accept or Undo commands** (`with_conflicts_read_only`), the button flipped to Show changes, the other file kept its review diff | Verified by screenshot. The marker labels painted as the pinned target OID in that shot; the switch to readable names landed after it and is covered by the core test's label assertions, not reshot |
 | Forecast interactions: the swap back to the review diff, the viewport hold across a swap, forecasts surviving a background reload, a pinned review keeping its forecast when a same-named branch moves on (core-tested), moved-block folds left out of a swapped body, and the sidebar warning for collisions on paths outside the scope's view | Core behaviors tested; the UI side compiled, clippy-clean, not driven on screen |
+| Resolution push backend: the merge commit built from objects alone (two parents, resolved texts in, auto-merged side untouched, modes kept from the merge tree), the remote branch moving to it, nothing local moving, refusal of an uncovered conflicted path, rejection when the head branch moved on | Covered by core tests against a throwaway repository with a local bare remote (`crates/core/tests/git_cli.rs`) |
+| Forecast resolution UI: the Conflicts center on a pull request's predicted merge, in-memory ticks, the PR-menu and palette action with its blockers and the confirm dialog naming remote, branch and number, the re-pin and reload after a push | Compiled, clippy-clean; **not driven on screen** - it needs a real pull request with conflicts to dogfood |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 | Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Pull-request menu (title-bar icon in a `--pr` review): open in the browser, publish comments, approve with and without comments; the link icon on published cards; the status-bar line after a publish | Core covered by tests: what a publish sends and records (`forge.rs`, against a fake forge) and the exact gh calls, the file-level fallback and the pending-review cleanup (`github.rs`, against a stand-in gh script, Unix only). The GraphQL input and enum names were checked read-only against GitHub's live schema by introspection. The status query (`gh pr view --json state,reviewDecision,statusCheckRollup` with the app's jq) was run read-only against a real merged PR and its lines match what `fold_checks` parses. **Nothing was ever posted to a real pull request**, and the window was not run: the menu, the state icon and its red tint, the busy state, the link icon and whether a pending-review comment's URL still opens after the submit are all unseen |
