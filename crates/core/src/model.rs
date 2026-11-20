@@ -254,6 +254,28 @@ pub struct PredictedConflict {
     pub merged: Option<String>,
 }
 
+/// One push of a conflict resolution to a pull request's head branch
+/// (owner-sanctioned, design document section 20): the merge commit is
+/// built from objects alone, and the only ref that moves anywhere is the
+/// remote branch, on the reviewer's confirmed click.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolutionPush {
+    pub remote: String,
+    /// The pull request's head branch on that remote.
+    pub branch: String,
+    /// The pinned head the review ran on: the merge commit's first
+    /// parent, and the safety anchor - a branch that moved on since
+    /// rejects the push, nothing is ever forced.
+    pub source: String,
+    /// The base tip merged in: the second parent.
+    pub target: String,
+    /// The merge commit's message.
+    pub message: String,
+    /// Every conflicted path with its resolved contents, full text; the
+    /// push refuses when the merge's conflicted set is not covered.
+    pub resolutions: Vec<(String, String)>,
+}
+
 /// The commit that wrote a line, and the line's number in that commit's
 /// version of the file. This pair is what a comment is anchored to.
 #[derive(Clone, Debug, PartialEq, Eq)]

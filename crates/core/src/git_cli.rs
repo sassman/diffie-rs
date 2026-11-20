@@ -19,7 +19,7 @@ use crate::backend::{BackendError, Result, ReviewBackend};
 use crate::model::{
     BlameLine, ChangedRegion, Commit, CompareMode, Comparison, ConflictFile, ConflictLabels,
     FileState, FileStatus, FileSummary, LineOrigin, NewSide, Oid, PredictedConflict, RepoState,
-    Resolved, Scope, ScopedPatch,
+    ResolutionPush, Resolved, Scope, ScopedPatch,
 };
 use crate::review::{ReviewInput, ReviewedFile};
 
@@ -82,6 +82,14 @@ impl GitCli {
             Some(named) if named.trim() == pinned.trim() => name.to_string(),
             _ => pin.to_string(),
         })
+    }
+
+    /// The mode `tree` records for `path`, or `None` when the tree does
+    /// not hold it.
+    fn tree_mode(&self, tree: &str, path: &str) -> Result<Option<String>> {
+        Ok(self
+            .try_read(&["ls-tree", "--end-of-options", tree, "--", &literal(path)])?
+            .and_then(|line| line.split_whitespace().next().map(|mode| mode.to_string())))
     }
 
     /// Whether a working tree exists. A bare repository has no uncommitted
@@ -1356,6 +1364,126 @@ impl ReviewBackend for GitCli {
             .zip(texts)
             .map(|(path, merged)| PredictedConflict { path, merged })
             .collect())
+    }
+
+    fn forecast_labels(
+        &self,
+        source: &str,
+        source_rev: &str,
+        target: &str,
+        target_rev: &str,
+    ) -> Result<ConflictLabels> {
+        let (yours_time, yours_date) = self.commit_clock(source_rev).unwrap_or_default();
+        let (upstream_time, _) = self.commit_clock(target_rev).unwrap_or_default();
+        Ok(ConflictLabels {
+            yours: source.to_string(),
+            upstream: target.to_string(),
+            yours_date,
+            yours_time,
+            upstream_time,
+        })
+    }
+
+    fn push_resolution(&self, push: &ResolutionPush) -> Result<Oid> {
+        // The merge's own tree first, written into the real object
+        // database this time: the pushed commit must reach every
+        // auto-merged blob. The owner-sanctioned write family starts here.
+        let (conflicted, listing) = run_verdict(
+            &mut self.command(),
+            &[
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "--no-messages",
+                "-z",
+                "--end-of-options",
+                &push.source,
+                &push.target,
+            ],
+        )?;
+        let mut entries = listing.split('\0').filter(|entry| !entry.is_empty());
+        let tree = entries.next().unwrap_or_default().trim().to_string();
+        if conflicted {
+            // A markered blob must never reach the pull request: every
+            // path the merge conflicts on needs its resolution supplied.
+            let unresolved: Vec<&str> = entries
+                .filter(|path| {
+                    !push
+                        .resolutions
+                        .iter()
+                        .any(|(resolved, _)| resolved == path)
+                })
+                .collect();
+            if !unresolved.is_empty() {
+                return Err(BackendError::UnresolvedPaths(unresolved.join(", ")));
+            }
+        }
+        // A scratch index keeps the repository's own index untouched while
+        // the resolved blobs replace the markered ones.
+        let scratch = Scratch::new()?;
+        let index = scratch.path.join("index");
+        let indexed = |backend: &GitCli| {
+            let mut command = backend.command();
+            command.env("GIT_INDEX_FILE", &index);
+            command
+        };
+        run(
+            &mut indexed(self),
+            &["read-tree", "--end-of-options", &tree],
+            None,
+        )?;
+        for (path, contents) in &push.resolutions {
+            let blob = run(
+                &mut self.command(),
+                &["hash-object", "-w", "--stdin"],
+                Some(contents.as_bytes()),
+            )?;
+            // The merge's own mode rides onto the resolved blob, so an
+            // executable survives its resolution.
+            let mode = self
+                .tree_mode(&tree, path)?
+                .unwrap_or_else(|| "100644".to_string());
+            run(
+                &mut indexed(self),
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("{mode},{},{path}", blob.trim()),
+                ],
+                None,
+            )?;
+        }
+        let resolved_tree = run(&mut indexed(self), &["write-tree"], None)?;
+        let commit = run(
+            &mut self.command(),
+            &[
+                "commit-tree",
+                resolved_tree.trim(),
+                "-p",
+                &push.source,
+                "-p",
+                &push.target,
+                "-m",
+                &push.message,
+            ],
+            None,
+        )?;
+        let commit = commit.trim().to_string();
+        // A plain push: a head branch that moved since the review was
+        // pinned rejects it, which is the wanted answer, never a force.
+        run(
+            &mut self.command(),
+            &[
+                "push",
+                "--quiet",
+                "--end-of-options",
+                &push.remote,
+                &format!("{commit}:refs/heads/{}", push.branch),
+            ],
+            None,
+        )?;
+        Ok(Oid::new(&commit))
     }
 
     fn resolve_file(&self, path: &str, contents: &str) -> Result<()> {
