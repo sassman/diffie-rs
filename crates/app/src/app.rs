@@ -1154,8 +1154,6 @@ pub struct ReviewApp {
     /// Focus for the conflicts column: the jump keys dispatch along the
     /// focus path, exactly like the Diff's single letters.
     conflicts_focus: FocusHandle,
-    /// The conflicted file the jump keys last landed on.
-    conflict_cursor: Option<usize>,
     /// One continue or abort at a time; strip and palette grey behind it.
     op_running: bool,
     /// Git's own words when continue or abort failed, shown in the strip.
@@ -1320,7 +1318,6 @@ impl ReviewApp {
             conflicts_seen: false,
             conflicts_scroll: ScrollHandle::new(),
             conflicts_focus: cx.focus_handle(),
-            conflict_cursor: None,
             op_running: false,
             op_error: None,
             symbols: symbols::Symbols::new(window, cx),
@@ -5024,6 +5021,12 @@ impl ReviewApp {
         mono: &SharedString,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // A ticked file folds to its header, like a staged file in an
+        // operation: the resolver stays mounted but is not rebuilt every
+        // frame, which also keeps a long forecast column light.
+        if self.review.pr_resolved.contains(&conflict.path) {
+            return self.render_resolved_file(&conflict.path, mono, cx);
+        }
         let path = conflict.path.clone();
         let view = self
             .conflict_views
@@ -5033,7 +5036,6 @@ impl ReviewApp {
             view.map(|view| &view.body),
             Some(ConflictBody::Resolver(state, _)) if state.read(cx).all_resolved()
         );
-        let ticked = self.review.pr_resolved.contains(&conflict.path);
         let (badge, badge_color) = if conflict.merged.is_none() {
             ("on the forge", cx.theme().warning)
         } else if ready {
@@ -5099,13 +5101,10 @@ impl ReviewApp {
                     )
                     .child(div().flex_1())
                     .when(conflict.merged.is_some(), |row| {
-                        // A ticked file stays untickable even after its
-                        // resolver was reopened, or the stale tick could
-                        // never be cleared.
                         row.child(self.render_resolved_box(
                             &path,
-                            ticked,
-                            (ready || ticked) && !self.op_running,
+                            false,
+                            ready && !self.op_running,
                             cx,
                         ))
                     }),
@@ -5458,27 +5457,73 @@ impl ReviewApp {
         }
     }
 
-    /// `]` and `[` in the conflicts center walk the conflicted files,
-    /// scrolling each file's start into view. Jumps between the blocks
-    /// inside a file wait on the keyboard model (section 20, Open).
+    /// `]` and `[` in the conflicts center walk the files that still
+    /// have blocks to pick, from wherever the viewport stands: the next
+    /// such file below its top, or the previous one above, aligned to
+    /// the column's top. A file with nothing left to solve is no stop.
+    /// Jumps between the blocks inside one file wait on the keyboard
+    /// model (section 20, Open).
     fn jump_conflict(&mut self, direction: isize, cx: &mut Context<Self>) {
-        let count = if self.forecast_resolving() {
-            self.review.predicted.len()
-        } else {
-            self.conflict_seen.len()
+        let unsolved = |path: &str| {
+            self.conflict_views.iter().any(|view| {
+                view.path == path
+                    && matches!(
+                        &view.body,
+                        ConflictBody::Resolver(state, _)
+                            if state.read(cx).block_count() > 0
+                                && !state.read(cx).all_resolved()
+                    )
+            })
         };
-        if count == 0 {
+        // Child indices in the scroll column; the forecast column leads
+        // with its summary row.
+        let lead = usize::from(self.forecast_resolving());
+        let targets: Vec<usize> = if self.forecast_resolving() {
+            self.review
+                .predicted
+                .iter()
+                .enumerate()
+                .filter(|(_, conflict)| {
+                    !self.review.pr_resolved.contains(&conflict.path) && unsolved(&conflict.path)
+                })
+                .map(|(ix, _)| ix + lead)
+                .collect()
+        } else {
+            self.conflict_seen
+                .iter()
+                .enumerate()
+                .filter(|(_, path)| unsolved(path))
+                .map(|(ix, _)| ix + lead)
+                .collect()
+        };
+        if targets.is_empty() {
             return;
         }
-        let cursor = match self.conflict_cursor {
-            Some(cursor) => (cursor as isize + direction).clamp(0, count as isize - 1) as usize,
-            None if direction > 0 => 0,
-            None => count - 1,
+        let top = self.conflicts_scroll.bounds().top();
+        // Just past the alignment line, so the file already sitting on it
+        // is never its own jump target.
+        let epsilon = px(4.);
+        let child_top = |ix: usize| {
+            self.conflicts_scroll
+                .bounds_for_item(ix)
+                .map(|bounds| bounds.top())
         };
-        self.conflict_cursor = Some(cursor);
-        // The forecast column leads with its summary row.
-        let child = cursor + usize::from(self.forecast_resolving());
-        self.conflicts_scroll.scroll_to_item(child);
+        let target = if direction > 0 {
+            targets
+                .iter()
+                .copied()
+                .find(|ix| child_top(*ix).is_some_and(|t| t > top + epsilon))
+        } else {
+            targets
+                .iter()
+                .copied()
+                .rev()
+                .find(|ix| child_top(*ix).is_some_and(|t| t < top - epsilon))
+        };
+        let Some(target) = target else {
+            return;
+        };
+        self.conflicts_scroll.scroll_to_top_of_item(target);
         cx.notify();
     }
 
