@@ -914,7 +914,10 @@ Assumed:
 
 Open:
 
-- A keyboard model for the conflict view beyond the palette.
+- A keyboard model for the conflict view beyond the palette and the
+  `]`/`[` file jumps it has (owner nit, 2026-11-20; the view also
+  filters the file tree down to the conflicted files). Jumps between
+  the blocks inside a file need the component to expose block rows.
 - Whether comments can attach to lines inside the conflict view.
 - The block editor scrolls its long lines within its own width instead
   of following the pane's horizontal scroll, so columns can shear at a
