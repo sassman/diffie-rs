@@ -210,6 +210,9 @@ docs/
   screenshots/                the scaffold as it actually rendered
 skills/diffie-review/         agent skill: launch a review, read it back
                               (canonical copy; installs to ~/.claude/skills)
+website/                      the product page: static HTML and CSS, no
+                              build step; assets/ holds copies of the brand
+                              mark and the README captures
 ```
 
 ## The core in one page

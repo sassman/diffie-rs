@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <title>diffie</title>
+  <defs>
+    <clipPath id="sq">
+      <path d="M512 0 C144.5 0 0 144.5 0 512 C0 879.5 144.5 1024 512 1024 C879.5 1024 1024 879.5 1024 512 C1024 144.5 879.5 0 512 0 Z"/>
+    </clipPath>
+  </defs>
+  <!-- macOS-style squircle; the head mass blends into it on purpose, so the
+       cream rim, eye and beak carry the icon -->
+  <path fill="#282828" d="M512 0 C144.5 0 0 144.5 0 512 C0 879.5 144.5 1024 512 1024 C879.5 1024 1024 879.5 1024 512 C1024 144.5 879.5 0 512 0 Z"/>
+  <g clip-path="url(#sq)">
+    <path fill="#1d2021" opacity="0.45" d="M1024 400 L400 1024 L1024 1024 Z"/>
+    <path fill="#3c3836" opacity="0.5" d="M0 0 L560 0 L0 560 Z"/>
+  </g>
+  <!-- the mark from logo.svg, 10% padding; keep both files in step -->
+  <g transform="translate(102.4 102.4) scale(0.8)">
+    <path fill="#282828" d="M0 352 L312 96 L568 72 L764 180 L900 350 L796 400 L992 500 L1024 566 L1024 690 L930 900 L856 980 L800 810 L676 648 L624 772 L560 1024 L0 1024 Z"/>
+    <path fill="#3c3836" d="M0 352 L312 96 L568 72 L500 320 L180 460 L0 520 Z"/>
+    <path fill="#3c3836" d="M676 648 L624 772 L560 1024 L430 1024 Z"/>
+    <path fill="#ebdbb2" d="M0 352 L312 96 L568 72 L764 180 L752 196 L566 94 L316 118 L0 374 Z"/>
+    <path fill="#d79921" d="M796 400 L992 500 L1024 566 L1024 690 L930 900 L856 980 L800 810 L676 648 Z"/>
+    <path fill="#fabd2f" d="M796 400 L992 500 L1024 566 L1024 592 L984 524 L804 428 Z"/>
+    <circle fill="#fabd2f" cx="590" cy="480" r="170"/>
+    <path fill="#d65d0e" d="M450 580 A170 170 0 0 0 758 510 Z"/>
+    <circle fill="#1d2021" cx="615" cy="478" r="72"/>
+    <path fill="#282828" d="M380 240 L940 320 L830 470 L420 360 Z"/>
+    <path fill="#ebdbb2" d="M380 310 L660 200 L900 350 L820 452 L452 322 Z"/>
+    <path fill="#fbf1c7" d="M660 200 L900 350 L856 376 L668 234 Z"/>
+    <circle fill="#fbf1c7" cx="658" cy="446" r="26"/>
+  </g>
+</svg>

@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>diffie - native code review for the agent loop</title>
+<meta name="description" content="diffie is a small, native desktop app for reviewing git changes across several commits or a whole branch. Comment on lines, hand the review to your coding agent, resolve the answers. No browser, no server, no accounts.">
+<meta property="og:title" content="diffie - native code review for the agent loop">
+<meta property="og:description" content="Review git changes natively, comment on lines, hand the review to your agent.">
+<meta property="og:image" content="assets/main-screen.png">
+<link rel="icon" type="image/svg+xml" href="assets/icon.svg">
+<link rel="icon" type="image/png" sizes="256x256" href="assets/icon-256.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <nav id="nav">
+    <a class="nav-brand" href="#">
+      <img src="assets/logo.svg" alt="diffie - an eagle's eye">
+      diffie
+    </a>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#showcase">In action</a>
+      <a href="#agent">Agent loop</a>
+      <a href="#install">Install</a>
+      <a href="#roadmap">Roadmap</a>
+      <a href="#faq">FAQ</a>
+    </div>
+    <div class="nav-actions">
+      <a class="gh" href="https://github.com/sassman/diffie-rs" aria-label="diffie on GitHub">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.73.5.5 5.74.5 12.2c0 5.17 3.3 9.55 7.87 11.1.58.1.79-.25.79-.56v-2.17c-3.2.71-3.88-1.39-3.88-1.39-.52-1.36-1.28-1.72-1.28-1.72-1.05-.73.08-.72.08-.72 1.16.08 1.77 1.22 1.77 1.22 1.03 1.8 2.7 1.28 3.36.98.1-.76.4-1.28.73-1.57-2.56-.3-5.25-1.31-5.25-5.82 0-1.29.45-2.34 1.2-3.16-.12-.3-.52-1.5.11-3.12 0 0 .97-.32 3.18 1.21a10.8 10.8 0 0 1 5.78 0c2.2-1.53 3.17-1.21 3.17-1.21.63 1.62.24 2.82.12 3.12.75.82 1.19 1.87 1.19 3.16 0 4.52-2.7 5.51-5.27 5.8.41.37.78 1.08.78 2.18v3.23c0 .31.2.67.8.56a11.72 11.72 0 0 0 7.86-11.1C23.5 5.73 18.27.5 12 .5z"/></svg>
+      </a>
+      <a class="btn-primary small" href="#install">Install</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+
+  <!-- hero -->
+  <section class="hero">
+    <div class="aurora"></div>
+    <div class="grid-texture"></div>
+    <div class="container">
+      <img class="hero-logo rise" src="assets/logo.svg" alt="" aria-hidden="true">
+      <div class="hero-badge rise" style="animation-delay:.05s">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2l2.1 6.5H21l-5.5 4 2.1 6.5-5.6-4-5.6 4 2.1-6.5-5.5-4h6.9z"/></svg>
+        Native GPUI &middot; Early alpha &middot; Source on GitHub
+      </div>
+      <h1 class="rise" style="animation-delay:.12s">
+        <span class="text-gradient">The code review app</span>
+        <span class="brand-gradient">built for the agent loop.</span>
+      </h1>
+      <p class="hero-sub rise" style="animation-delay:.2s">
+        diffie is a small, native desktop app for reviewing git changes across several
+        commits or a whole branch - comment on lines and selections, hand the open
+        comments to your coding agent, and resolve the answers.
+        No browser, no server, no accounts.
+      </p>
+      <div class="hero-ctas rise" style="animation-delay:.26s">
+        <a class="btn-primary" href="#install">
+          Install diffie <span class="version">v0.3.0</span>
+        </a>
+        <a class="btn-secondary" href="https://github.com/sassman/diffie-rs">View on GitHub</a>
+      </div>
+      <p class="hero-meta rise" style="animation-delay:.34s">
+        Free in alpha &middot; macOS, Linux &amp; Windows &middot; git is the only requirement
+      </p>
+      <div class="stats rise" style="animation-delay:.42s">
+        <div class="stat"><strong class="brand-gradient">0</strong><span>servers or accounts</span></div>
+        <div class="stat"><strong class="brand-gradient">TOML</strong><span>review files, inside .git</span></div>
+        <div class="stat"><strong class="brand-gradient">4</strong><span>reactions - a closed set</span></div>
+        <div class="stat"><strong class="brand-gradient">Rust</strong><span>+ GPUI, no Electron</span></div>
+      </div>
+      <div class="hero-shot rise" style="animation-delay:.5s">
+        <div class="halo"></div>
+        <div class="shell">
+          <div class="frame">
+            <img src="assets/main-screen.png" alt="diffie reviewing feat/mechanical-changes going into main: file tree, commit range, a comment thread with an agent's answer, and the shortcut hint bar" loading="eager">
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- features -->
+  <section id="features">
+    <div class="container">
+      <div class="section-head">
+        <div class="eyebrow">Features</div>
+        <h2>Everything branch review should be</h2>
+        <p>Web review tools are fine for one commit and lousy at ten. diffie is built
+           for the branch - and for the agent that wrote half of it.</p>
+      </div>
+      <div class="cards">
+        <div class="card glass">
+          <div class="corner-glow"></div>
+          <div class="card-top"><span class="emoji">&#128301;</span><span class="kbd">1 2 3</span></div>
+          <h3>Three scopes, one view</h3>
+          <p>New for me shows what changed since you last ticked each file. Whole branch
+             shows everything. Custom shows only the commits you check. One scope rules
+             the view.</p>
+        </div>
+        <div class="card glass">
+          <div class="corner-glow"></div>
+          <div class="card-top"><span class="emoji">&#9745;&#65039;</span></div>
+          <h3>A commit picker that skips</h3>
+          <p>Pick commits from a dropdown - title, author, age and hash. Uncheck the
+             noisy ones in the middle and read a combined diff of the rest.</p>
+        </div>
+        <div class="card glass">
+          <div class="corner-glow"></div>
+          <div class="card-top"><span class="emoji">&#128172;</span><span class="kbd">c</span></div>
+          <h3>Comments that survive rebases</h3>
+          <p>Every comment is anchored by blame to the commit that wrote the line, and
+             stores its lines as a snippet. Rewritten code tags the thread
+             &ldquo;code changed&rdquo; - never &ldquo;fixed&rdquo;.</p>
+        </div>
+        <div class="card glass">
+          <div class="corner-glow"></div>
+          <div class="card-top"><span class="emoji">&#129302;</span></div>
+          <h3>A thread your agent can join</h3>
+          <p><code>diffie --prompt</code> hands the open comments to your coding agent,
+             <code>--reply</code> threads its answer back under a robot badge. Resolving
+             stays yours.</p>
+        </div>
+        <div class="card glass">
+          <div class="corner-glow"></div>
+          <div class="card-top"><span class="emoji">&#9989;</span><span class="kbd">r</span></div>
+          <h3>Reviewed, with a memory</h3>
+          <p>A tick stores the file's content id, not a commit, so it survives any rebase
+             that leaves the file alone. A progress bar counts the files down.</p>
+        </div>
+        <div class="card glass">
+          <div class="corner-glow"></div>
+          <div class="card-top"><span class="emoji">&#128232;</span></div>
+          <h3>Reviews you can email</h3>
+          <p>Your review is one TOML file in <code>.git/review/</code>. No server, no
+             accounts. Send it to a colleague - their file next to yours shows up
+             read-only.</p>
+        </div>
+        <div class="card glass">
+          <div class="corner-glow"></div>
+          <div class="card-top"><span class="emoji">&#129517;</span><span class="kbd">&#8984;-click</span></div>
+          <h3>Names are links</h3>
+          <p>Cmd-click a symbol to jump to its definition, Zed-style. Syntax-based and
+             offline, no language server. Rust today, more languages as table entries.</p>
+        </div>
+        <div class="card glass">
+          <div class="corner-glow"></div>
+          <div class="card-top"><span class="emoji">&#128025;</span></div>
+          <h3>Pull requests, on your click</h3>
+          <p>Open a PR by number, publish your comments as one GitHub review, approve or
+             request changes. The forge is only ever touched when you click.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- showcase -->
+  <section id="showcase">
+    <div class="container">
+      <div class="section-head">
+        <div class="eyebrow">In action</div>
+        <h2>Real captures, no mockups</h2>
+        <p>Both captures come straight from diffie reviewing its own repository.</p>
+      </div>
+      <div class="show-rows">
+        <div class="show-row">
+          <div class="show-text">
+            <div class="num">01 - The review loop</div>
+            <h3>Comment, the agent answers, you resolve</h3>
+            <p>Write a comment on a line, run your agent, and watch the answer land in
+               the thread under a robot badge. Done and Won't fix resolve the thread;
+               resolved threads fold away into a gutter marker.</p>
+          </div>
+          <div class="show-media">
+            <video src="assets/comment-resolve.mp4" autoplay loop muted playsinline></video>
+          </div>
+        </div>
+        <div class="show-row flip">
+          <div class="show-text">
+            <div class="num">02 - The whole branch</div>
+            <h3>Nine commits, one window</h3>
+            <p>feat/mechanical-changes going into main: the file tree, the commit range,
+               open-comment badges and the shortcut hints - one native window, no tabs
+               to juggle.</p>
+          </div>
+          <div class="show-media">
+            <img src="assets/main-screen.png" alt="The diffie main window reviewing a nine-commit branch" loading="lazy">
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- agent loop -->
+  <section id="agent">
+    <div class="container">
+      <div class="section-head">
+        <div class="eyebrow">For agent workflows</div>
+        <h2>Review the branch. Hand off the fixes.</h2>
+        <p>diffie ships a skill for Claude Code and friends: say &ldquo;review my
+           changes&rdquo;, comment, then say &ldquo;address the review&rdquo;.</p>
+      </div>
+      <div class="agent-grid">
+        <ul class="agent-steps">
+          <li>
+            <span class="n">01</span>
+            <div><strong>You comment in diffie.</strong>
+            <p>On a line or a selection. Each comment knows the commit that wrote the
+               code and carries the snippet with it.</p></div>
+          </li>
+          <li>
+            <span class="n">02</span>
+            <div><strong>Your agent reads and answers.</strong>
+            <p><code class="kbd">diffie --prompt</code> prints the open comments, snippet
+               included, without opening a window. The agent's reply lands in the thread,
+               marked with a robot badge.</p></div>
+          </li>
+          <li>
+            <span class="n">03</span>
+            <div><strong>You resolve - or you don't.</strong>
+            <p>A rewritten line is tagged &ldquo;code changed&rdquo;, never
+               &ldquo;fixed&rdquo;. Whether it's Done, Won't fix or a Follow-up is the
+               reviewer's call alone.</p></div>
+          </li>
+        </ul>
+        <div class="terminal">
+          <div class="bar"><i></i><i></i><i></i><span>Terminal</span></div>
+          <pre><span class="c"># teach your agent the loop, once</span>
+<span class="p">$</span> npx skills add sassman/diffie-rs
+
+<span class="c"># print the open comments for the agent</span>
+<span class="p">$</span> diffie --prompt
+
+<span class="c"># the agent threads its answer under your comment</span>
+<span class="p">$</span> diffie --reply 7f3a "Extracted the guard clause as suggested."</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- install -->
+  <section id="install">
+    <div class="container">
+      <div class="install-panel glass">
+        <div class="blob-a"></div>
+        <div class="blob-b"></div>
+        <div class="install-grid">
+          <div class="install-copy">
+            <h2>Get diffie</h2>
+            <p>Homebrew, an installer script, or straight from source. Reviewing needs
+               only git; the pull-request features use the <code class="kbd">gh</code> CLI.</p>
+            <div class="terminal">
+              <div class="bar"><i></i><i></i><i></i><span>Terminal</span></div>
+              <pre><span class="c"># homebrew (macOS &amp; Linux)</span>
+<span class="p">$</span> brew install sassman/tap/diffie
+
+<span class="c"># or the installer script</span>
+<span class="p">$</span> curl --proto '=https' --tlsv1.2 -LsSf \
+    https://github.com/sassman/diffie-rs/releases/latest/download/diffie-installer.sh | sh
+
+<span class="c"># or from source</span>
+<span class="p">$</span> cargo install --locked --git https://github.com/sassman/diffie-rs diffie</pre>
+            </div>
+            <p class="fine">Early alpha. macOS on Apple Silicon and Intel, Linux x86_64
+               (Vulkan driver required), Windows x86_64. Opened with no arguments, diffie
+               reviews your uncommitted changes going into the checked-out branch.</p>
+          </div>
+          <div class="shortcuts">
+            <h3>Keyboard shortcuts</h3>
+            <dl>
+              <div class="row"><dt>Command palette</dt><dd><span class="kbd">&#8984;P</span></dd></div>
+              <div class="row"><dt>Next / previous change</dt><dd><span class="kbd">]</span><span class="kbd">[</span></dd></div>
+              <div class="row"><dt>Next / previous file</dt><dd><span class="kbd">}</span><span class="kbd">{</span></dd></div>
+              <div class="row"><dt>Switch scope</dt><dd><span class="kbd">1</span><span class="kbd">2</span><span class="kbd">3</span></dd></div>
+              <div class="row"><dt>Mark the file Reviewed</dt><dd><span class="kbd">r</span></dd></div>
+              <div class="row"><dt>Comment the selection</dt><dd><span class="kbd">c</span></dd></div>
+              <div class="row"><dt>Split or unified</dt><dd><span class="kbd">s</span></dd></div>
+              <div class="row"><dt>Search the diff</dt><dd><span class="kbd">/</span></dd></div>
+            </dl>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- roadmap -->
+  <section id="roadmap">
+    <div class="container">
+      <div class="section-head">
+        <div class="eyebrow">Roadmap</div>
+        <h2>Built in the open, promised carefully</h2>
+        <p>Two tracks, straight from the repository's ROADMAP.md: commitments, and ideas
+           with no commitment attached. Ideas graduate only when they become promises.</p>
+      </div>
+      <div class="road-cols">
+        <div class="road-col glass">
+          <span class="road-badge now">Committed</span>
+          <ul>
+            <li><strong>Nothing right now</strong>
+                <span>A promise here means it ships soon - the bar is deliberately high.</span></li>
+          </ul>
+        </div>
+        <div class="road-col glass">
+          <span class="road-badge ideas">Ideas to explore</span>
+          <ul>
+            <li><strong>Create a PR from the app</strong>
+                <span>a prefilled dialog, drafted by AI, tweakable to your own style</span></li>
+            <li><strong>Realtime agent interaction</strong>
+                <span>writing a comment triggers the agent; the app signals the answer</span></li>
+            <li><strong>Git basics through the palette</strong>
+                <span>commit the reviewed files, push the branch</span></li>
+            <li><strong>Switch source, target or PR in place</strong>
+                <span>like Zed's branch switcher - the PR flavour already shipped</span></li>
+            <li><strong>PR context</strong>
+                <span>see which comments are not yet published, per comment and overall</span></li>
+          </ul>
+        </div>
+      </div>
+      <p class="road-note">Want an idea promoted to a promise?
+        <a href="https://github.com/sassman/diffie-rs/issues">Open an issue</a> - requests
+        steer priorities.</p>
+    </div>
+  </section>
+
+  <!-- faq -->
+  <section id="faq">
+    <div class="container">
+      <div class="section-head">
+        <div class="eyebrow">FAQ</div>
+        <h2>Questions, answered</h2>
+      </div>
+      <div class="faq-list">
+        <details class="glass">
+          <summary>What is diffie?
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </summary>
+          <p>A native desktop app for reviewing git changes across several commits or a
+             whole branch, with comments on lines and selections. Think GitHub's
+             &ldquo;Files changed&rdquo; view, but not in a browser, built for
+             multi-commit review, and wired into your coding agent. Written in Rust
+             with GPUI, the GPU UI framework behind the Zed editor.</p>
+        </details>
+        <details class="glass">
+          <summary>Is diffie free?
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </summary>
+          <p>Yes - diffie is in early alpha and free to install, and the source lives at
+             <code>github.com/sassman/diffie-rs</code>. There are no accounts and no
+             subscriptions; your reviews are plain files on your own disk.</p>
+        </details>
+        <details class="glass">
+          <summary>How is this different from reviewing on GitHub?
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </summary>
+          <p>Three things. Scopes: review the whole branch, only what's new since your
+             last pass, or a hand-picked set of commits - GitHub shows one flat diff.
+             Anchoring: comments pin to the commit that wrote the line, so they survive
+             rebases and follow rewrites. And the loop: your coding agent can read the
+             review and answer in the thread, locally, before anything reaches a forge.</p>
+          <p>When you do work a GitHub pull request, <code>diffie --pr</code> pins its
+             exact commits and can publish your comments as one review - one
+             notification, only when you click.</p>
+        </details>
+        <details class="glass">
+          <summary>Does diffie touch my repository?
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </summary>
+          <p>Never. diffie writes nothing to your objects, index, refs, config or working
+             tree. The only files it writes are review files under
+             <code>.git/review/</code> - inside the git directory, so they can't be
+             committed by accident. The one exception: picking a pull request whose
+             commits aren't local yet runs a single <code>git fetch</code>, on that
+             explicit click.</p>
+        </details>
+        <details class="glass">
+          <summary>What are the requirements?
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </summary>
+          <p>git, and a machine to run it on: macOS (Apple Silicon and Intel) or Linux
+             x86_64 with a Vulkan driver. A Windows build exists but hasn't been put
+             through its paces yet. The pull-request features need the
+             <code>gh</code> CLI; everything else works offline.</p>
+        </details>
+        <details class="glass">
+          <summary>How do I share a review with a colleague?
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </summary>
+          <p>Send the file. Your review is one TOML file named after you; dropped into a
+             colleague's <code>.git/review/</code> folder it shows up read-only next to
+             their own. Files never conflict, because every reviewer writes only their
+             own - reactions to someone else's comment go in your file, by comment id.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="container">
+    <div class="foot-top">
+      <div class="foot-brand">
+        <img src="assets/logo.svg" alt="">
+        <div>
+          <strong>diffie</strong>
+          <span>Review git changes natively, comment on lines, hand the review to your agent.</span>
+        </div>
+      </div>
+      <div class="foot-links">
+        <a href="#features">Features</a>
+        <a href="#showcase">In action</a>
+        <a href="#install">Install</a>
+        <a href="#roadmap">Roadmap</a>
+        <a href="https://github.com/sassman/diffie-rs">GitHub</a>
+      </div>
+    </div>
+    <p class="foot-copy">&copy; 2026 Sven Kanoldt &middot; Built with Rust and GPUI &middot; An eagle's eye on every branch</p>
+  </div>
+</footer>
+
+<script>
+  const nav = document.getElementById('nav');
+  const onScroll = () => nav.classList.toggle('scrolled', window.scrollY > 12);
+  addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+</script>
+
+</body>
+</html>
