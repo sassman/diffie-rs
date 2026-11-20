@@ -57,10 +57,11 @@
         <span class="brand-gradient">built for the agent loop.</span>
       </h1>
       <p class="hero-sub rise" style="animation-delay:.2s">
-        diffie is a small, native desktop app for reviewing git changes across several
-        commits or a whole branch - comment on lines and selections, hand the open
-        comments to your coding agent, and resolve the answers.
-        No browser, no server, no accounts.
+        diffie is a fast desktop app for reviewing git changes - commits, ranges,
+        uncommitted files, whole branches or GitHub pull requests. Review a teammate's
+        PR, or steer your coding agent before there even is one: comment on lines,
+        hand the comments over, resolve the answers. No browser, no sign-up -
+        reviews are plain files on your disk.
       </p>
       <div class="hero-ctas rise" style="animation-delay:.26s">
         <a class="btn-primary" href="#install">
@@ -69,10 +70,10 @@
         <a class="btn-secondary" href="https://github.com/sassman/diffie-rs">View on GitHub</a>
       </div>
       <p class="hero-meta rise" style="animation-delay:.34s">
-        Free in alpha &middot; macOS, Linux &amp; Windows &middot; git is the only requirement
+        Free in alpha &middot; macOS, Linux &amp; Windows
       </p>
       <div class="stats rise" style="animation-delay:.42s">
-        <div class="stat"><strong class="brand-gradient">0</strong><span>servers or accounts</span></div>
+        <div class="stat"><strong class="brand-gradient">local</strong><span>reviews never leave your disk</span></div>
         <div class="stat"><strong class="brand-gradient">TOML</strong><span>review files, inside .git</span></div>
         <div class="stat"><strong class="brand-gradient">4</strong><span>reactions - a closed set</span></div>
         <div class="stat"><strong class="brand-gradient">Rust</strong><span>+ GPUI, no Electron</span></div>
@@ -93,25 +94,26 @@
     <div class="container">
       <div class="section-head">
         <div class="eyebrow">Features</div>
-        <h2>Everything branch review should be</h2>
-        <p>Web review tools are fine for one commit and lousy at ten. diffie is built
-           for the branch - and for the agent that wrote half of it.</p>
+        <h2>Everything code review should be</h2>
+        <p>Web review tools are slow to load, weak at search and symbols, and a rebase
+           can lose a thread. diffie keeps the loop quick and specific - review and
+           steer your agent before a PR even exists.</p>
       </div>
       <div class="cards">
         <div class="card glass">
           <div class="corner-glow"></div>
           <div class="card-top"><span class="emoji">&#128301;</span><span class="kbd">1 2 3</span></div>
-          <h3>Three scopes, one view</h3>
-          <p>New for me shows what changed since you last ticked each file. Whole branch
-             shows everything. Custom shows only the commits you check. One scope rules
-             the view.</p>
+          <h3>Re-review only what's new</h3>
+          <p>Come back after the fixes and see only what changed since you last ticked
+             each file - or the whole branch, or just the commits you pick. One scope
+             rules the view.</p>
         </div>
         <div class="card glass">
           <div class="corner-glow"></div>
           <div class="card-top"><span class="emoji">&#9745;&#65039;</span></div>
-          <h3>A commit picker that skips</h3>
-          <p>Pick commits from a dropdown - title, author, age and hash. Uncheck the
-             noisy ones in the middle and read a combined diff of the rest.</p>
+          <h3>Shrink the review to what matters</h3>
+          <p>Uncheck the mechanical commits - reformat, rename, lockfile churn - and
+             read a combined diff of only the ones that deserve your attention.</p>
         </div>
         <div class="card glass">
           <div class="corner-glow"></div>
@@ -125,9 +127,9 @@
           <div class="corner-glow"></div>
           <div class="card-top"><span class="emoji">&#129302;</span></div>
           <h3>A thread your agent can join</h3>
-          <p><code>diffie --prompt</code> hands the open comments to your coding agent,
-             <code>--reply</code> threads its answer back under a robot badge. Resolving
-             stays yours.</p>
+          <p>Tell your agent to open a review: it launches diffie, reads your comments
+             back, and answers or fixes. You reload, re-judge and resolve - without
+             ever leaving the review.</p>
         </div>
         <div class="card glass">
           <div class="corner-glow"></div>
@@ -141,22 +143,23 @@
           <div class="card-top"><span class="emoji">&#128232;</span></div>
           <h3>Reviews you can email</h3>
           <p>Your review is one TOML file in <code>.git/review/</code>. No server, no
-             accounts. Send it to a colleague - their file next to yours shows up
-             read-only.</p>
+             accounts. Send it to a colleague and their file shows read-only next to
+             yours - making that round trip one-click smooth is planned.</p>
         </div>
         <div class="card glass">
           <div class="corner-glow"></div>
           <div class="card-top"><span class="emoji">&#129517;</span><span class="kbd">&#8984;-click</span></div>
-          <h3>Names are links</h3>
-          <p>Cmd-click a symbol to jump to its definition, Zed-style. Syntax-based and
-             offline, no language server. Rust today, more languages as table entries.</p>
+          <h3>IDE powers in the diff</h3>
+          <p>Cmd-click a name to jump to its definition, right inside the diff - the
+             navigation you expect from an IDE, syntax-based and offline. Rust today,
+             more languages coming.</p>
         </div>
         <div class="card glass">
           <div class="corner-glow"></div>
           <div class="card-top"><span class="emoji">&#128025;</span></div>
           <h3>Pull requests, on your click</h3>
-          <p>Open a PR by number, publish your comments as one GitHub review, approve or
-             request changes. The forge is only ever touched when you click.</p>
+          <p>Load a PR by number, publish your comments as one GitHub review, approve or
+             request changes. Nothing reaches GitHub until you click.</p>
         </div>
       </div>
     </div>
@@ -168,7 +171,7 @@
       <div class="section-head">
         <div class="eyebrow">In action</div>
         <h2>Real captures, no mockups</h2>
-        <p>Both captures come straight from diffie reviewing its own repository.</p>
+        <p>Both captures come straight from diffie v0.3.0 reviewing its own repository.</p>
       </div>
       <div class="show-rows">
         <div class="show-row">
@@ -187,12 +190,12 @@
           <div class="show-text">
             <div class="num">02 - The whole branch</div>
             <h3>Nine commits, one window</h3>
-            <p>feat/mechanical-changes going into main: the file tree, the commit range,
-               open-comment badges and the shortcut hints - one native window, no tabs
-               to juggle.</p>
+            <p>A feature branch going into main: the file tree, the commit range,
+               open-comment badges and the shortcut hints - one window with a fast,
+               accessible workflow.</p>
           </div>
           <div class="show-media">
-            <img src="assets/main-screen.png" alt="The diffie main window reviewing a nine-commit branch" loading="lazy">
+            <img src="assets/main-screen.png" alt="The diffie main window reviewing a branch" loading="lazy">
           </div>
         </div>
       </div>
@@ -205,30 +208,31 @@
       <div class="section-head">
         <div class="eyebrow">For agent workflows</div>
         <h2>Review the branch. Hand off the fixes.</h2>
-        <p>diffie ships a skill for Claude Code and friends: say &ldquo;review my
+        <p>diffie ships a review skill for your agent of choice: say &ldquo;review my
            changes&rdquo;, comment, then say &ldquo;address the review&rdquo;.</p>
       </div>
       <div class="agent-grid">
         <ul class="agent-steps">
           <li>
             <span class="n">01</span>
-            <div><strong>You comment in diffie.</strong>
-            <p>On a line or a selection. Each comment knows the commit that wrote the
-               code and carries the snippet with it.</p></div>
+            <div><strong>Say &ldquo;review my changes&rdquo;.</strong>
+            <p>Your agent opens diffie on exactly the work you're iterating on. You
+               comment on lines and selections - each comment knows the commit that
+               wrote the code.</p></div>
           </li>
           <li>
             <span class="n">02</span>
-            <div><strong>Your agent reads and answers.</strong>
-            <p><code class="kbd">diffie --prompt</code> prints the open comments, snippet
-               included, without opening a window. The agent's reply lands in the thread,
-               marked with a robot badge.</p></div>
+            <div><strong>Say &ldquo;address the review&rdquo;.</strong>
+            <p>The agent reads your comments back, answers in the thread under a robot
+               badge - or simply fixes the code.</p></div>
           </li>
           <li>
             <span class="n">03</span>
-            <div><strong>You resolve - or you don't.</strong>
-            <p>A rewritten line is tagged &ldquo;code changed&rdquo;, never
-               &ldquo;fixed&rdquo;. Whether it's Done, Won't fix or a Follow-up is the
-               reviewer's call alone.</p></div>
+            <div><strong>Reload, re-judge, resolve.</strong>
+            <p>New commits appear in place and the thread blends into the updated diff -
+               no tool switch, no lost context. A rewritten line is tagged
+               &ldquo;code changed&rdquo;, never &ldquo;fixed&rdquo;: resolving stays
+               the reviewer's call.</p></div>
           </li>
         </ul>
         <div class="terminal">
@@ -236,11 +240,9 @@
           <pre><span class="c"># teach your agent the loop, once</span>
 <span class="p">$</span> npx skills add sassman/diffie-rs
 
-<span class="c"># print the open comments for the agent</span>
-<span class="p">$</span> diffie --prompt
-
-<span class="c"># the agent threads its answer under your comment</span>
-<span class="p">$</span> diffie --reply 7f3a "Extracted the guard clause as suggested."</pre>
+<span class="c"># from then on it's two sentences:</span>
+<span class="p">&gt;</span> "review my changes"      <span class="c">- diffie opens, you comment</span>
+<span class="p">&gt;</span> "address the review"     <span class="c">- answers and fixes land in the thread</span></pre>
         </div>
       </div>
     </div>
@@ -269,22 +271,20 @@
 <span class="c"># or from source</span>
 <span class="p">$</span> cargo install --locked --git https://github.com/sassman/diffie-rs diffie</pre>
             </div>
-            <p class="fine">Early alpha. macOS on Apple Silicon and Intel, Linux x86_64
-               (Vulkan driver required), Windows x86_64. Opened with no arguments, diffie
-               reviews your uncommitted changes going into the checked-out branch.</p>
+            <p class="fine">Early alpha, macOS, Linux and Windows. Opened with no
+               arguments, diffie reviews your uncommitted changes.</p>
           </div>
           <div class="shortcuts">
-            <h3>Keyboard shortcuts</h3>
+            <h3>Keyboard-first, with a command palette</h3>
             <dl>
               <div class="row"><dt>Command palette</dt><dd><span class="kbd">&#8984;P</span></dd></div>
               <div class="row"><dt>Next / previous change</dt><dd><span class="kbd">]</span><span class="kbd">[</span></dd></div>
-              <div class="row"><dt>Next / previous file</dt><dd><span class="kbd">}</span><span class="kbd">{</span></dd></div>
-              <div class="row"><dt>Switch scope</dt><dd><span class="kbd">1</span><span class="kbd">2</span><span class="kbd">3</span></dd></div>
-              <div class="row"><dt>Mark the file Reviewed</dt><dd><span class="kbd">r</span></dd></div>
               <div class="row"><dt>Comment the selection</dt><dd><span class="kbd">c</span></dd></div>
-              <div class="row"><dt>Split or unified</dt><dd><span class="kbd">s</span></dd></div>
+              <div class="row"><dt>Mark the file Reviewed</dt><dd><span class="kbd">r</span></dd></div>
               <div class="row"><dt>Search the diff</dt><dd><span class="kbd">/</span></dd></div>
             </dl>
+            <p class="hint">A taste - the palette carries every command, and single
+               keys never fire while you type a comment.</p>
           </div>
         </div>
       </div>
@@ -304,8 +304,8 @@
         <div class="road-col glass">
           <span class="road-badge now">Committed</span>
           <ul>
-            <li><strong>Nothing right now</strong>
-                <span>A promise here means it ships soon - the bar is deliberately high.</span></li>
+            <li><strong>Conflict resolution</strong>
+                <span>resolve conflicts for changes and pull requests - in the making</span></li>
           </ul>
         </div>
         <div class="road-col glass">

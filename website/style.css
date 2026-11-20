@@ -450,6 +450,7 @@ header nav.scrolled {
 .shortcuts .row:last-child { border-bottom: 0; }
 .shortcuts dt { font-size: .875rem; color: rgba(255, 255, 255, .6); }
 .shortcuts dd { display: flex; gap: .375rem; }
+.shortcuts .hint { margin-top: 1rem; font-size: .75rem; color: rgba(255, 255, 255, .4); }
 
 /* ---- roadmap ---- */
 
