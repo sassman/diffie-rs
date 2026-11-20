@@ -1447,6 +1447,11 @@ impl ConflictFixture {
         // diff3 markers carry the base section the resolver needs. Set on
         // the throwaway repository; the app never touches a repo's config.
         git(root, &["config", "merge.conflictStyle", "diff3"]);
+        // Commits detach a background auto-maintenance that briefly holds
+        // objects/maintenance.lock: a race against the no-write guard's
+        // object snapshots, and noise in a throwaway repository.
+        git(root, &["config", "maintenance.auto", "false"]);
+        git(root, &["config", "gc.auto", "0"]);
         // Fixed commit instants so the label tests can assert the tips'
         // clocks: feat's tip is four days before main's, feat's first
         // commit five days before.
@@ -1530,6 +1535,137 @@ fn repo_state_counts_rebase_progress() {
         fixture.backend().repo_state().unwrap(),
         RepoState::Rebase { done: 1, total: 2 }
     );
+}
+
+#[test]
+fn predicted_conflicts_see_the_collision_before_any_merge_starts() {
+    let fixture = ConflictFixture::new();
+    let objects_before = file_set(&fixture.root().join(".git/objects"));
+
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("feat", None, "main", None)
+        .unwrap();
+
+    assert_eq!(predicted.len(), 1);
+    assert_eq!(predicted[0].path, "t.txt");
+    let merged = predicted[0].merged.as_deref().unwrap();
+    assert!(merged.contains("<<<<<<< feat"), "{merged}");
+    assert!(merged.contains("feat line"), "{merged}");
+    assert!(merged.contains("main line"), "{merged}");
+    assert!(merged.contains(">>>>>>> main"), "{merged}");
+    // Prediction never starts the operation or writes merge objects into
+    // the repository: everything lands in the scratch directory.
+    assert_eq!(fixture.backend().repo_state().unwrap(), RepoState::Idle);
+    assert_eq!(
+        file_set(&fixture.root().join(".git/objects")),
+        objects_before
+    );
+}
+
+#[test]
+fn predicted_conflicts_stay_empty_for_branches_that_merge_cleanly() {
+    let fixture = ConflictFixture::new();
+    // Branched at the fixture's base commit so it shares no rewrite with
+    // feat: the two touch disjoint paths and the merge is clean.
+    git(fixture.root(), &["checkout", "-q", "-b", "docs", "feat~2"]);
+    std::fs::write(fixture.root().join("d.txt"), "docs\n").unwrap();
+    git(fixture.root(), &["add", "d.txt"]);
+    git(fixture.root(), &["commit", "-q", "-m", "docs add d"]);
+    git(fixture.root(), &["checkout", "-q", "main"]);
+
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("docs", None, "feat", None)
+        .unwrap();
+    assert_eq!(predicted, Vec::new());
+}
+
+#[test]
+fn predicted_conflicts_follow_the_pin_once_a_name_has_moved() {
+    let fixture = ConflictFixture::new();
+    let pinned = git(fixture.root(), &["rev-parse", "main"]);
+
+    // While the name and the pin agree, the name labels the markers.
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("feat", None, "main", Some(&pinned))
+        .unwrap();
+    let merged = predicted[0].merged.as_deref().unwrap();
+    assert!(merged.contains(">>>>>>> main"), "{merged}");
+
+    // Once main moves on, the review stays pinned: the forecast merges
+    // the pinned tip's content and the markers carry the pin.
+    git(fixture.root(), &["checkout", "-q", "main"]);
+    std::fs::write(fixture.root().join("t.txt"), "main line moved on\n").unwrap();
+    git(
+        fixture.root(),
+        &["commit", "-q", "-am", "main rewrites t again"],
+    );
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("feat", None, "main", Some(&pinned))
+        .unwrap();
+    let merged = predicted[0].merged.as_deref().unwrap();
+    assert!(merged.contains("main line\n"), "{merged}");
+    assert!(!merged.contains("main line moved on"), "{merged}");
+    assert!(merged.contains(&format!(">>>>>>> {pinned}")), "{merged}");
+}
+
+#[test]
+fn predicted_conflicts_keep_a_path_git_would_quote() {
+    let fixture = ConflictFixture::new();
+    // Added differently on both sides: a two-way conflict on a name that
+    // a C-quoting listing would mangle under LC_ALL=C.
+    git(fixture.root(), &["checkout", "-q", "feat"]);
+    std::fs::write(fixture.root().join("grüße.txt"), "feat greets\n").unwrap();
+    git(fixture.root(), &["add", "grüße.txt"]);
+    git(
+        fixture.root(),
+        &["commit", "-q", "-m", "feat adds greetings"],
+    );
+    git(fixture.root(), &["checkout", "-q", "main"]);
+    std::fs::write(fixture.root().join("grüße.txt"), "main greets\n").unwrap();
+    git(fixture.root(), &["add", "grüße.txt"]);
+    git(
+        fixture.root(),
+        &["commit", "-q", "-m", "main adds greetings"],
+    );
+
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("feat", None, "main", None)
+        .unwrap();
+    let greeting = predicted
+        .iter()
+        .find(|conflict| conflict.path == "grüße.txt")
+        .expect("the quoted-name path is listed verbatim");
+    let merged = greeting.merged.as_deref().unwrap();
+    assert!(merged.contains("feat greets"), "{merged}");
+    assert!(merged.contains("main greets"), "{merged}");
+}
+
+/// Every file under `directory`, relative, sorted: an assertion on the
+/// set names the file that appeared or vanished, where a count only says
+/// that one did.
+fn file_set(directory: &Path) -> Vec<String> {
+    fn walk(root: &Path, directory: &Path, into: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(root, &path, into);
+            } else if let Ok(relative) = path.strip_prefix(root) {
+                into.push(relative.display().to_string());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(directory, directory, &mut files);
+    files.sort();
+    files
 }
 
 #[test]

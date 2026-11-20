@@ -57,8 +57,16 @@ first code: a working core and a first UI scaffold wired to it.
   read-only, and result_text keeps blank lines and the file's own CRLF
   or LF endings through edits. Known limitation, recorded as Open in
   section 20: the block editor's horizontal scroll is not synced with
-  the pane. The Cargo patch pulls the fork branch `diff-conflict-edit`
-  from GitHub, per the repository rule.
+  the pane. **An idle repository forecasts the merge** (branch
+  `feat/conflict-prediction`, Kit fork branch `diff-conflict-predict`):
+  the backend's `predicted_conflicts` runs `git merge-tree --write-tree`
+  against a scratch object directory, every colliding path gets the
+  tree's conflict glyph, and the file header offers "Show conflict" - the
+  diff body swaps to git's predicted merge, rendered read-only by the Kit
+  Diff's conflict projection (`with_conflicts_read_only` hides the Accept
+  commands). The forecast is advisory: a backend that cannot compute it
+  loads the review without one. The Cargo patch pulls the fork branch
+  `diff-conflict-predict` from GitHub, per the repository rule.
 
 ## Verification status
 
@@ -101,6 +109,9 @@ Be exact about this when you report further work.
 | Conflict center on screen, 2026-11-20, against mid-merge and mid-rebase fixture repositories: strip wording for both operations (rebase shows its commit progress), auto-selected Conflicts center, three panes with dividers and per-pane line numbers, tinted blocks aligned by spacers, pick arrows and the take-both glyph in the middle pane's gutters, pane labels with the absolute date left and "same age" right, unresolved badges, greyed Mark resolved and Continue, conflict glyphs on the tree's conflicted rows, and the light-theme story | Verified by screenshot (`docs/screenshots/conflict-*.png`). The yours label's date truncates in a narrow pane |
 | Conflict interactions: clicking a pick arrow, Mark resolved and Reopen round trips, Continue and the abort confirm dialog, the Review \| Conflicts switch toggling, the palette entries | Compiled, clippy-clean, model-tested; not driven on screen |
 | Block-scoped editing: editor mounts only on picked blocks and drops on undo, hand edits flip the resolution once, blank lines and CRLF endings survive round trips, Enter grows the region and the spacers realign, equal-height edits leave the row table untouched | Covered by Kit model and gpui-window state tests on the fork branch `diff-conflict-edit` (a real Change event is driven through the input handler); painted output verified by screenshot (`docs/screenshots/conflict-edit-story-light.png`: the story's first block picked then hand-edited, the editor's text in the middle pane, line numbers aligned); caret and click-to-focus feel **not driven on screen** |
+| Conflict forecast backend: `predicted_conflicts` sees the collision between two branches before any merge starts, markers with both sides' lines and name labels in the merged text, nothing written into the repository's object store, the repository staying idle, a cleanly merging pair predicting nothing | Covered by core tests against a throwaway repository (`crates/core/tests/git_cli.rs`) |
+| Conflict forecast on screen, 2026-11-20, against a pre-merge fixture: the tree's conflict glyph on both colliding rows, "would conflict with main" and the Show conflict button on both file headers (`docs/screenshots/conflict-forecast.png`), and after a driven click the swap itself - the body became the predicted merge with Current and Incoming parts and **no Accept or Undo commands** (`with_conflicts_read_only`), the button flipped to Show changes, the other file kept its review diff | Verified by screenshot. The marker labels painted as the pinned target OID in that shot; the switch to readable names landed after it and is covered by the core test's label assertions, not reshot |
+| Forecast interactions: the swap back to the review diff, the viewport hold across a swap, forecasts surviving a background reload, a pinned review keeping its forecast when a same-named branch moves on (core-tested), moved-block folds left out of a swapped body, and the sidebar warning for collisions on paths outside the scope's view | Core behaviors tested; the UI side compiled, clippy-clean, not driven on screen |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 | Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Pull-request menu (title-bar icon in a `--pr` review): open in the browser, publish comments, approve with and without comments; the link icon on published cards; the status-bar line after a publish | Core covered by tests: what a publish sends and records (`forge.rs`, against a fake forge) and the exact gh calls, the file-level fallback and the pending-review cleanup (`github.rs`, against a stand-in gh script, Unix only). The GraphQL input and enum names were checked read-only against GitHub's live schema by introspection. The status query (`gh pr view --json state,reviewDecision,statusCheckRollup` with the app's jq) was run read-only against a real merged PR and its lines match what `fold_checks` parses. **Nothing was ever posted to a real pull request**, and the window was not run: the menu, the state icon and its red tint, the busy state, the link icon and whether a pending-review comment's URL still opens after the submit are all unseen |
