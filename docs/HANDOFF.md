@@ -83,7 +83,10 @@ first code: a working core and a first UI scaffold wired to it.
   panes, over the unchanged `ConflictResolvState` - the owner measured
   it against the retained `ConflictResolv` in the Kit story and picked
   it. The retained component stays in the Kit as the story's
-  comparison baseline.
+  comparison baseline. The conflicts column pins the scrolled-into
+  file's header over its top edge, the same idiom as the Diff's pinned
+  file headers, and a file's own resolver hands the wheel outward once
+  it sits at its edge, so the column scrolls on past it.
 
 ## Verification status
 
@@ -132,6 +135,8 @@ Be exact about this when you report further work.
 | Resolution push backend: the merge commit built from objects alone (two parents, resolved texts in, auto-merged side untouched, modes kept from the merge tree), the remote branch moving to it, nothing local moving, refusal of an uncovered conflicted path, rejection when the head branch moved on | Covered by core tests against a throwaway repository with a local bare remote (`crates/core/tests/git_cli.rs`) |
 | Forecast resolution UI: the Conflicts center on a pull request's predicted merge, in-memory ticks, the PR-menu and palette action with its blockers and the confirm dialog naming remote, branch and number, the re-pin and reload after a push | Compiled, clippy-clean; **not driven on screen** - it needs a real pull request with conflicts to dogfood |
 | The virtualized resolver in the app, 2026-11-20, against the mid-merge fixture: syntax-highlighted lines in all three panes, the fold bands above and below the conflict, the tinted block with its pick arrows and take-both glyph aligned by line numbers, the file's frame sized to its folded content inside the outer scroll | Verified by screenshot on macOS. A first wiring painted an empty body - the virtualized list collapses without a definite height - which is why `ResolverView` now sizes the frame from `display_len` and the published row height. Scroll feel inside a capped frame, picks and typing through the virtualized panes, and the forecast center were not driven on screen |
+| Sticky conflict file headers: the column pins the scrolled-into file's header over its top edge (both the operation and the forecast columns share the header builders), and the next file's header pushes the pinned copy up as it arrives; a resolver that consumed a wheel turn stops it so the outer column does not scroll too, and hands it outward at its edge | Pin verified on macOS on 2026-11-21 by screenshots against a two-file mid-merge fixture with the column's scroll forced through its handle (synthetic wheel events were abandoned - the owner was at the keyboard): the first file's header pinned flush, slid up and clipped at the column's top edge as the next header arrived, and at a deeper offset the second file's header pinned. The first wiring never fired: `bounds_for_item` reports layout bounds a scroll never moves, so the pin now adds the handle's clamped offset. A real wheel drive, the hand-off at a capped file's edge and the forecast column's pin (same helper and builders) were not driven on screen |
+| Found while verifying, unfixed: on some launches a virtualized resolver scrolls down on its own - the gpui list's scroll top climbs a couple of items per frame through the startup render burst while syntax highlighting streams in, and settles wherever the burst ends (seen at items 34 and 93 of 158, roughly one launch in three against the two-file fixture; wheel input plays no part) | Reproduced and logged on macOS, 2026-11-21, with a temporary local-path Kit patch printing `logical_scroll_top` per render. Kit-side, in `ConflictResolvVirtual` with gpui's `list`; the cause is not yet isolated, and the burst itself - hundreds of notifies while one file's highlighting streams in - deserves the same look |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 | Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Pull-request menu (title-bar icon in a `--pr` review): open in the browser, publish comments, approve with and without comments; the link icon on published cards; the status-bar line after a publish | Core covered by tests: what a publish sends and records (`forge.rs`, against a fake forge) and the exact gh calls, the file-level fallback and the pending-review cleanup (`github.rs`, against a stand-in gh script, Unix only). The GraphQL input and enum names were checked read-only against GitHub's live schema by introspection. The status query (`gh pr view --json state,reviewDecision,statusCheckRollup` with the app's jq) was run read-only against a real merged PR and its lines match what `fold_checks` parses. **Nothing was ever posted to a real pull request**, and the window was not run: the menu, the state icon and its red tint, the busy state, the link icon and whether a pending-review comment's URL still opens after the submit are all unseen |
@@ -816,11 +821,15 @@ Not implemented or not possible, against the mockup and the design document:
 
 ## Suggested next steps
 
-On the conflict-resolver branch, before anything else: **see it on screen**
-against the fixture repositories, then iterate - the embedded editor in the
-middle pane (feed it the trusted stage texts, not the marker parse),
-virtualized rows for large files, the narrow-window fallback onto the Kit's
-inline conflict UI, and restoring the GitHub Cargo patch before merge.
+On the conflict-resolver branch, before anything else: **chase the
+self-scrolling virtualized resolver** (the unfixed row in the verification
+table) - reproduce with a local-path Kit patch logging
+`logical_scroll_top` per render against the two-file fixture, then walk
+gpui's `list` layout for what advances the anchor during the highlight
+burst; quieting the burst itself may be the fix. Then iterate - the
+embedded editor in the middle pane (feed it the trusted stage texts, not
+the marker parse), the narrow-window fallback onto the Kit's inline
+conflict UI, and restoring the GitHub Cargo patch before merge.
 
 On main, in this order, each one small enough to show the owner:
 
