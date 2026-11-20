@@ -80,6 +80,7 @@ impl Fixture {
         let root = directory.path();
         git(root, &["init", "-q", "-b", "main"]);
         git(root, &["config", "user.name", "Ada"]);
+        git(root, &["config", "user.email", "ada@example.invalid"]);
         std::fs::write(root.join("a.txt"), lines(&[])).unwrap();
         git(root, &["add", "."]);
         git(root, &["commit", "-q", "-m", "base"]);
@@ -1435,6 +1436,10 @@ impl ConflictFixture {
         let root = directory.path();
         git(root, &["init", "-q", "-b", "main"]);
         git(root, &["config", "user.name", "Ada"]);
+        // The identity lives in the repo config, not just the test
+        // helper's env: continue commits through the backend, which
+        // inherits no env, and Windows' git refuses to guess an email.
+        git(root, &["config", "user.email", "ada@example.invalid"]);
         // diff3 markers carry the base section the resolver needs. Set on
         // the throwaway repository; the app never touches a repo's config.
         git(root, &["config", "merge.conflictStyle", "diff3"]);
@@ -1787,6 +1792,7 @@ fn continue_reports_the_next_conflicted_commit_as_progress() {
     let root = directory.path();
     git(root, &["init", "-q", "-b", "main"]);
     git(root, &["config", "user.name", "Ada"]);
+    git(root, &["config", "user.email", "ada@example.invalid"]);
     std::fs::write(root.join("t.txt"), "base t\n").unwrap();
     std::fs::write(root.join("c.txt"), "base c\n").unwrap();
     git(root, &["add", "."]);
