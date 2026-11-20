@@ -66,7 +66,7 @@ first code: a working core and a first UI scaffold wired to it.
   Diff's conflict projection (`with_conflicts_read_only` hides the Accept
   commands). The forecast is advisory: a backend that cannot compute it
   loads the review without one. The Cargo patch pulls the fork branch
-  `diff-conflict-predict` from GitHub, per the repository rule.
+  `diff-conflict-resolv2` from GitHub, per the repository rule.
   **A pull-request review resolves its forecast and pushes it** (branch
   `feat/conflict-pr-push`): the Conflicts center opens on the predicted
   merge with the same three-pane resolvers, the Resolved tick stays
@@ -76,7 +76,14 @@ first code: a working core and a first UI scaffold wired to it.
   the review on the pushed merge. Same-repository PRs only; fork PRs
   and unresolvable files (binary, deleted side) block the push with the
   reason spelled out. Constraint 5 carries the two sanctioned
-  exceptions.
+  exceptions. **The resolver renders virtualized** (branch
+  `feat/conflict-virtualized`, Kit fork branch `diff-conflict-resolv2`):
+  the app draws `ConflictResolvVirtual`, which materializes only the
+  visible rows the way `Diff` does and syntax-highlights all three
+  panes, over the unchanged `ConflictResolvState` - the owner measured
+  it against the retained `ConflictResolv` in the Kit story and picked
+  it. The retained component stays in the Kit as the story's
+  comparison baseline.
 
 ## Verification status
 
@@ -124,6 +131,7 @@ Be exact about this when you report further work.
 | Forecast interactions: the swap back to the review diff, the viewport hold across a swap, forecasts surviving a background reload, a pinned review keeping its forecast when a same-named branch moves on (core-tested), moved-block folds left out of a swapped body, and the sidebar warning for collisions on paths outside the scope's view | Core behaviors tested; the UI side compiled, clippy-clean, not driven on screen |
 | Resolution push backend: the merge commit built from objects alone (two parents, resolved texts in, auto-merged side untouched, modes kept from the merge tree), the remote branch moving to it, nothing local moving, refusal of an uncovered conflicted path, rejection when the head branch moved on | Covered by core tests against a throwaway repository with a local bare remote (`crates/core/tests/git_cli.rs`) |
 | Forecast resolution UI: the Conflicts center on a pull request's predicted merge, in-memory ticks, the PR-menu and palette action with its blockers and the confirm dialog naming remote, branch and number, the re-pin and reload after a push | Compiled, clippy-clean; **not driven on screen** - it needs a real pull request with conflicts to dogfood |
+| The virtualized resolver in the app, 2026-11-20, against the mid-merge fixture: syntax-highlighted lines in all three panes, the fold bands above and below the conflict, the tinted block with its pick arrows and take-both glyph aligned by line numbers, the file's frame sized to its folded content inside the outer scroll | Verified by screenshot on macOS. A first wiring painted an empty body - the virtualized list collapses without a definite height - which is why `ResolverView` now sizes the frame from `display_len` and the published row height. Scroll feel inside a capped frame, picks and typing through the virtualized panes, and the forecast center were not driven on screen |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 | Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Pull-request menu (title-bar icon in a `--pr` review): open in the browser, publish comments, approve with and without comments; the link icon on published cards; the status-bar line after a publish | Core covered by tests: what a publish sends and records (`forge.rs`, against a fake forge) and the exact gh calls, the file-level fallback and the pending-review cleanup (`github.rs`, against a stand-in gh script, Unix only). The GraphQL input and enum names were checked read-only against GitHub's live schema by introspection. The status query (`gh pr view --json state,reviewDecision,statusCheckRollup` with the app's jq) was run read-only against a real merged PR and its lines match what `fold_checks` parses. **Nothing was ever posted to a real pull request**, and the window was not run: the menu, the state icon and its red tint, the busy state, the link icon and whether a pending-review comment's URL still opens after the submit are all unseen |
