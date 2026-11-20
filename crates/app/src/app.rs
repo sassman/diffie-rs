@@ -56,7 +56,7 @@ use gpui_kit::component::{
 use gpui_kit::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClipboardItem, Context,
     ElementId, Entity, FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, Render, ScrollHandle, SharedString,
+    KeyBinding, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window,
     WindowBounds, deferred, div, prelude::FluentBuilder as _, px, rgb,
 };
@@ -5016,7 +5016,31 @@ impl ReviewApp {
                 )
                 .into_any_element();
         }
-        column.into_any_element()
+        let pinned = self
+            .pinned_conflict(0, self.conflict_seen.len())
+            .map(|(i, slide)| {
+                let path = self.conflict_seen[i].clone();
+                let header = match self.conflicts.iter().position(|f| f.path == path) {
+                    Some(ix) => self.conflict_file_header(ix, &mono, cx),
+                    None => self.render_resolved_file(&path, &mono, cx),
+                };
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(0.) - slide)
+                    .child(header)
+            });
+        div()
+            .relative()
+            // Clips the pinned copy while the next header slides it up, so
+            // it leaves through the column's top edge, not over the bar
+            // above.
+            .overflow_hidden()
+            .size_full()
+            .child(column)
+            .children(pinned)
+            .into_any_element()
     }
 
     /// The Conflicts center of a pull-request forecast: the same
@@ -5064,7 +5088,7 @@ impl ReviewApp {
             .iter()
             .map(|conflict| self.render_forecast_file(conflict, &mono, cx))
             .collect::<Vec<_>>();
-        v_flex()
+        let column = v_flex()
             .id("conflicts")
             .key_context("Conflicts")
             .track_focus(&self.conflicts_focus)
@@ -5072,7 +5096,31 @@ impl ReviewApp {
             .overflow_y_scroll()
             .track_scroll(&self.conflicts_scroll)
             .child(header)
-            .children(rows)
+            .children(rows);
+        let pinned = self
+            .pinned_conflict(1, self.review.predicted.len())
+            .map(|(i, slide)| {
+                let conflict = &self.review.predicted[i];
+                let header = if self.review.pr_resolved.contains(&conflict.path) {
+                    self.render_resolved_file(&conflict.path, &mono, cx)
+                } else {
+                    self.forecast_file_header(conflict, &mono, cx)
+                };
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(0.) - slide)
+                    .child(header)
+            });
+        div()
+            .relative()
+            // Same clip as the operation column: the slide exits through
+            // the top edge.
+            .overflow_hidden()
+            .size_full()
+            .child(column)
+            .children(pinned)
             .into_any_element()
     }
 
@@ -5091,22 +5139,10 @@ impl ReviewApp {
         if self.review.pr_resolved.contains(&conflict.path) {
             return self.render_resolved_file(&conflict.path, mono, cx);
         }
-        let path = conflict.path.clone();
         let view = self
             .conflict_views
             .iter()
             .find(|view| view.path == conflict.path);
-        let ready = matches!(
-            view.map(|view| &view.body),
-            Some(ConflictBody::Resolver(state, ..)) if state.read(cx).all_resolved()
-        );
-        let (badge, badge_color) = if conflict.merged.is_none() {
-            ("on the forge", cx.theme().warning)
-        } else if ready {
-            ("ready", cx.theme().success)
-        } else {
-            ("unresolved", cx.theme().warning)
-        };
         let body = match (conflict.merged.as_ref(), view.map(|view| &view.body)) {
             (None, _) => div()
                 .px(px(10.))
@@ -5129,37 +5165,58 @@ impl ReviewApp {
         v_flex()
             .w_full()
             .flex_none()
-            .child(
-                h_flex()
-                    .flex_none()
-                    .h(px(28.))
-                    .px(px(10.))
-                    .gap_2()
-                    .bg(cx.theme().sidebar)
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(div().font_family(mono.clone()).child(conflict.path.clone()))
-                    .child(
-                        div()
-                            .flex_none()
-                            .px(px(6.))
-                            .rounded(px(4.))
-                            .text_size(px(10.5))
-                            .bg(badge_color.opacity(0.15))
-                            .text_color(badge_color)
-                            .child(badge),
-                    )
-                    .child(div().flex_1())
-                    .when(conflict.merged.is_some(), |row| {
-                        row.child(self.render_resolved_box(
-                            &path,
-                            false,
-                            ready && !self.op_running,
-                            cx,
-                        ))
-                    }),
-            )
+            .child(self.forecast_file_header(conflict, mono, cx))
             .child(body)
+            .into_any_element()
+    }
+
+    /// The 28px header bar of a forecast file, built in one place so the
+    /// in-flow bar and its pinned copy over the column cannot drift apart.
+    fn forecast_file_header(
+        &self,
+        conflict: &PredictedConflict,
+        mono: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let path = conflict.path.clone();
+        let view = self
+            .conflict_views
+            .iter()
+            .find(|view| view.path == conflict.path);
+        let ready = matches!(
+            view.map(|view| &view.body),
+            Some(ConflictBody::Resolver(state, ..)) if state.read(cx).all_resolved()
+        );
+        let (badge, badge_color) = if conflict.merged.is_none() {
+            ("on the forge", cx.theme().warning)
+        } else if ready {
+            ("ready", cx.theme().success)
+        } else {
+            ("unresolved", cx.theme().warning)
+        };
+        h_flex()
+            .flex_none()
+            .h(px(28.))
+            .px(px(10.))
+            .gap_2()
+            .bg(cx.theme().sidebar)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(div().font_family(mono.clone()).child(conflict.path.clone()))
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(6.))
+                    .rounded(px(4.))
+                    .text_size(px(10.5))
+                    .bg(badge_color.opacity(0.15))
+                    .text_color(badge_color)
+                    .child(badge),
+            )
+            .child(div().flex_1())
+            .when(conflict.merged.is_some(), |row| {
+                row.child(self.render_resolved_box(&path, false, ready && !self.op_running, cx))
+            })
             .into_any_element()
     }
 
@@ -5214,17 +5271,6 @@ impl ReviewApp {
                 ConflictBody::Resolver(state, ..) => state.read(cx).block_count() == 0,
                 ConflictBody::Unparsed(_) => false,
             };
-        let ready = !markerless
-            && match &view.body {
-                ConflictBody::Resolver(state, ..) => state.read(cx).all_resolved(),
-                ConflictBody::Unparsed(_) => false,
-            };
-        let (badge, badge_color) = if ready {
-            ("ready", cx.theme().success)
-        } else {
-            ("unresolved", cx.theme().warning)
-        };
-        let path = file.path.clone();
         let body = match &view.body {
             ConflictBody::Resolver(..) if markerless => div()
                 .px(px(10.))
@@ -5246,30 +5292,58 @@ impl ReviewApp {
         v_flex()
             .w_full()
             .flex_none()
-            .child(
-                h_flex()
-                    .flex_none()
-                    .h(px(28.))
-                    .px(px(10.))
-                    .gap_2()
-                    .bg(cx.theme().sidebar)
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(div().font_family(mono.clone()).child(file.path.clone()))
-                    .child(
-                        div()
-                            .flex_none()
-                            .px(px(6.))
-                            .rounded(px(4.))
-                            .text_size(px(10.5))
-                            .bg(badge_color.opacity(0.15))
-                            .text_color(badge_color)
-                            .child(badge),
-                    )
-                    .child(div().flex_1())
-                    .child(self.render_resolved_box(&path, false, ready && !self.op_running, cx)),
-            )
+            .child(self.conflict_file_header(ix, mono, cx))
             .child(body)
+            .into_any_element()
+    }
+
+    /// The 28px header bar of `conflicts[ix]`, built in one place so the
+    /// in-flow bar and its pinned copy over the column cannot drift apart.
+    fn conflict_file_header(
+        &self,
+        ix: usize,
+        mono: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let file = &self.conflicts[ix];
+        let view = &self.conflict_views[ix];
+        let markerless = file.binary
+            || match &view.body {
+                ConflictBody::Resolver(state, ..) => state.read(cx).block_count() == 0,
+                ConflictBody::Unparsed(_) => false,
+            };
+        let ready = !markerless
+            && match &view.body {
+                ConflictBody::Resolver(state, ..) => state.read(cx).all_resolved(),
+                ConflictBody::Unparsed(_) => false,
+            };
+        let (badge, badge_color) = if ready {
+            ("ready", cx.theme().success)
+        } else {
+            ("unresolved", cx.theme().warning)
+        };
+        let path = file.path.clone();
+        h_flex()
+            .flex_none()
+            .h(px(28.))
+            .px(px(10.))
+            .gap_2()
+            .bg(cx.theme().sidebar)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(div().font_family(mono.clone()).child(file.path.clone()))
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(6.))
+                    .rounded(px(4.))
+                    .text_size(px(10.5))
+                    .bg(badge_color.opacity(0.15))
+                    .text_color(badge_color)
+                    .child(badge),
+            )
+            .child(div().flex_1())
+            .child(self.render_resolved_box(&path, false, ready && !self.op_running, cx))
             .into_any_element()
     }
 
@@ -5513,6 +5587,35 @@ impl ReviewApp {
     /// the column's top. A file with nothing left to solve is no stop.
     /// Jumps between the blocks inside one file wait on the keyboard
     /// model (section 20, Open).
+    /// The file whose block spans the column's top edge - its own header
+    /// has scrolled out, so a copy pins over the column - and how far the
+    /// next file's header has pushed that copy up. `first` is the first
+    /// file child's index in the scroll column (the forecast column leads
+    /// with its summary row). `bounds_for_item` reports layout bounds,
+    /// which a scroll never moves; the handle's offset puts them where
+    /// the last paint drew them, and a wheel turn repaints, so the pin
+    /// follows the scroll.
+    fn pinned_conflict(&self, first: usize, count: usize) -> Option<(usize, Pixels)> {
+        let top = self.conflicts_scroll.bounds().top();
+        // A wheel turn past the end leaves the handle overshooting until the
+        // next prepaint clamps it; the pin reads before that, so it clamps
+        // itself rather than name a file the paint never reached.
+        let scroll = self
+            .conflicts_scroll
+            .offset()
+            .y
+            .clamp(-self.conflicts_scroll.max_offset().y, px(0.));
+        let header = px(28.);
+        (0..count).find_map(|i| {
+            let bounds = self.conflicts_scroll.bounds_for_item(first + i)?;
+            let (item_top, item_bottom) = (bounds.top() + scroll, bounds.bottom() + scroll);
+            (item_top < top - px(1.) && item_bottom > top + px(1.)).then(|| {
+                let slide = (top + header - item_bottom).max(px(0.));
+                (i, slide)
+            })
+        })
+    }
+
     fn jump_conflict(&mut self, direction: isize, cx: &mut Context<Self>) {
         let unsolved = |path: &str| {
             self.conflict_views.iter().any(|view| {
