@@ -408,6 +408,8 @@ impl ReviewApp {
             None
         };
         let dot = trigger_tone(status.as_ref()).map(|tone| tone.color(cx));
+        let resolving = self.forecast_resolving();
+        let push_blocker = self.push_resolution_blockers(cx);
         Button::new("pull")
             .outline()
             .xsmall()
@@ -523,6 +525,26 @@ impl ReviewApp {
                         .disabled(busy || !open || pending.comments == 0)
                         .on_click(send(Verdict::RequestChanges, true)),
                     );
+                // The conscious-but-reachable resolution push: one item,
+                // greyed with its reason spelled out until every forecast
+                // conflict is resolved and ticked.
+                if resolving {
+                    let blocker = push_blocker.clone();
+                    let push_owner = owner.clone();
+                    menu = menu.separator().item(
+                        PopupMenuItem::new(format!("Resolve conflicts into #{number}…"))
+                            .icon(Icon::new(Lucide::GitMergeConflict))
+                            .disabled(blocker.is_some() || busy)
+                            .on_click(move |_: &gpui_kit::ClickEvent, window, cx| {
+                                let _ = push_owner.update(cx, |this, cx| {
+                                    this.confirm_push_resolution(window, cx);
+                                });
+                            }),
+                    );
+                    if let Some(blocker) = blocker {
+                        menu = menu.label(blocker);
+                    }
+                }
                 match hint {
                     Some(hint) => menu.separator().label(hint),
                     None => menu,
