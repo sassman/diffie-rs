@@ -34,7 +34,7 @@ use gpui_kit::component::{
         ToggleVariants as _,
     },
     checkbox::Checkbox,
-    conflict_resolv::{ConflictResolv, ConflictResolvEvent, ConflictResolvState},
+    conflict_resolv::{ConflictResolvEvent, ConflictResolvState, ConflictResolvVirtual},
     diff::{
         Diff, DiffAnnotation, DiffChangeIndicator, DiffDecoration, DiffEvent, DiffFile, DiffFold,
         DiffGutterMarker, DiffHunkSeparator, DiffLinePosition, DiffLineRange, DiffMode, DiffSide,
@@ -665,8 +665,20 @@ struct ResolverView {
 }
 
 impl Render for ResolverView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        render_resolver(&self.state, &self.labels)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The virtualized resolver scrolls itself, so it needs a definite
+        // height: its content's, capped below the viewport so a huge file
+        // scrolls within its frame and its neighbours stay reachable in
+        // the outer column.
+        let rows = self.state.update(cx, |state, _| state.display_len());
+        let content = ConflictResolvVirtual::HEADER_HEIGHT
+            + ConflictResolvVirtual::row_height(window, cx) * rows as f32;
+        let cap = window.viewport_size().height * 0.8;
+        div()
+            .w_full()
+            .flex_none()
+            .h(content.min(cap))
+            .child(render_resolver(&self.state, &self.labels))
     }
 }
 
@@ -6676,7 +6688,8 @@ fn render_resolver(state: &Entity<ConflictResolvState>, labels: &ConflictLabels)
             relative_age(labels.upstream_time, labels.yours_time)
         );
     }
-    ConflictResolv::new(state)
+    ConflictResolvVirtual::new(state)
+        .size_full()
         .yours_label(yours)
         .upstream_label(upstream)
         .into_any_element()

@@ -855,8 +855,13 @@ Decided (owner, 2026-11-19):
 - The Conflicts view is one continuous scroll of conflicted files, each a
   three-pane block: Your changes left, the editable result in the middle,
   Upstream changes right. Conflict blocks stay aligned across the panes via
-  spacer rows; only the outer column scrolls vertically, each pane scrolls
-  its long lines horizontally. Unchanged context folds behind an
+  spacer rows; the outer column scrolls vertically and each pane scrolls
+  its long lines horizontally. A file's block is sized to its folded
+  content; one taller than the viewport caps below it and scrolls
+  within its frame (2026-11-20, a consequence of the virtualized
+  renderer the owner picked - the list must own a definite height), so
+  the neighbouring files stay a wheel-turn away. Unchanged context
+  folds behind an
   "N unchanged lines" disclosure (owner nit, 2026-11-20), keeping three
   lines around each block like the Diff keeps around a change; a click
   on the band in any pane opens it.
@@ -880,8 +885,12 @@ Decided (owner, 2026-11-19):
   through git's resolve-undo. Continue and abort run git's own continue and
   abort; both live in the palette, greyed when not applicable, and abort
   confirms first.
-- The view is a new Kit-fork component, `ConflictResolv`, beside `Diff`.
-  `Diff` itself stays read-only and untouched.
+- The view is a new Kit-fork component beside `Diff`: the app renders
+  `ConflictResolvVirtual`, which virtualizes its rows the way `Diff`
+  does and syntax-highlights all three panes (owner, 2026-11-20, after
+  measuring it against the retained `ConflictResolv` in the Kit story;
+  the retained one stays there as the comparison baseline). `Diff`
+  itself stays read-only and untouched.
 - While the repository is idle, the review forecasts the merge it feeds
   (owner, 2026-11-20): the backend runs `git merge-tree --write-tree`
   against a scratch object directory - the repository, its index and its
