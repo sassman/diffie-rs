@@ -4,7 +4,8 @@
 //! from the render path, and must be able to show a loading state for each.
 
 use crate::model::{
-    BlameLine, ChangedRegion, Commit, Comparison, LineOrigin, Oid, Resolved, Scope, ScopedPatch,
+    BlameLine, ChangedRegion, Commit, Comparison, ConflictFile, LineOrigin, Oid, RepoState,
+    Resolved, Scope, ScopedPatch,
 };
 use crate::review::ReviewInput;
 
@@ -20,6 +21,10 @@ pub enum BackendError {
     NoMergeBase { source_rev: String, target: String },
     #[error("git {command} failed: {stderr}")]
     Git { command: String, stderr: String },
+    #[error("no merge or rebase is in progress")]
+    NoOperation,
+    #[error("`{0}` has no conflict to resolve")]
+    NotConflicted(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -147,6 +152,35 @@ pub trait ReviewBackend: Send + Sync {
     /// request whose commits are not here yet. Never touches local
     /// branches, the index or the working tree.
     fn fetch(&self, remote: &str, refspecs: &[String]) -> Result<()>;
+
+    /// Whether the repository sits in an interrupted merge or rebase.
+    /// Read per worktree: a merge in one checkout leaves the others idle.
+    fn repo_state(&self) -> Result<RepoState>;
+
+    /// Every unmerged path of the interrupted operation, sides already
+    /// mapped to yours/upstream and labelled for display. Empty when
+    /// [`Self::repo_state`] is idle.
+    fn conflicts(&self) -> Result<Vec<ConflictFile>>;
+
+    /// Write `contents` as the resolution of `path` and stage it. The one
+    /// sanctioned repository write: only a path that is unmerged in the
+    /// index may be written, anything else is [`BackendError::NotConflicted`].
+    /// Full text crosses this boundary, never a patch.
+    fn resolve_file(&self, path: &str, contents: &str) -> Result<()>;
+
+    /// Put the conflict markers back for `path`, even after it was staged
+    /// by [`Self::resolve_file`]. The regenerated markers carry generic
+    /// side labels, so callers keep trusting [`ConflictFile`], not them.
+    fn unresolve_file(&self, path: &str) -> Result<()>;
+
+    /// Continue the interrupted merge or rebase. An error carries git's
+    /// stderr verbatim; in an idle repository it is
+    /// [`BackendError::NoOperation`].
+    fn continue_op(&self) -> Result<()>;
+
+    /// Abort the interrupted merge or rebase, discarding resolutions. The
+    /// same errors as [`Self::continue_op`].
+    fn abort_op(&self) -> Result<()>;
 
     /// The reviewer's name as git knows it (`user.name`).
     fn author_name(&self) -> Result<String>;

@@ -185,6 +185,62 @@ pub struct ChangedRegion {
     pub new_lines: usize,
 }
 
+/// Whether the repository sits in an interrupted merge or rebase. Polled on
+/// load and reload only; while not [`RepoState::Idle`] the UI offers the
+/// conflict view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepoState {
+    Idle,
+    Merge,
+    /// `done` is the 1-based number of the commit the rebase stopped on,
+    /// `total` how many it set out to replay: "commit `done` of `total`".
+    Rebase {
+        done: usize,
+        total: usize,
+    },
+}
+
+/// One unmerged path of an interrupted merge or rebase, with git's sides
+/// already mapped to the review's semantic names: `yours` is always the
+/// reviewer's own work, `upstream` what it collides with, whichever stage
+/// git stored each in. The mapping lives in the backend, nowhere else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictFile {
+    pub path: String,
+    /// The common ancestor's text. Missing when both sides added the path.
+    pub base: Option<String>,
+    /// The reviewer's side. Missing when their side deleted the path.
+    pub yours: Option<String>,
+    /// The side being merged in or rebased onto. Missing when it deleted
+    /// the path.
+    pub upstream: Option<String>,
+    /// The marker-laden working-tree text, empty when the file is gone.
+    /// Markers carry generic side labels, so they are display material
+    /// only; the texts and labels above are what resolution trusts.
+    pub working: String,
+    /// Some side's bytes are not valid UTF-8, so the texts above are lossy
+    /// decodes: fine to show, never to write back as a resolution.
+    pub binary: bool,
+    pub labels: ConflictLabels,
+}
+
+/// What the conflict panes are suffixed with. The strings "ours" and
+/// "theirs" never appear: a merge names the two branches, a rebase names
+/// the upstream and the replayed commit's title.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictLabels {
+    pub yours: String,
+    pub upstream: String,
+    /// When the reviewer's tip was committed, on the committer's own
+    /// clock ("2026-11-17 14:02"). The yours pane anchors the comparison
+    /// with this absolute date; the upstream pane is phrased relative to
+    /// it from the two times below. Empty when the tip could not be read.
+    pub yours_date: String,
+    /// The two tips' commit times, unix seconds; 0 when unreadable.
+    pub yours_time: i64,
+    pub upstream_time: i64,
+}
+
 /// The commit that wrote a line, and the line's number in that commit's
 /// version of the file. This pair is what a comment is anchored to.
 #[derive(Clone, Debug, PartialEq, Eq)]

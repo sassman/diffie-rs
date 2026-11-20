@@ -107,6 +107,25 @@ pub fn ago(unix_seconds: i64, now: i64) -> String {
     if delta < 60 {
         return "just now".into();
     }
+    format!("{} ago", span(delta))
+}
+
+/// How one instant relates to another, for the conflict panes: "5 days
+/// newer", "2 hours older", or "same age" within a minute.
+pub fn relative_age(unix_seconds: i64, than: i64) -> String {
+    let delta = unix_seconds - than;
+    if delta.abs() < 60 {
+        return "same age".into();
+    }
+    if delta > 0 {
+        format!("{} newer", span(delta))
+    } else {
+        format!("{} older", span(-delta))
+    }
+}
+
+/// `3 days`-style span of a positive number of seconds, largest unit wins.
+fn span(delta: i64) -> String {
     let (value, unit) = if delta < 3_600 {
         (delta / 60, "minute")
     } else if delta < 86_400 {
@@ -121,9 +140,9 @@ pub fn ago(unix_seconds: i64, now: i64) -> String {
         (delta / (365 * 86_400), "year")
     };
     if value == 1 {
-        format!("1 {unit} ago")
+        format!("1 {unit}")
     } else {
-        format!("{value} {unit}s ago")
+        format!("{value} {unit}s")
     }
 }
 
@@ -174,5 +193,16 @@ mod tests {
         assert_eq!(ago(now - 20 * 86_400, now), "2 weeks ago");
         assert_eq!(ago(now - 100 * 86_400, now), "3 months ago");
         assert_eq!(ago(now - 800 * 86_400, now), "2 years ago");
+    }
+
+    #[test]
+    fn phrases_one_instant_against_another() {
+        let base = 1_794_384_145;
+        assert_eq!(relative_age(base, base), "same age");
+        assert_eq!(relative_age(base + 59, base), "same age");
+        assert_eq!(relative_age(base + 90, base), "1 minute newer");
+        assert_eq!(relative_age(base - 2 * 3_600, base), "2 hours older");
+        assert_eq!(relative_age(base + 5 * 86_400, base), "5 days newer");
+        assert_eq!(relative_age(base - 20 * 86_400, base), "2 weeks older");
     }
 }

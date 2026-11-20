@@ -11,7 +11,6 @@ use std::cell::Cell;
 use super::pull::{Tone, state_icon};
 use super::*;
 use diffie_core::pr::{self, CheckState, FetchMode, PrArgument, PrList, PrState, PrSummary};
-use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::command::{Command, CommandItem};
 
 /// What the picker shows. Both lists refetch on every open: the point of

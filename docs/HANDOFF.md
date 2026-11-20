@@ -40,6 +40,22 @@ first code: a working core and a first UI scaffold wired to it.
   picked one in the current window as `--pr` would, fetching missing
   commits on that click (the one sanctioned repository write besides
   review files; see AGENTS.md constraint 5 and the design document).
+- **Conflict resolver** (PoC on branch `feat/conflict-resolver`), added
+  2026-11-19: an interrupted merge or rebase surfaces a state strip, a
+  Review | Conflicts center switch and, per conflicted file, a JetBrains
+  style three-pane resolver - Your changes left, result middle, Upstream
+  changes right - with per-block take/both/undo, Mark resolved and Reopen
+  on the file header, Continue in the strip and Continue/Abort in the
+  palette. The component is `ConflictResolv`, new on the Kit fork branch
+  `diff-conflict-resolv`; the backend grew `repo_state`, `conflicts`,
+  `resolve_file`, `unresolve_file`, `continue_op` and `abort_op` behind
+  the narrow write exception in AGENTS.md constraint 5. Design document
+  section 20 holds the decisions. **The middle pane is read-only derived
+  text in this iteration**; the embedded editor over the same buffer is
+  the next one. **The Cargo patch points at the local fork worktree**
+  (`../gpui-kit-conflict-resolv`) on this branch only - push the fork
+  branch `diff-conflict-resolv` to `o` and restore the GitHub patch
+  before any merge.
 
 ## Verification status
 
@@ -77,6 +93,10 @@ Be exact about this when you report further work.
 | Bare `diffie` on a clean working tree opens the branch going into the default branch | Verified on macOS on 2026-11-19 by screenshot, in a worktree: with uncommitted edits present the old default held (uncommitted going into the branch, those edits on screen); after committing, the same bare start opened "feat/open-pr-palette going into main" (detected from the remotes' HEAD), 10 of 10 commits, the full branch changeset; in a scratch repository with no remote and only `master`, the fallback chain opened "topic going into master". `has_uncommitted_changes` and `default_branch` are tested against throwaway repositories; the on-default-branch and no-candidate cases were not run on screen |
 | The palette opens over an empty changeset | Verified on macOS on 2026-11-19 by screenshot: `diffie HEAD` on a clean tree shows "Nothing to review in this scope", and Cmd+P now opens the palette there ("Open a pull request…" included); before the placeholders tracked the diff's focus handle, the binding had no dispatch path and the key did nothing. The error and loading placeholders got the same fix but were not driven on screen |
 | Other-revision cards keeping the full actions row, Edit and Delete disabled with explaining tooltips | Compiled, clippy-clean; not seen on screen - the window was not run |
+| Conflict backend: merge and rebase detection per worktree, the yours/upstream swap in a rebase, stage texts and diff3 markers, resolve staging exactly the written path (glob characters taken literally), marker regeneration after staging via resolve-undo, continue and abort round trips, idle refusals, the binary flag, the rebase upstream named from the HEAD reflog | Covered by core tests against throwaway merge and rebase repositories (`crates/core/tests/git_cli.rs`); verified on macOS, 2026-11-19 |
+| `ConflictResolv` model: columns from markers with no marker leakage, row alignment with spacers, picks splicing and shifting later blocks, undo, events including BlockReopened, stale indices ignored, an all-empty block keeping a row | Covered by Kit unit and gpui tests on the fork branch |
+| Conflict center on screen, 2026-11-20, against mid-merge and mid-rebase fixture repositories: strip wording for both operations (rebase shows its commit progress), auto-selected Conflicts center, three panes with dividers and per-pane line numbers, tinted blocks aligned by spacers, pick arrows and the take-both glyph in the middle pane's gutters, pane labels with the absolute date left and "same age" right, unresolved badges, greyed Mark resolved and Continue, conflict glyphs on the tree's conflicted rows, and the light-theme story | Verified by screenshot (`docs/screenshots/conflict-*.png`). The yours label's date truncates in a narrow pane |
+| Conflict interactions: clicking a pick arrow, Mark resolved and Reopen round trips, Continue and the abort confirm dialog, the Review \| Conflicts switch toggling, the palette entries | Compiled, clippy-clean, model-tested; not driven on screen |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 | Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Pull-request menu (title-bar icon in a `--pr` review): open in the browser, publish comments, approve with and without comments; the link icon on published cards; the status-bar line after a publish | Core covered by tests: what a publish sends and records (`forge.rs`, against a fake forge) and the exact gh calls, the file-level fallback and the pending-review cleanup (`github.rs`, against a stand-in gh script, Unix only). The GraphQL input and enum names were checked read-only against GitHub's live schema by introspection. The status query (`gh pr view --json state,reviewDecision,statusCheckRollup` with the app's jq) was run read-only against a real merged PR and its lines match what `fold_checks` parses. **Nothing was ever posted to a real pull request**, and the window was not run: the menu, the state icon and its red tint, the busy state, the link icon and whether a pending-review comment's URL still opens after the submit are all unseen |
@@ -761,7 +781,13 @@ Not implemented or not possible, against the mockup and the design document:
 
 ## Suggested next steps
 
-In this order, each one small enough to show the owner:
+On the conflict-resolver branch, before anything else: **see it on screen**
+against the fixture repositories, then iterate - the embedded editor in the
+middle pane (feed it the trusted stage texts, not the marker parse),
+virtualized rows for large files, the narrow-window fallback onto the Kit's
+inline conflict UI, and restoring the GitHub Cargo patch before merge.
+
+On main, in this order, each one small enough to show the owner:
 
 1. **Exercise what the restyle has not shown on screen yet**: the commit
    picker internals, theme menu, comment box and Escape focus return,

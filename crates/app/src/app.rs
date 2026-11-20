@@ -19,19 +19,21 @@ use diffie_core::review::{
 use diffie_core::search::{SearchHit, search_patch};
 
 use crate::settings::{LayoutMode, Settings, WindowSettings};
-use diffie_core::time::ago;
+use diffie_core::time::{ago, relative_age};
 use diffie_core::{
-    BlameLine, ChangedRegion, Commit, Comparison, FileState, FileStatus, FileSummary, NewSide, Oid,
-    Resolved, ReviewBackend, Scope, ScopedPatch,
+    BlameLine, ChangedRegion, Commit, Comparison, ConflictFile, ConflictLabels, FileState,
+    FileStatus, FileSummary, NewSide, Oid, RepoState, Resolved, ReviewBackend, Scope, ScopedPatch,
 };
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
-    StyledExt as _, Theme, ThemeMode, ThemeRegistry, TitleBar,
+    StyledExt as _, Theme, ThemeMode, ThemeRegistry, TitleBar, WindowExt as _,
     button::{
-        Button, ButtonCustomVariant, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
+        Button, ButtonCustomVariant, ButtonVariant, ButtonVariants as _, Toggle, ToggleGroup,
+        ToggleVariants as _,
     },
     checkbox::Checkbox,
+    conflict_resolv::{ConflictResolv, ConflictResolvState},
     diff::{
         Diff, DiffAnnotation, DiffChangeIndicator, DiffDecoration, DiffEvent, DiffFile, DiffFold,
         DiffGutterMarker, DiffHunkSeparator, DiffLinePosition, DiffLineRange, DiffMode, DiffSide,
@@ -616,6 +618,35 @@ enum ScopeKind {
     Custom,
 }
 
+/// What fills the center while a merge or rebase is interrupted. Session
+/// state, not a setting: the choice dies with the operation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CenterView {
+    Review,
+    Conflicts,
+}
+
+/// One mounted conflict resolver. The parse source rides along so a reload
+/// only rebuilds the entity when the working text actually changed: the
+/// reviewer's picks survive the reloads that resolve, reopen and continue
+/// trigger.
+struct ConflictView {
+    path: String,
+    source: String,
+    body: ConflictBody,
+}
+
+enum ConflictBody {
+    /// The subscription keeps the app re-rendering on every pick made
+    /// inside the component.
+    Resolver(
+        Entity<ConflictResolvState>,
+        #[allow(dead_code)] Subscription,
+    ),
+    /// The marker parser's complaint, shown in place of a resolver.
+    Unparsed(SharedString),
+}
+
 /// One group of the commit picker: its heading row and the commits it lists.
 struct PickerSection {
     title: &'static str,
@@ -688,6 +719,11 @@ struct Draft {
 
 /// Everything one background load produces.
 struct Loaded {
+    repo_state: RepoState,
+    conflicts: Vec<ConflictFile>,
+    /// One parse per entry in `conflicts`, same order, done off the UI
+    /// thread: a large conflicted file must not stall the window.
+    conflict_parses: Vec<Result<ConflictResolvState, String>>,
     resolved: Resolved,
     commits: Vec<Commit>,
     reviews: ReviewSet,
@@ -1021,6 +1057,31 @@ pub struct ReviewApp {
     forge: Arc<dyn Forge>,
     /// A publish or approval is on its way to the forge; one at a time.
     publishing: bool,
+    /// The interrupted merge or rebase, as the last load saw it. The state
+    /// strip, the center switch and the palette's continue and abort all
+    /// read it; polled on load and reload only, like the backend says.
+    repo_state: RepoState,
+    /// The paths still unmerged. Empty means the operation can continue.
+    conflicts: Vec<ConflictFile>,
+    /// Every path the current operation has had unmerged, in first-seen
+    /// order: `conflicts` only lists what is left, so progress and the
+    /// ticked headers need the full set. A state change (a rebase stepping
+    /// on) starts a fresh list.
+    conflict_seen: Vec<String>,
+    /// One resolver per entry in `conflicts`, same order.
+    conflict_views: Vec<ConflictView>,
+    /// The operation's side labels, held from the first sight of a
+    /// conflict: `conflicts` empties as files resolve, and the strip must
+    /// keep naming the real sides until the operation moves on.
+    op_labels: Option<ConflictLabels>,
+    center: CenterView,
+    /// Conflicts auto-selects once per operation; after that the manual
+    /// choice stands until the repository is idle again.
+    conflicts_seen: bool,
+    /// One continue or abort at a time; strip and palette grey behind it.
+    op_running: bool,
+    /// Git's own words when continue or abort failed, shown in the strip.
+    op_error: Option<SharedString>,
     /// Symbol navigation: the lookup tables, the hovered link and the
     /// definition entries joined to the Diff's set.
     symbols: symbols::Symbols,
@@ -1165,6 +1226,15 @@ impl ReviewApp {
             review: PerReview::fresh(comparison, pull),
             forge,
             publishing: false,
+            repo_state: RepoState::Idle,
+            conflicts: Vec::new(),
+            conflict_seen: Vec::new(),
+            conflict_views: Vec::new(),
+            op_labels: None,
+            center: CenterView::Review,
+            conflicts_seen: false,
+            op_running: false,
+            op_error: None,
             symbols: symbols::Symbols::new(window, cx),
             diff,
             manual_mode: mode,
@@ -1227,6 +1297,7 @@ impl ReviewApp {
         self.error = None;
         self.notice = None;
         self.review.draft = None;
+        self.op_error = None;
         let backend = self.backend.clone();
         let comparison = self.review.comparison.clone();
         let scope = self.core_scope();
@@ -1380,6 +1451,34 @@ impl ReviewApp {
                         cx,
                     );
                 });
+                // A fresh operation, or a rebase stepping to its next
+                // commit, starts a fresh progress count.
+                if self.repo_state != loaded.repo_state {
+                    self.conflict_seen.clear();
+                    self.op_labels = None;
+                }
+                self.repo_state = loaded.repo_state;
+                self.conflicts = loaded.conflicts;
+                for file in &self.conflicts {
+                    if !self.conflict_seen.contains(&file.path) {
+                        self.conflict_seen.push(file.path.clone());
+                    }
+                }
+                if let Some(first) = self.conflicts.first() {
+                    self.op_labels.get_or_insert_with(|| first.labels.clone());
+                }
+                self.sync_conflict_views(loaded.conflict_parses, cx);
+                match self.repo_state {
+                    RepoState::Idle => {
+                        self.center = CenterView::Review;
+                        self.conflicts_seen = false;
+                    }
+                    _ => {
+                        if !std::mem::replace(&mut self.conflicts_seen, true) {
+                            self.center = CenterView::Conflicts;
+                        }
+                    }
+                }
                 self.review.resolved = Some(loaded.resolved);
                 self.review.commits = Arc::new(loaded.commits);
                 if let Some(picked) = loaded.picked {
@@ -1512,6 +1611,240 @@ impl ReviewApp {
             });
         })
         .detach();
+    }
+
+    // ---- conflicts -----------------------------------------------------
+
+    /// The operation's name in every label; "merge" also covers Idle, where
+    /// the labels exist only greyed.
+    fn op_noun(&self) -> &'static str {
+        match self.repo_state {
+            RepoState::Rebase { .. } => "rebase",
+            _ => "merge",
+        }
+    }
+
+    fn showing_conflicts(&self) -> bool {
+        self.repo_state != RepoState::Idle && self.center == CenterView::Conflicts
+    }
+
+    /// Continue only moves git forward once nothing is left unmerged;
+    /// offering it earlier would just relay a git refusal.
+    fn can_continue_op(&self) -> bool {
+        self.repo_state != RepoState::Idle && self.conflicts.is_empty() && !self.op_running
+    }
+
+    fn can_abort_op(&self) -> bool {
+        self.repo_state != RepoState::Idle && !self.op_running
+    }
+
+    /// Reconcile the mounted resolvers with the freshly loaded conflicts,
+    /// keeping entities whose working text is unchanged. The parses were
+    /// made on the load's background task; a kept entity discards its
+    /// fresh parse, preserving the reviewer's picks.
+    fn sync_conflict_views(
+        &mut self,
+        parses: Vec<Result<ConflictResolvState, String>>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut old = std::mem::take(&mut self.conflict_views);
+        self.conflict_views = self
+            .conflicts
+            .iter()
+            .zip(parses)
+            .map(|(file, parsed)| {
+                if let Some(ix) = old
+                    .iter()
+                    .position(|v| v.path == file.path && v.source == file.working)
+                {
+                    return old.swap_remove(ix);
+                }
+                let body = match parsed {
+                    Ok(state) => {
+                        let state = cx.new(|_| state);
+                        let observe = cx.observe(&state, |_, _, cx| cx.notify());
+                        ConflictBody::Resolver(state, observe)
+                    }
+                    Err(error) => ConflictBody::Unparsed(error.into()),
+                };
+                ConflictView {
+                    path: file.path.clone(),
+                    source: file.working.clone(),
+                    body,
+                }
+            })
+            .collect();
+    }
+
+    /// A per-file repository write (resolve or reopen) off the UI thread,
+    /// then the normal reload; shares `run_op`'s guard and error surface.
+    fn file_op(
+        &mut self,
+        op: impl FnOnce(&dyn ReviewBackend) -> diffie_core::backend::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.op_running || self.repo_state == RepoState::Idle {
+            return;
+        }
+        self.op_running = true;
+        self.op_error = None;
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { op(&*backend).map_err(|error| error.to_string()) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.op_running = false;
+                match result {
+                    Ok(()) => this.reload(cx),
+                    Err(error) => {
+                        this.op_error = Some(error.into());
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Write the middle pane into the working tree and stage it. The
+    /// backend refuses any path that is not unmerged, so a stale click
+    /// cannot write elsewhere.
+    fn mark_resolved(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(view) = self.conflict_views.iter().find(|v| v.path == path) else {
+            return;
+        };
+        let ConflictBody::Resolver(state, _) = &view.body else {
+            return;
+        };
+        let state = state.read(cx);
+        if !state.all_resolved() {
+            return;
+        }
+        let contents = state.result_text();
+        self.file_op(move |backend| backend.resolve_file(&path, &contents), cx);
+    }
+
+    /// Put the markers back for a file resolved earlier in this operation.
+    fn reopen(&mut self, path: String, cx: &mut Context<Self>) {
+        self.file_op(move |backend| backend.unresolve_file(&path), cx);
+    }
+
+    /// The header's Resolved tick, in the review header's checkbox idiom:
+    /// checking writes and stages the result, unchecking reopens. The box
+    /// turns the conflict feature's success green, not Reviewed's blue.
+    fn render_resolved_box(
+        &self,
+        path: &str,
+        checked: bool,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let green = cx.theme().success;
+        let muted = cx.theme().muted_foreground;
+        let background = cx.theme().background;
+        let owner = cx.weak_entity();
+        let box_owner = owner.clone();
+        let box_path = path.to_owned();
+        let label_path = path.to_owned();
+        h_flex()
+            .flex_none()
+            .gap(px(5.))
+            .child(
+                // The base checkbox is unstyled by design; box, border and
+                // check mark are drawn here, like the Reviewed tick.
+                gpui_kit::base::Checkbox::new(SharedString::from(format!("resolved-{path}")))
+                    .checked(checked)
+                    .w(px(13.))
+                    .h(px(13.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(3.))
+                    .border_1()
+                    .border_color(muted)
+                    .when(enabled, |checkbox| checkbox.cursor_pointer())
+                    .styles(|styles| styles.checked(|state| state.bg(green).border_color(green)))
+                    .when(checked, |checkbox| {
+                        checkbox.child(Icon::new(IconName::Check).xsmall().text_color(background))
+                    })
+                    .accessibility_label("Resolved")
+                    .when(enabled, |checkbox| {
+                        checkbox.on_change(move |state, _, _, cx| {
+                            let checked = state == gpui_kit::base::CheckboxState::Checked;
+                            let _ = box_owner.update(cx, |this, cx| {
+                                if checked {
+                                    this.mark_resolved(box_path.clone(), cx);
+                                } else {
+                                    this.reopen(box_path.clone(), cx);
+                                }
+                            });
+                        })
+                    }),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("resolved-label-{path}")))
+                    .map(|label| {
+                        if checked {
+                            label.text_color(green).font_medium()
+                        } else {
+                            label.text_color(muted)
+                        }
+                    })
+                    .when(enabled, |label| {
+                        label.cursor_pointer().on_click(move |_, _, cx| {
+                            let _ = owner.update(cx, |this, cx| {
+                                if checked {
+                                    this.reopen(label_path.clone(), cx);
+                                } else {
+                                    this.mark_resolved(label_path.clone(), cx);
+                                }
+                            });
+                        })
+                    })
+                    .child("Resolved"),
+            )
+    }
+
+    /// Continue or abort, through the same guard, background shape and
+    /// error surface as the per-file writes.
+    fn run_op(&mut self, abort: bool, cx: &mut Context<Self>) {
+        self.file_op(
+            move |backend| {
+                if abort {
+                    backend.abort_op()
+                } else {
+                    backend.continue_op()
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Abort asks first: it throws away every resolution made so far.
+    fn confirm_abort(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.op_running || self.repo_state == RepoState::Idle {
+            return;
+        }
+        let noun = self.op_noun();
+        let owner = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let owner = owner.clone();
+            alert
+                .confirm()
+                .title(format!("Abort {noun}?"))
+                .description(format!(
+                    "Aborting the {noun} discards all conflict resolutions."
+                ))
+                .ok_text("Abort")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, cx| {
+                    let _ = owner.update(cx, |this, cx| this.run_op(true, cx));
+                    true
+                })
+        });
     }
 
     // ---- scope and commits ---------------------------------------------
@@ -3249,6 +3582,41 @@ impl ReviewApp {
                         .when_some(self.review.pull.as_ref(), |controls, pull| {
                             controls.child(self.render_pull_menu(pull, cx))
                         })
+                        // Review or Conflicts, only while an operation is
+                        // interrupted; the pair mirrors split/unified.
+                        .when(self.repo_state != RepoState::Idle, |controls| {
+                            let conflicts = self.center == CenterView::Conflicts;
+                            controls.child(
+                                ToggleGroup::new("center")
+                                    .outline()
+                                    .segmented()
+                                    .single()
+                                    .small()
+                                    .child(
+                                        Toggle::new("center-review")
+                                            .icon(Icon::new(Lucide::FileDiff))
+                                            .tooltip("Review view")
+                                            .checked(!conflicts),
+                                    )
+                                    .child(
+                                        Toggle::new("center-conflicts")
+                                            .icon(Icon::new(Lucide::GitMergeConflict))
+                                            .tooltip("Conflicts view")
+                                            .checked(conflicts),
+                                    )
+                                    .on_click(cx.listener(|this, checks: &Vec<bool>, _, cx| {
+                                        // Clicking the checked segment clears
+                                        // the group; an either-or keeps the
+                                        // current choice instead.
+                                        this.center = match checks.iter().position(|on| *on) {
+                                            Some(0) => CenterView::Review,
+                                            Some(_) => CenterView::Conflicts,
+                                            None => return,
+                                        };
+                                        cx.notify();
+                                    })),
+                            )
+                        })
                         .child(
                             ToggleGroup::new("layout")
                                 .outline()
@@ -4049,6 +4417,259 @@ impl ReviewApp {
             .map(|bar| self.render_review_progress(bar, reviewed, cx))
     }
 
+    /// The strip under the scope bar while a merge or rebase waits: where
+    /// the operation stands, and the one button that moves it forward.
+    fn render_conflict_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rebase = matches!(self.repo_state, RepoState::Rebase { .. });
+        // The operation's own side labels, held even after the last file
+        // resolved; only a conflict-free operation falls back to the
+        // comparison's branches.
+        let labels = self
+            .op_labels
+            .as_ref()
+            .or_else(|| self.conflicts.first().map(|file| &file.labels));
+        let (source, target) = match labels {
+            // A rebase replays the reviewer's commit onto the upstream; a
+            // merge brings the upstream into the reviewer's branch.
+            Some(labels) if rebase => (labels.yours.clone(), labels.upstream.clone()),
+            Some(labels) => (labels.upstream.clone(), labels.yours.clone()),
+            None => (
+                self.review.comparison.source.clone(),
+                self.review.comparison.target.clone(),
+            ),
+        };
+        let total = self.conflict_seen.len();
+        let resolved = total.saturating_sub(self.conflicts.len());
+        let standing = match self.repo_state {
+            RepoState::Rebase {
+                done,
+                total: commits,
+            } => format!(
+                "Resolving rebase: {source} going into {target} - commit {done} of {commits} - {resolved} of {total} files resolved"
+            ),
+            _ => format!(
+                "Resolving merge: {source} going into {target} - {resolved} of {total} files resolved"
+            ),
+        };
+        h_flex()
+            .flex_none()
+            .w_full()
+            .px(px(10.))
+            .py(px(4.))
+            .gap_2()
+            .bg(cx.theme().sidebar)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                Icon::new(Lucide::GitMergeConflict)
+                    .xsmall()
+                    .text_color(cx.theme().warning),
+            )
+            .child(standing)
+            .when_some(self.op_error.clone(), |strip, error| {
+                // Git pads refusals with hint: lines; the strip carries the
+                // first real line, the tooltip the full text.
+                let line = error
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty() && !line.starts_with("hint:"))
+                    .unwrap_or_default()
+                    .to_string();
+                strip.child(
+                    div()
+                        .id("op-error")
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().danger)
+                        .tooltip(move |window, cx| Tooltip::new(error.clone()).build(window, cx))
+                        .child(line),
+                )
+            })
+            .child(div().flex_1())
+            .child(
+                Button::new("continue-op")
+                    .primary()
+                    .xsmall()
+                    .h(px(22.))
+                    .label(format!("Continue {}", self.op_noun()))
+                    .loading(self.op_running)
+                    .disabled(!self.can_continue_op())
+                    .on_click(cx.listener(|this, _, _, cx| this.run_op(false, cx))),
+            )
+    }
+
+    /// The center while the reviewer looks at conflicts: every file the
+    /// operation has touched, in one scroll - resolved ones collapsed to
+    /// their ticked header, the rest mounted as three-pane resolvers.
+    fn render_conflicts(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let mono = cx.theme().mono_font_family.clone();
+        let rows = self
+            .conflict_seen
+            .iter()
+            .map(|path| {
+                let Some(ix) = self.conflicts.iter().position(|f| &f.path == path) else {
+                    return self.render_resolved_file(path, &mono, cx);
+                };
+                self.render_conflict_file(ix, &mono, cx)
+            })
+            .collect::<Vec<_>>();
+        let column = v_flex()
+            .id("conflicts")
+            .size_full()
+            .overflow_y_scroll()
+            .children(rows);
+        if self.conflicts.is_empty() {
+            // Resolved in the terminal, or by the last Mark resolved: the
+            // operation only waits for its continue.
+            return column
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .gap_1()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("Every conflict is resolved")
+                        .child(format!(
+                            "Continue the {} from the bar above",
+                            self.op_noun()
+                        )),
+                )
+                .into_any_element();
+        }
+        column.into_any_element()
+    }
+
+    /// A resolved file keeps its place as a ticked 28px header; the work
+    /// stays reachable through Reopen until the operation continues.
+    fn render_resolved_file(
+        &self,
+        path: &str,
+        mono: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        h_flex()
+            .flex_none()
+            .h(px(28.))
+            .px(px(10.))
+            .gap_2()
+            .bg(cx.theme().sidebar)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                Icon::new(IconName::Check)
+                    .small()
+                    .text_color(cx.theme().success),
+            )
+            .child(
+                div()
+                    .font_family(mono.clone())
+                    .text_color(cx.theme().muted_foreground)
+                    .child(path.to_owned()),
+            )
+            .child(div().flex_1())
+            .child(self.render_resolved_box(path, true, !self.op_running, cx))
+            .into_any_element()
+    }
+
+    /// One unresolved file: its header with the readiness badge and the
+    /// Mark resolved action, then the three-pane resolver.
+    fn render_conflict_file(
+        &self,
+        ix: usize,
+        mono: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let file = &self.conflicts[ix];
+        let view = &self.conflict_views[ix];
+        // A binary file's texts are lossy decodes that must never be
+        // written back, and a file without text markers (a side deleted
+        // it) parses to zero blocks; "ready" in either case would stage
+        // content nobody chose, so both stay with the terminal for now.
+        let markerless = file.binary
+            || match &view.body {
+                ConflictBody::Resolver(state, _) => state.read(cx).block_count() == 0,
+                ConflictBody::Unparsed(_) => false,
+            };
+        let ready = !markerless
+            && match &view.body {
+                ConflictBody::Resolver(state, _) => state.read(cx).all_resolved(),
+                ConflictBody::Unparsed(_) => false,
+            };
+        let (badge, badge_color) = if ready {
+            ("ready", cx.theme().success)
+        } else {
+            ("unresolved", cx.theme().warning)
+        };
+        let path = file.path.clone();
+        let body = match &view.body {
+            ConflictBody::Resolver(_, _) if markerless => div()
+                .px(px(10.))
+                .py(px(6.))
+                .text_color(cx.theme().muted_foreground)
+                .child(
+                    "No text conflict markers: a side deleted this file, or it is binary. \
+                     Resolve it in the terminal, then reload.",
+                )
+                .into_any_element(),
+            ConflictBody::Resolver(state, _) => {
+                let labels = &file.labels;
+                let mut yours = format!("Your changes · {}", labels.yours);
+                let mut upstream = format!("Upstream changes · {}", labels.upstream);
+                // Which side is fresher: the yours pane anchors with its
+                // absolute date, the upstream pane answers relative to it.
+                if labels.yours_time != 0 && labels.upstream_time != 0 {
+                    yours = format!("{yours} · {}", labels.yours_date);
+                    upstream = format!(
+                        "{upstream} · {}",
+                        relative_age(labels.upstream_time, labels.yours_time)
+                    );
+                }
+                ConflictResolv::new(state)
+                    .yours_label(yours)
+                    .upstream_label(upstream)
+                    .into_any_element()
+            }
+            ConflictBody::Unparsed(error) => div()
+                .px(px(10.))
+                .py(px(6.))
+                .text_color(cx.theme().danger)
+                .child(error.clone())
+                .into_any_element(),
+        };
+        v_flex()
+            .w_full()
+            .flex_none()
+            .child(
+                h_flex()
+                    .flex_none()
+                    .h(px(28.))
+                    .px(px(10.))
+                    .gap_2()
+                    .bg(cx.theme().sidebar)
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(div().font_family(mono.clone()).child(file.path.clone()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(6.))
+                            .rounded(px(4.))
+                            .text_size(px(10.5))
+                            .bg(badge_color.opacity(0.15))
+                            .text_color(badge_color)
+                            .child(badge),
+                    )
+                    .child(div().flex_1())
+                    .child(self.render_resolved_box(&path, false, ready && !self.op_running, cx)),
+            )
+            .child(body)
+            .into_any_element()
+    }
+
     fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         let extended = self.review.search_all && self.review.scope != ScopeKind::WholeBranch;
@@ -4211,6 +4832,18 @@ impl ReviewApp {
             })
             .child(div().flex_1().min_w_0().truncate().child(name.to_string()))
             .when(comments > 0, |row| row.child(comment_badge(comments, cx)))
+            .when_some(self.conflict_badge(&file.path), |row, resolved| {
+                let color = if resolved {
+                    cx.theme().success
+                } else {
+                    cx.theme().warning
+                };
+                row.child(
+                    Icon::new(Lucide::GitMergeConflict)
+                        .xsmall()
+                        .text_color(color),
+                )
+            })
             .when(state == ReviewState::Reviewed, |row| {
                 row.child(
                     Icon::new(IconName::Check)
@@ -4231,6 +4864,21 @@ impl ReviewApp {
                 },
             )
             .into_any_element()
+    }
+
+    /// The tree's conflict marker for a path: unresolved in warning,
+    /// resolved in success, nothing outside an interrupted operation.
+    fn conflict_badge(&self, path: &str) -> Option<bool> {
+        if self.repo_state == RepoState::Idle {
+            return None;
+        }
+        if self.conflicts.iter().any(|file| file.path == path) {
+            return Some(false);
+        }
+        self.conflict_seen
+            .iter()
+            .any(|seen| seen == path)
+            .then_some(true)
     }
 
     /// Whether any ancestor folder of `path` is shut in the file panel.
@@ -5938,12 +6586,27 @@ impl Render for ReviewApp {
             }))
             .child(self.render_title(cx))
             .child(self.render_scope_bar(reviewed, cx))
+            .when(self.repo_state != RepoState::Idle, |root| {
+                root.child(self.render_conflict_strip(cx))
+            })
             .when(self.review.search_open, |root| {
                 root.child(self.render_search_bar(cx))
             })
             .child({
                 let owner = cx.entity().downgrade();
-                let diff_column = v_flex().flex_1().h_full().min_w_0().child(
+                // The Diff's context menu acts on lines and selections; the
+                // conflict shell has neither, so the pane swaps wholesale.
+                let diff_column = if self.showing_conflicts() {
+                    v_flex().flex_1().h_full().min_w_0().child(
+                        div()
+                            .id("conflicts-pane")
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .child(self.render_conflicts(cx)),
+                    )
+                } else {
+                    v_flex().flex_1().h_full().min_w_0().child(
                     div()
                         .id("diff-pane")
                         .flex_1()
@@ -6031,7 +6694,8 @@ impl Render for ReviewApp {
                                     }),
                             )
                         }),
-                );
+                )
+                };
                 div().flex_1().min_h_0().w_full().map(|wrap| {
                     if self.sidebar_visible {
                         wrap.child(
@@ -6065,6 +6729,18 @@ fn load(
     ignore_whitespace: bool,
 ) -> Result<Loaded, String> {
     let text = |error: diffie_core::BackendError| error.to_string();
+    let repo_state = backend.repo_state().map_err(text)?;
+    let conflicts = match repo_state {
+        RepoState::Idle => Vec::new(),
+        _ => backend.conflicts().map_err(text)?,
+    };
+    let conflict_parses = conflicts
+        .iter()
+        .map(|file| {
+            ConflictResolvState::parse(file.path.clone(), &file.working)
+                .map_err(|error| error.to_string())
+        })
+        .collect();
     let resolved = backend.resolve(comparison).map_err(text)?;
     let commits = backend.commits(&resolved).map_err(text)?;
     // Only now is it known what HEAD gained; the caller could only say
@@ -6266,6 +6942,9 @@ fn load(
     let moved = diffie_core::moved::moved_blocks(&patch.text);
 
     Ok(Loaded {
+        repo_state,
+        conflicts,
+        conflict_parses,
         resolved,
         commits,
         reviews,
