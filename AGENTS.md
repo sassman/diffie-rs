@@ -50,7 +50,6 @@ Windows and Linux.
    PR's commits are not here - objects and remote-tracking refs only, on
    that explicit click, never in the background. The CLI still never
    fetches.
-   object directory (see `GitCli::combine`).
    One sanctioned exception (design document, section 20): while an
    interrupted merge or rebase exists, the app may write resolved content
    to paths that are unmerged in the index, stage exactly those paths, and
