@@ -856,7 +856,10 @@ Decided (owner, 2026-11-19):
   three-pane block: Your changes left, the editable result in the middle,
   Upstream changes right. Conflict blocks stay aligned across the panes via
   spacer rows; only the outer column scrolls vertically, each pane scrolls
-  its long lines horizontally.
+  its long lines horizontally. Unchanged context folds behind an
+  "N unchanged lines" disclosure (owner nit, 2026-11-20), keeping three
+  lines around each block like the Diff keeps around a change; a click
+  on the band in any pane opens it.
 - Editing in the middle pane is block-scoped (owner, 2026-11-20,
   narrowing the earlier free-typing intent): a block's result region
   becomes editable once it has a pick (take a side, take both), typing
