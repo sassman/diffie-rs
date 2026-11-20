@@ -1447,6 +1447,11 @@ impl ConflictFixture {
         // diff3 markers carry the base section the resolver needs. Set on
         // the throwaway repository; the app never touches a repo's config.
         git(root, &["config", "merge.conflictStyle", "diff3"]);
+        // Commits detach a background auto-maintenance that briefly holds
+        // objects/maintenance.lock: a race against the no-write guard's
+        // object snapshots, and noise in a throwaway repository.
+        git(root, &["config", "maintenance.auto", "false"]);
+        git(root, &["config", "gc.auto", "0"]);
         // Fixed commit instants so the label tests can assert the tips'
         // clocks: feat's tip is four days before main's, feat's first
         // commit five days before.
