@@ -1535,7 +1535,7 @@ fn repo_state_counts_rebase_progress() {
 #[test]
 fn predicted_conflicts_see_the_collision_before_any_merge_starts() {
     let fixture = ConflictFixture::new();
-    let objects_before = count_files(&fixture.root().join(".git/objects"));
+    let objects_before = file_set(&fixture.root().join(".git/objects"));
 
     let predicted = fixture
         .backend()
@@ -1553,7 +1553,7 @@ fn predicted_conflicts_see_the_collision_before_any_merge_starts() {
     // the repository: everything lands in the scratch directory.
     assert_eq!(fixture.backend().repo_state().unwrap(), RepoState::Idle);
     assert_eq!(
-        count_files(&fixture.root().join(".git/objects")),
+        file_set(&fixture.root().join(".git/objects")),
         objects_before
     );
 }
@@ -1640,18 +1640,27 @@ fn predicted_conflicts_keep_a_path_git_would_quote() {
     assert!(merged.contains("main greets"), "{merged}");
 }
 
-fn count_files(directory: &Path) -> usize {
-    std::fs::read_dir(directory)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|entry| {
-                    let path = entry.path();
-                    if path.is_dir() { count_files(&path) } else { 1 }
-                })
-                .sum()
-        })
-        .unwrap_or(0)
+/// Every file under `directory`, relative, sorted: an assertion on the
+/// set names the file that appeared or vanished, where a count only says
+/// that one did.
+fn file_set(directory: &Path) -> Vec<String> {
+    fn walk(root: &Path, directory: &Path, into: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(root, &path, into);
+            } else if let Ok(relative) = path.strip_prefix(root) {
+                into.push(relative.display().to_string());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(directory, directory, &mut files);
+    files.sort();
+    files
 }
 
 #[test]
