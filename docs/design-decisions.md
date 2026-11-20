@@ -879,6 +879,17 @@ Decided (owner, 2026-11-19):
   confirms first.
 - The view is a new Kit-fork component, `ConflictResolv`, beside `Diff`.
   `Diff` itself stays read-only and untouched.
+- While the repository is idle, the review forecasts the merge it feeds
+  (owner, 2026-11-20): the backend runs `git merge-tree --write-tree`
+  against a scratch object directory - the repository, its index and its
+  working tree stay untouched - and every path the merge would collide on
+  gets the tree's conflict marker. The file's header says "would conflict
+  with `target`" and offers a swap: the diff body becomes git's predicted
+  merge of the file, rendered by the Kit Diff's own conflict projection
+  with the two branch names as labels, read-only - the Accept commands
+  hide, because there is nothing a click could write before the real
+  merge. The forecast is advisory: when the backend cannot compute it,
+  the review loads without one rather than failing.
 
 Assumed:
 
