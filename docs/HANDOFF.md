@@ -50,12 +50,15 @@ first code: a working core and a first UI scaffold wired to it.
   `diff-conflict-resolv`; the backend grew `repo_state`, `conflicts`,
   `resolve_file`, `unresolve_file`, `continue_op` and `abort_op` behind
   the narrow write exception in AGENTS.md constraint 5. Design document
-  section 20 holds the decisions. **The middle pane is read-only derived
-  text in this iteration**; the embedded editor over the same buffer is
-  the next one. **The Cargo patch points at the local fork worktree**
-  (`../gpui-kit-conflict-resolv`) on this branch only - push the fork
-  branch `diff-conflict-resolv` to `o` and restore the GitHub patch
-  before any merge.
+  section 20 holds the decisions. **The middle pane is block-editable**
+  (branch `feat/conflict-editing`, Kit fork branch `diff-conflict-edit`):
+  a picked block's result region is an embedded auto-grow editor - typing
+  flips it to hand-edited, Enter at the edges adds lines, context stays
+  read-only, and result_text keeps blank lines and the file's own CRLF
+  or LF endings through edits. Known limitation, recorded as Open in
+  section 20: the block editor's horizontal scroll is not synced with
+  the pane. The Cargo patch pulls the fork branch `diff-conflict-edit`
+  from GitHub, per the repository rule.
 
 ## Verification status
 
@@ -97,6 +100,7 @@ Be exact about this when you report further work.
 | `ConflictResolv` model: columns from markers with no marker leakage, row alignment with spacers, picks splicing and shifting later blocks, undo, events including BlockReopened, stale indices ignored, an all-empty block keeping a row | Covered by Kit unit and gpui tests on the fork branch |
 | Conflict center on screen, 2026-11-20, against mid-merge and mid-rebase fixture repositories: strip wording for both operations (rebase shows its commit progress), auto-selected Conflicts center, three panes with dividers and per-pane line numbers, tinted blocks aligned by spacers, pick arrows and the take-both glyph in the middle pane's gutters, pane labels with the absolute date left and "same age" right, unresolved badges, greyed Mark resolved and Continue, conflict glyphs on the tree's conflicted rows, and the light-theme story | Verified by screenshot (`docs/screenshots/conflict-*.png`). The yours label's date truncates in a narrow pane |
 | Conflict interactions: clicking a pick arrow, Mark resolved and Reopen round trips, Continue and the abort confirm dialog, the Review \| Conflicts switch toggling, the palette entries | Compiled, clippy-clean, model-tested; not driven on screen |
+| Block-scoped editing: editor mounts only on picked blocks and drops on undo, hand edits flip the resolution once, blank lines and CRLF endings survive round trips, Enter grows the region and the spacers realign, equal-height edits leave the row table untouched | Covered by Kit model and gpui-window state tests on the fork branch `diff-conflict-edit` (a real Change event is driven through the input handler); painted output verified by screenshot (`docs/screenshots/conflict-edit-story-light.png`: the story's first block picked then hand-edited, the editor's text in the middle pane, line numbers aligned); caret and click-to-focus feel **not driven on screen** |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 | Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Pull-request menu (title-bar icon in a `--pr` review): open in the browser, publish comments, approve with and without comments; the link icon on published cards; the status-bar line after a publish | Core covered by tests: what a publish sends and records (`forge.rs`, against a fake forge) and the exact gh calls, the file-level fallback and the pending-review cleanup (`github.rs`, against a stand-in gh script, Unix only). The GraphQL input and enum names were checked read-only against GitHub's live schema by introspection. The status query (`gh pr view --json state,reviewDecision,statusCheckRollup` with the app's jq) was run read-only against a real merged PR and its lines match what `fold_checks` parses. **Nothing was ever posted to a real pull request**, and the window was not run: the menu, the state icon and its red tint, the busy state, the link icon and whether a pending-review comment's URL still opens after the submit are all unseen |
