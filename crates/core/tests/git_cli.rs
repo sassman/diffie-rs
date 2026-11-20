@@ -6,7 +6,7 @@ use std::process::Command;
 use diffie_core::review::{ReviewInput, ReviewedFile};
 use diffie_core::{
     BackendError, CompareMode, Comparison, FileState, FileStatus, GitCli, NewSide, Oid, RepoState,
-    ReviewBackend, Scope,
+    ResolutionPush, ReviewBackend, Scope,
 };
 
 fn git(directory: &Path, args: &[&str]) -> String {
@@ -1666,6 +1666,130 @@ fn file_set(directory: &Path) -> Vec<String> {
     walk(directory, directory, &mut files);
     files.sort();
     files
+}
+
+/// A bare repository beside the fixture, wired up as remote `o` with the
+/// fixture's branches pushed, so a resolution push has somewhere real to
+/// land without the network.
+fn bare_remote(fixture: &ConflictFixture) -> tempfile::TempDir {
+    let remote = tempfile::tempdir().unwrap();
+    let url = remote.path().to_str().unwrap().to_string();
+    git(fixture.root(), &["init", "-q", "--bare", &url]);
+    git(fixture.root(), &["remote", "add", "o", &url]);
+    git(fixture.root(), &["push", "-q", "o", "main", "feat"]);
+    remote
+}
+
+#[test]
+fn push_resolution_builds_the_merge_and_moves_only_the_remote_branch() {
+    let fixture = ConflictFixture::new();
+    let remote = bare_remote(&fixture);
+    let feat = git(fixture.root(), &["rev-parse", "feat"]);
+    let main = git(fixture.root(), &["rev-parse", "main"]);
+
+    let pushed = fixture
+        .backend()
+        .push_resolution(&ResolutionPush {
+            remote: "o".into(),
+            branch: "feat".into(),
+            source: feat.clone(),
+            target: main.clone(),
+            message: "Merge branch 'main' into feat".into(),
+            resolutions: vec![("t.txt".into(), "merged line\n".into())],
+        })
+        .unwrap();
+
+    // The remote branch is the pushed merge commit, parented on the two
+    // tips, carrying the resolution and the clean side of the merge.
+    assert_eq!(git(remote.path(), &["rev-parse", "feat"]), pushed.as_str());
+    assert_eq!(
+        git(
+            fixture.root(),
+            &["log", "-1", "--format=%P", pushed.as_str()]
+        ),
+        format!("{feat} {main}")
+    );
+    assert_eq!(
+        git(
+            fixture.root(),
+            &["show", &format!("{}:t.txt", pushed.as_str())]
+        ),
+        "merged line"
+    );
+    assert_eq!(
+        git(
+            fixture.root(),
+            &["show", &format!("{}:calm.txt", pushed.as_str())]
+        ),
+        "calm feat"
+    );
+    // Nothing local moved: branch, working tree, index, operation state.
+    assert_eq!(git(fixture.root(), &["rev-parse", "feat"]), feat);
+    assert_eq!(git(fixture.root(), &["status", "--porcelain"]), "");
+    assert_eq!(fixture.backend().repo_state().unwrap(), RepoState::Idle);
+}
+
+#[test]
+fn push_resolution_refuses_an_uncovered_conflict_and_touches_nothing() {
+    let fixture = ConflictFixture::new();
+    let remote = bare_remote(&fixture);
+    let feat = git(fixture.root(), &["rev-parse", "feat"]);
+    let main = git(fixture.root(), &["rev-parse", "main"]);
+
+    let error = fixture
+        .backend()
+        .push_resolution(&ResolutionPush {
+            remote: "o".into(),
+            branch: "feat".into(),
+            source: feat.clone(),
+            target: main,
+            message: "Merge branch 'main' into feat".into(),
+            resolutions: Vec::new(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("t.txt"), "{error}");
+    assert_eq!(git(remote.path(), &["rev-parse", "feat"]), feat);
+}
+
+#[test]
+fn push_resolution_rejects_a_head_branch_that_moved_on() {
+    let fixture = ConflictFixture::new();
+    let remote = bare_remote(&fixture);
+    let pinned = git(fixture.root(), &["rev-parse", "feat"]);
+    let main = git(fixture.root(), &["rev-parse", "main"]);
+    // The branch moves on after the review pinned its head: the push must
+    // come back rejected instead of overwriting the newer work.
+    git(fixture.root(), &["checkout", "-q", "feat"]);
+    std::fs::write(fixture.root().join("calm.txt"), "calm moved on\n").unwrap();
+    git(fixture.root(), &["commit", "-q", "-am", "feat moves on"]);
+    git(fixture.root(), &["push", "-q", "o", "feat"]);
+    let moved = git(fixture.root(), &["rev-parse", "feat"]);
+
+    let result = fixture.backend().push_resolution(&ResolutionPush {
+        remote: "o".into(),
+        branch: "feat".into(),
+        source: pinned,
+        target: main,
+        message: "Merge branch 'main' into feat".into(),
+        resolutions: vec![("t.txt".into(), "merged line\n".into())],
+    });
+
+    assert!(result.is_err());
+    assert_eq!(git(remote.path(), &["rev-parse", "feat"]), moved);
+}
+
+#[test]
+fn forecast_labels_name_the_sides_with_their_clocks() {
+    let fixture = ConflictFixture::new();
+    let labels = fixture
+        .backend()
+        .forecast_labels("feat", "feat", "main", "main")
+        .unwrap();
+    assert_eq!(labels.yours, "feat");
+    assert_eq!(labels.upstream, "main");
+    assert_eq!(labels.yours_date, "2026-11-04 10:00");
+    assert!(labels.yours_time < labels.upstream_time);
 }
 
 #[test]
