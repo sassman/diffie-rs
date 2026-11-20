@@ -1533,6 +1533,64 @@ fn repo_state_counts_rebase_progress() {
 }
 
 #[test]
+fn predicted_conflicts_see_the_collision_before_any_merge_starts() {
+    let fixture = ConflictFixture::new();
+    let objects_before = count_files(&fixture.root().join(".git/objects"));
+
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("feat", "main")
+        .unwrap();
+
+    assert_eq!(predicted.len(), 1);
+    assert_eq!(predicted[0].path, "t.txt");
+    let merged = predicted[0].merged.as_deref().unwrap();
+    assert!(merged.contains("<<<<<<< feat"), "{merged}");
+    assert!(merged.contains("feat line"), "{merged}");
+    assert!(merged.contains("main line"), "{merged}");
+    assert!(merged.contains(">>>>>>> main"), "{merged}");
+    // Prediction never starts the operation or writes merge objects into
+    // the repository: everything lands in the scratch directory.
+    assert_eq!(fixture.backend().repo_state().unwrap(), RepoState::Idle);
+    assert_eq!(
+        count_files(&fixture.root().join(".git/objects")),
+        objects_before
+    );
+}
+
+#[test]
+fn predicted_conflicts_stay_empty_for_branches_that_merge_cleanly() {
+    let fixture = ConflictFixture::new();
+    // Branched at the fixture's base commit so it shares no rewrite with
+    // feat: the two touch disjoint paths and the merge is clean.
+    git(fixture.root(), &["checkout", "-q", "-b", "docs", "feat~2"]);
+    std::fs::write(fixture.root().join("d.txt"), "docs\n").unwrap();
+    git(fixture.root(), &["add", "d.txt"]);
+    git(fixture.root(), &["commit", "-q", "-m", "docs add d"]);
+    git(fixture.root(), &["checkout", "-q", "main"]);
+
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("docs", "feat")
+        .unwrap();
+    assert_eq!(predicted, Vec::new());
+}
+
+fn count_files(directory: &Path) -> usize {
+    std::fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| {
+                    let path = entry.path();
+                    if path.is_dir() { count_files(&path) } else { 1 }
+                })
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+#[test]
 fn conflicts_name_the_sides_of_a_merge() {
     let fixture = ConflictFixture::new();
     fixture.start_merge();
