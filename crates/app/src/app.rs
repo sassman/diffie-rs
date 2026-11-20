@@ -34,7 +34,7 @@ use gpui_kit::component::{
         ToggleVariants as _,
     },
     checkbox::Checkbox,
-    conflict_resolv::{ConflictResolv, ConflictResolvState},
+    conflict_resolv::{ConflictResolv, ConflictResolvEvent, ConflictResolvState},
     diff::{
         Diff, DiffAnnotation, DiffChangeIndicator, DiffDecoration, DiffEvent, DiffFile, DiffFold,
         DiffGutterMarker, DiffHunkSeparator, DiffLinePosition, DiffLineRange, DiffMode, DiffSide,
@@ -643,14 +643,31 @@ struct ConflictView {
 }
 
 enum ConflictBody {
-    /// The subscription keeps the app re-rendering on every pick made
-    /// inside the component.
+    /// The resolver and the small view that renders it. Typing in a
+    /// block editor repaints that view alone; the app's subscription
+    /// reacts to picks and undo, never to Edited, so a keystroke does
+    /// not re-render the window.
     Resolver(
         Entity<ConflictResolvState>,
+        Entity<ResolverView>,
         #[allow(dead_code)] Subscription,
     ),
     /// The marker parser's complaint, shown in place of a resolver.
     Unparsed(SharedString),
+}
+
+/// One resolver's own view: the per-keystroke repaint stops here instead
+/// of re-rendering every resolver and the window's chrome around them.
+struct ResolverView {
+    state: Entity<ConflictResolvState>,
+    labels: ConflictLabels,
+    _observe: Subscription,
+}
+
+impl Render for ResolverView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        render_resolver(&self.state, &self.labels)
+    }
 }
 
 /// One group of the commit picker: its heading row and the commits it lists.
@@ -1575,13 +1592,30 @@ impl ReviewApp {
                 if self.forecast_resolving() {
                     // The same resolvers, fed from the predicted merge: the
                     // entity reuse on an unchanged source keeps the
-                    // reviewer's picks across background reloads.
+                    // reviewer's picks across background reloads. Clocks
+                    // can be missing (an unreadable tip); the pane names
+                    // still say which side is which.
+                    let labels =
+                        self.review
+                            .forecast_labels
+                            .clone()
+                            .unwrap_or_else(|| ConflictLabels {
+                                yours: self.review.comparison.source.clone(),
+                                upstream: self.review.comparison.target.clone(),
+                                yours_date: String::new(),
+                                yours_time: 0,
+                                upstream_time: 0,
+                            });
                     let sources = self
                         .review
                         .predicted
                         .iter()
                         .filter_map(|conflict| {
-                            Some((conflict.path.clone(), conflict.merged.clone()?))
+                            Some((
+                                conflict.path.clone(),
+                                conflict.merged.clone()?,
+                                labels.clone(),
+                            ))
                         })
                         .collect();
                     self.sync_conflict_views(sources, loaded.forecast_parses, cx);
@@ -1589,7 +1623,7 @@ impl ReviewApp {
                     let sources = self
                         .conflicts
                         .iter()
-                        .map(|file| (file.path.clone(), file.working.clone()))
+                        .map(|file| (file.path.clone(), file.working.clone(), file.labels.clone()))
                         .collect();
                     self.sync_conflict_views(sources, loaded.conflict_parses, cx);
                 }
@@ -1788,7 +1822,7 @@ impl ReviewApp {
     /// fresh parse, preserving the reviewer's picks.
     fn sync_conflict_views(
         &mut self,
-        sources: Vec<(String, String)>,
+        sources: Vec<(String, String, ConflictLabels)>,
         parses: Vec<Result<ConflictResolvState, String>>,
         cx: &mut Context<Self>,
     ) {
@@ -1796,18 +1830,36 @@ impl ReviewApp {
         self.conflict_views = sources
             .into_iter()
             .zip(parses)
-            .map(|((path, source), parsed)| {
+            .map(|((path, source, labels), parsed)| {
                 if let Some(ix) = old
                     .iter()
                     .position(|v| v.path == path && v.source == source)
                 {
-                    return old.swap_remove(ix);
+                    let kept = old.swap_remove(ix);
+                    // The relative ages can shift between loads; the kept
+                    // view just takes the fresh labels.
+                    if let ConflictBody::Resolver(_, view, _) = &kept.body {
+                        view.update(cx, |view, _| view.labels = labels);
+                    }
+                    return kept;
                 }
                 let body = match parsed {
                     Ok(state) => {
                         let state = cx.new(|_| state);
-                        let observe = cx.observe(&state, |_, _, cx| cx.notify());
-                        ConflictBody::Resolver(state, observe)
+                        let view = cx.new(|cx| ResolverView {
+                            state: state.clone(),
+                            labels,
+                            _observe: cx.observe(&state, |_, _, cx| cx.notify()),
+                        });
+                        // Picks and undo move badges, ticks and counts;
+                        // Edited is every keystroke and moves none of them.
+                        let subscribe =
+                            cx.subscribe(&state, |_, _, event: &ConflictResolvEvent, cx| {
+                                if !matches!(event, ConflictResolvEvent::Edited) {
+                                    cx.notify();
+                                }
+                            });
+                        ConflictBody::Resolver(state, view, subscribe)
                     }
                     Err(error) => ConflictBody::Unparsed(error.into()),
                 };
@@ -1855,7 +1907,7 @@ impl ReviewApp {
         let Some(view) = self.conflict_views.iter().find(|v| v.path == path) else {
             return;
         };
-        let ConflictBody::Resolver(state, _) = &view.body else {
+        let ConflictBody::Resolver(state, ..) = &view.body else {
             return;
         };
         let state = state.read(cx);
@@ -2042,7 +2094,7 @@ impl ReviewApp {
                     view.path == conflict.path
                         && matches!(
                             &view.body,
-                            ConflictBody::Resolver(state, _) if state.read(cx).all_resolved()
+                            ConflictBody::Resolver(state, ..) if state.read(cx).all_resolved()
                         )
                 })
         };
@@ -2121,7 +2173,7 @@ impl ReviewApp {
                     .conflict_views
                     .iter()
                     .find(|view| view.path == conflict.path)?;
-                let ConflictBody::Resolver(state, _) = &view.body else {
+                let ConflictBody::Resolver(state, ..) = &view.body else {
                     return None;
                 };
                 Some((conflict.path.clone(), state.read(cx).result_text()))
@@ -5034,7 +5086,7 @@ impl ReviewApp {
             .find(|view| view.path == conflict.path);
         let ready = matches!(
             view.map(|view| &view.body),
-            Some(ConflictBody::Resolver(state, _)) if state.read(cx).all_resolved()
+            Some(ConflictBody::Resolver(state, ..)) if state.read(cx).all_resolved()
         );
         let (badge, badge_color) = if conflict.merged.is_none() {
             ("on the forge", cx.theme().warning)
@@ -5053,21 +5105,7 @@ impl ReviewApp {
                      binary. Resolve it on the forge; until then the push stays off.",
                 )
                 .into_any_element(),
-            (Some(_), Some(ConflictBody::Resolver(state, _))) => {
-                // The clocks can be missing (an unreadable tip); the pane
-                // names still have to say which side is which.
-                let fallback = ConflictLabels {
-                    yours: self.review.comparison.source.clone(),
-                    upstream: self.review.comparison.target.clone(),
-                    yours_date: String::new(),
-                    yours_time: 0,
-                    upstream_time: 0,
-                };
-                render_resolver(
-                    state,
-                    self.review.forecast_labels.as_ref().unwrap_or(&fallback),
-                )
-            }
+            (Some(_), Some(ConflictBody::Resolver(_, view, _))) => view.clone().into_any_element(),
             (Some(_), Some(ConflictBody::Unparsed(error))) => div()
                 .px(px(10.))
                 .py(px(6.))
@@ -5161,12 +5199,12 @@ impl ReviewApp {
         // content nobody chose, so both stay with the terminal for now.
         let markerless = file.binary
             || match &view.body {
-                ConflictBody::Resolver(state, _) => state.read(cx).block_count() == 0,
+                ConflictBody::Resolver(state, ..) => state.read(cx).block_count() == 0,
                 ConflictBody::Unparsed(_) => false,
             };
         let ready = !markerless
             && match &view.body {
-                ConflictBody::Resolver(state, _) => state.read(cx).all_resolved(),
+                ConflictBody::Resolver(state, ..) => state.read(cx).all_resolved(),
                 ConflictBody::Unparsed(_) => false,
             };
         let (badge, badge_color) = if ready {
@@ -5176,7 +5214,7 @@ impl ReviewApp {
         };
         let path = file.path.clone();
         let body = match &view.body {
-            ConflictBody::Resolver(_, _) if markerless => div()
+            ConflictBody::Resolver(..) if markerless => div()
                 .px(px(10.))
                 .py(px(6.))
                 .text_color(cx.theme().muted_foreground)
@@ -5185,7 +5223,7 @@ impl ReviewApp {
                      Resolve it in the terminal, then reload.",
                 )
                 .into_any_element(),
-            ConflictBody::Resolver(state, _) => render_resolver(state, &file.labels),
+            ConflictBody::Resolver(_, view, _) => view.clone().into_any_element(),
             ConflictBody::Unparsed(error) => div()
                 .px(px(10.))
                 .py(px(6.))
@@ -5469,7 +5507,7 @@ impl ReviewApp {
                 view.path == path
                     && matches!(
                         &view.body,
-                        ConflictBody::Resolver(state, _)
+                        ConflictBody::Resolver(state, ..)
                             if state.read(cx).block_count() > 0
                                 && !state.read(cx).all_resolved()
                     )
