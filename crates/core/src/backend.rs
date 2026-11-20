@@ -172,7 +172,19 @@ pub trait ReviewBackend: Send + Sync {
     /// predictive: merge objects go to a scratch directory and the
     /// repository, its index and its working tree stay untouched. Empty
     /// means the merge would be clean.
-    fn predicted_conflicts(&self, source: &str, target: &str) -> Result<Vec<PredictedConflict>>;
+    ///
+    /// The names feed git's marker labels, so each side is merged under
+    /// its name - unless its pin says the name has moved on: a review
+    /// pinned to a startup or pull-request revision must forecast that
+    /// revision, not whatever a local branch of the same name points at
+    /// today.
+    fn predicted_conflicts(
+        &self,
+        source: &str,
+        source_pin: Option<&str>,
+        target: &str,
+        target_pin: Option<&str>,
+    ) -> Result<Vec<PredictedConflict>>;
 
     /// Write `contents` as the resolution of `path` and stage it. The one
     /// sanctioned repository write: only a path that is unmerged in the

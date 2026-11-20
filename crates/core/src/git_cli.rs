@@ -60,6 +60,30 @@ impl GitCli {
             .filter(|name| !name.is_empty()))
     }
 
+    /// The revision a forecast merges, picked so git's marker labels read
+    /// well: the name itself, unless a pin exists and the name no longer
+    /// points at it - a stale local branch must not change what the
+    /// forecast merges, and a name that resolves to nothing falls back to
+    /// the pin outright.
+    fn labelled_rev(&self, name: &str, pin: Option<&str>) -> Result<String> {
+        let Some(pin) = pin else {
+            return Ok(name.to_string());
+        };
+        let commit = |rev: &str| format!("{rev}^{{commit}}");
+        let pinned = self.read(&["rev-parse", "--verify", "--end-of-options", &commit(pin)])?;
+        let named = self.try_read(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &commit(name),
+        ])?;
+        Ok(match named {
+            Some(named) if named.trim() == pinned.trim() => name.to_string(),
+            _ => pin.to_string(),
+        })
+    }
+
     /// Whether a working tree exists. A bare repository has no uncommitted
     /// state to review.
     pub fn has_working_tree(&self) -> Result<bool> {
@@ -1307,39 +1331,31 @@ impl ReviewBackend for GitCli {
             .collect()
     }
 
-    fn predicted_conflicts(&self, source: &str, target: &str) -> Result<Vec<PredictedConflict>> {
+    fn predicted_conflicts(
+        &self,
+        source: &str,
+        source_pin: Option<&str>,
+        target: &str,
+        target_pin: Option<&str>,
+    ) -> Result<Vec<PredictedConflict>> {
+        let source = self.labelled_rev(source, source_pin)?;
+        let target = self.labelled_rev(target, target_pin)?;
         let scratch = self.scratch_git()?;
-        let (conflicted, listing) = scratch.merge_tree(self, source, target)?;
+        let (conflicted, listing) = scratch.merge_tree(self, &source, &target)?;
         if !conflicted {
             return Ok(Vec::new());
         }
-        let mut lines = listing.lines();
-        let tree = lines.next().unwrap_or_default().trim().to_string();
-        lines
-            .filter(|line| !line.is_empty())
-            .map(|path| {
-                // The auto-merged blob, markers included. A side's delete
-                // drops the path from the written tree, and binary content
-                // merges without usable markers; both report the path alone.
-                let merged = scratch
-                    .read(
-                        self,
-                        &[
-                            "cat-file",
-                            "-p",
-                            "--end-of-options",
-                            &format!("{tree}:{path}"),
-                        ],
-                        None,
-                    )
-                    .ok()
-                    .filter(|text| !text.contains('\0'));
-                Ok(PredictedConflict {
-                    path: path.to_string(),
-                    merged,
-                })
-            })
-            .collect()
+        // `-z` listing: the result tree's id, then each conflicted path,
+        // every entry NUL-terminated and never C-quoted.
+        let mut entries = listing.split('\0').filter(|entry| !entry.is_empty());
+        let tree = entries.next().unwrap_or_default().trim().to_string();
+        let paths: Vec<String> = entries.map(String::from).collect();
+        let texts = scratch.merged_texts(self, &tree, &paths)?;
+        Ok(paths
+            .into_iter()
+            .zip(texts)
+            .map(|(path, merged)| PredictedConflict { path, merged })
+            .collect())
     }
 
     fn resolve_file(&self, path: &str, contents: &str) -> Result<()> {
@@ -1691,11 +1707,77 @@ impl ScratchGit {
             "--write-tree",
             "--name-only",
             "--no-messages",
+            // NUL-terminated entries: a C-quoted listing would break the
+            // path round trip for names git quotes under LC_ALL=C.
+            "-z",
             "--end-of-options",
             source,
             target,
         ];
         run_verdict(&mut command, &args)
+    }
+
+    /// The auto-merged files of `tree`, markers included, read through one
+    /// `cat-file --batch` like [`ReviewBackend::blobs`] reads commits'
+    /// blobs. `None` for a path whose merged file is gone (a side's
+    /// delete), is not UTF-8 text, or cannot even be requested - a batch
+    /// request is one line, so a newline in the name does not fit; such a
+    /// path keeps its warning without an inline document.
+    fn merged_texts(
+        &self,
+        backend: &GitCli,
+        tree: &str,
+        paths: &[String],
+    ) -> Result<Vec<Option<String>>> {
+        let mut texts: Vec<Option<String>> = vec![None; paths.len()];
+        let mut asked = Vec::new();
+        let mut requests = String::new();
+        for (ix, path) in paths.iter().enumerate() {
+            if !path.contains('\n') {
+                asked.push(ix);
+                requests.push_str(&format!("{tree}:{path}\n"));
+            }
+        }
+        if asked.is_empty() {
+            return Ok(texts);
+        }
+        let mut command = backend.command();
+        command
+            .env("GIT_INDEX_FILE", &self.index)
+            .env("GIT_OBJECT_DIRECTORY", &self.objects)
+            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &self.real_objects);
+        let output = run_bytes(
+            &mut command,
+            &["cat-file", "--batch"],
+            Some(requests.as_bytes()),
+        )?;
+        // `<oid> <type> <size>\n<content>\n` per found object, one header
+        // line per request otherwise; sizes count bytes, hence raw output.
+        let mut rest = output.as_slice();
+        let mut asked = asked.into_iter();
+        while let Some(end) = rest.iter().position(|byte| *byte == b'\n') {
+            let header = String::from_utf8_lossy(&rest[..end]).into_owned();
+            rest = &rest[end + 1..];
+            let Some(ix) = asked.next() else {
+                break;
+            };
+            if header.ends_with(" missing") || header.ends_with(" ambiguous") {
+                continue;
+            }
+            let mut fields = header.split(' ');
+            let (Some(_), Some(kind), Some(size)) = (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let Some(content) = size.parse().ok().and_then(|size: usize| rest.get(..size)) else {
+                break;
+            };
+            if kind == "blob" {
+                texts[ix] = String::from_utf8(content.to_vec()).ok();
+            }
+            rest = rest.get(content.len() + 1..).unwrap_or_default();
+        }
+        Ok(texts)
     }
 }
 
