@@ -1753,6 +1753,34 @@ fn push_resolution_refuses_an_uncovered_conflict_and_touches_nothing() {
 }
 
 #[test]
+fn push_resolution_refuses_a_resolution_the_merge_did_not_conflict_on() {
+    let fixture = ConflictFixture::new();
+    let remote = bare_remote(&fixture);
+    let feat = git(fixture.root(), &["rev-parse", "feat"]);
+    let main = git(fixture.root(), &["rev-parse", "main"]);
+
+    // calm.txt merges cleanly; a stale resolution for it must refuse, not
+    // bury the cleanly merged content.
+    let error = fixture
+        .backend()
+        .push_resolution(&ResolutionPush {
+            remote: "o".into(),
+            branch: "feat".into(),
+            source: feat.clone(),
+            target: main,
+            message: "Merge branch 'main' into feat".into(),
+            resolutions: vec![
+                ("t.txt".into(), "merged line\n".into()),
+                ("calm.txt".into(), "stale\n".into()),
+            ],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("calm.txt"), "{error}");
+    assert_eq!(git(remote.path(), &["rev-parse", "feat"]), feat);
+}
+
+#[test]
 fn push_resolution_rejects_a_head_branch_that_moved_on() {
     let fixture = ConflictFixture::new();
     let remote = bare_remote(&fixture);

@@ -1403,19 +1403,32 @@ impl ReviewBackend for GitCli {
         )?;
         let mut entries = listing.split('\0').filter(|entry| !entry.is_empty());
         let tree = entries.next().unwrap_or_default().trim().to_string();
-        if conflicted {
-            // A markered blob must never reach the pull request: every
-            // path the merge conflicts on needs its resolution supplied.
-            let unresolved: Vec<&str> = entries
-                .filter(|path| {
-                    !push
-                        .resolutions
-                        .iter()
-                        .any(|(resolved, _)| resolved == path)
-                })
-                .collect();
-            if !unresolved.is_empty() {
-                return Err(BackendError::UnresolvedPaths(unresolved.join(", ")));
+        let conflicted: Vec<&str> = if conflicted {
+            entries.collect()
+        } else {
+            Vec::new()
+        };
+        // A markered blob must never reach the pull request: every path
+        // the merge conflicts on needs its resolution supplied.
+        let unresolved: Vec<&str> = conflicted
+            .iter()
+            .filter(|path| {
+                !push
+                    .resolutions
+                    .iter()
+                    .any(|(resolved, _)| resolved == *path)
+            })
+            .copied()
+            .collect();
+        if !unresolved.is_empty() {
+            return Err(BackendError::UnresolvedPaths(unresolved.join(", ")));
+        }
+        // And the other direction: a resolution for a path this merge did
+        // not conflict on would bury cleanly merged content under an
+        // outdated text - refuse instead of shipping it silently.
+        for (path, _) in &push.resolutions {
+            if !conflicted.contains(&path.as_str()) {
+                return Err(BackendError::NotConflicted(path.clone()));
             }
         }
         // A scratch index keeps the repository's own index untouched while
