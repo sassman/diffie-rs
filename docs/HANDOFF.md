@@ -212,7 +212,8 @@ skills/diffie-review/         agent skill: launch a review, read it back
                               (canonical copy; installs to ~/.claude/skills)
 website/                      the product page: static HTML and CSS, no
                               build step; assets/ holds copies of the brand
-                              mark and the README captures
+                              mark, the README captures and the focused
+                              demo videos (sourced from demo-footage/)
 ```
 
 ## The core in one page
