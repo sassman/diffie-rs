@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::backend::{BackendError, Result, ReviewBackend};
 use crate::model::{
     BlameLine, ChangedRegion, Commit, CompareMode, Comparison, ConflictFile, ConflictLabels,
-    FileState, FileStatus, FileSummary, LineOrigin, NewSide, Oid, RepoState, Resolved, Scope,
-    ScopedPatch,
+    FileState, FileStatus, FileSummary, LineOrigin, NewSide, Oid, PredictedConflict, RepoState,
+    Resolved, Scope, ScopedPatch,
 };
 use crate::review::{ReviewInput, ReviewedFile};
 
@@ -1226,6 +1226,10 @@ impl ReviewBackend for GitCli {
         Ok(Some(std::fs::read(file)?))
     }
 
+    fn current_branch(&self) -> Result<Option<String>> {
+        GitCli::current_branch(self)
+    }
+
     fn repo_state(&self) -> Result<RepoState> {
         // The two rebase backends keep separate state directories; both are
         // checked before MERGE_HEAD, which a rebase never leaves behind.
@@ -1303,6 +1307,41 @@ impl ReviewBackend for GitCli {
             .collect()
     }
 
+    fn predicted_conflicts(&self, source: &str, target: &str) -> Result<Vec<PredictedConflict>> {
+        let scratch = self.scratch_git()?;
+        let (conflicted, listing) = scratch.merge_tree(self, source, target)?;
+        if !conflicted {
+            return Ok(Vec::new());
+        }
+        let mut lines = listing.lines();
+        let tree = lines.next().unwrap_or_default().trim().to_string();
+        lines
+            .filter(|line| !line.is_empty())
+            .map(|path| {
+                // The auto-merged blob, markers included. A side's delete
+                // drops the path from the written tree, and binary content
+                // merges without usable markers; both report the path alone.
+                let merged = scratch
+                    .read(
+                        self,
+                        &[
+                            "cat-file",
+                            "-p",
+                            "--end-of-options",
+                            &format!("{tree}:{path}"),
+                        ],
+                        None,
+                    )
+                    .ok()
+                    .filter(|text| !text.contains('\0'));
+                Ok(PredictedConflict {
+                    path: path.to_string(),
+                    merged,
+                })
+            })
+            .collect()
+    }
+
     fn resolve_file(&self, path: &str, contents: &str) -> Result<()> {
         // The sanctioned write is narrow: nothing but an unmerged path may
         // be touched, however the caller got here.
@@ -1366,6 +1405,32 @@ fn literal(path: &str) -> String {
 
 fn run(command: &mut Command, args: &[impl AsRef<str>], stdin: Option<&[u8]>) -> Result<String> {
     run_bytes(command, args, stdin).map(|output| String::from_utf8_lossy(&output).into_owned())
+}
+
+/// [`run`] for a command whose exit code 1 is a verdict with stdout worth
+/// reading (`merge-tree --write-tree` saying "would conflict"), not a
+/// failure: `(true, stdout)` for code 1, `(false, stdout)` for success,
+/// the usual error otherwise.
+fn run_verdict(command: &mut Command, args: &[impl AsRef<str>]) -> Result<(bool, String)> {
+    command
+        .args(args.iter().map(|argument| argument.as_ref()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().map_err(BackendError::GitMissing)?;
+    let output = child.wait_with_output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    match output.status.code() {
+        Some(0) => Ok((false, stdout)),
+        Some(1) => Ok((true, stdout)),
+        _ => Err(BackendError::Git {
+            command: args
+                .first()
+                .map(|argument| argument.as_ref().to_string())
+                .unwrap_or_default(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }),
+    }
 }
 
 /// [`run`] without the text conversion, for output whose byte counts matter.
@@ -1608,6 +1673,29 @@ impl ScratchGit {
             .env("GIT_OBJECT_DIRECTORY", &self.objects)
             .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &self.real_objects);
         run(&mut command, args, stdin)
+    }
+
+    /// `merge-tree --write-tree` of merging `target` into `source`, its
+    /// trees and blobs landing in the scratch object directory, never the
+    /// repository's. Returns whether the merge would conflict, and the
+    /// listing: the result tree's id first, then the conflicted paths.
+    /// `source` comes first so each marker labels it as the current side.
+    fn merge_tree(&self, backend: &GitCli, source: &str, target: &str) -> Result<(bool, String)> {
+        let mut command = backend.command();
+        command
+            .env("GIT_INDEX_FILE", &self.index)
+            .env("GIT_OBJECT_DIRECTORY", &self.objects)
+            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &self.real_objects);
+        let args = [
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            "--end-of-options",
+            source,
+            target,
+        ];
+        run_verdict(&mut command, &args)
     }
 }
 
