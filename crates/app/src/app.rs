@@ -4467,13 +4467,23 @@ impl ReviewApp {
             )
             .child(standing)
             .when_some(self.op_error.clone(), |strip, error| {
+                // Git pads refusals with hint: lines; the strip carries the
+                // first real line, the tooltip the full text.
+                let line = error
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty() && !line.starts_with("hint:"))
+                    .unwrap_or_default()
+                    .to_string();
                 strip.child(
                     div()
+                        .id("op-error")
                         .min_w_0()
                         .truncate()
                         .text_size(px(11.))
                         .text_color(cx.theme().danger)
-                        .child(error),
+                        .tooltip(move |window, cx| Tooltip::new(error.clone()).build(window, cx))
+                        .child(line),
                 )
             })
             .child(div().flex_1())

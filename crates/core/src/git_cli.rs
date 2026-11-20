@@ -737,8 +737,14 @@ impl GitCli {
 
     /// `git merge <action>` or `git rebase <action>`, editors stubbed out so
     /// git can never block waiting for a message or a todo list.
+    ///
+    /// A rebase continue exits non-zero when the replay stops at the next
+    /// conflicted commit. That stop is progress, not failure; it is told
+    /// apart from a genuine refusal by the operation state having moved
+    /// and new paths being unmerged.
     fn operate(&self, action: &str) -> Result<()> {
-        let subcommand = match self.repo_state()? {
+        let before = self.repo_state()?;
+        let subcommand = match before {
             RepoState::Merge => "merge",
             RepoState::Rebase { .. } => "rebase",
             RepoState::Idle => return Err(BackendError::NoOperation),
@@ -747,8 +753,19 @@ impl GitCli {
         command
             .env("GIT_EDITOR", "true")
             .env("GIT_SEQUENCE_EDITOR", "true");
-        run(&mut command, &[subcommand, action], None)?;
-        Ok(())
+        match run(&mut command, &[subcommand, action], None) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let now = self.repo_state()?;
+                let stopped_again = now != RepoState::Idle
+                    && now != before
+                    && self
+                        .read(&["ls-files", "-u"])
+                        .map(|list| !list.trim().is_empty())
+                        .unwrap_or(false);
+                if stopped_again { Ok(()) } else { Err(error) }
+            }
+        }
     }
 
     fn blame_with(

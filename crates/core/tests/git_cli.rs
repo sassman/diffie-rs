@@ -1777,3 +1777,53 @@ fn continue_and_abort_refuse_an_idle_repository() {
     ));
     assert!(matches!(backend.abort_op(), Err(BackendError::NoOperation)));
 }
+
+#[test]
+fn continue_reports_the_next_conflicted_commit_as_progress() {
+    // Two feat commits, each conflicting with main: git exits non-zero
+    // when the continue stops at the second one, but that stop is
+    // progress, not a refusal.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.name", "Ada"]);
+    std::fs::write(root.join("t.txt"), "base t\n").unwrap();
+    std::fs::write(root.join("c.txt"), "base c\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "feat"]);
+    std::fs::write(root.join("t.txt"), "feat t\n").unwrap();
+    git(root, &["commit", "-q", "-am", "feat t"]);
+    std::fs::write(root.join("c.txt"), "feat c\n").unwrap();
+    git(root, &["commit", "-q", "-am", "feat c"]);
+    git(root, &["checkout", "-q", "main"]);
+    std::fs::write(root.join("t.txt"), "main t\n").unwrap();
+    std::fs::write(root.join("c.txt"), "main c\n").unwrap();
+    git(root, &["commit", "-q", "-am", "main both"]);
+    git(root, &["checkout", "-q", "feat"]);
+    git_conflicting(root, &["rebase", "main"]);
+
+    let backend = GitCli::open(root).unwrap();
+    assert_eq!(
+        backend.repo_state().unwrap(),
+        RepoState::Rebase { done: 1, total: 2 }
+    );
+    backend.resolve_file("t.txt", "resolved t\n").unwrap();
+    backend.continue_op().unwrap();
+    assert_eq!(
+        backend.repo_state().unwrap(),
+        RepoState::Rebase { done: 2, total: 2 }
+    );
+    let conflicts = backend.conflicts().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].path, "c.txt");
+    // With the conflict still unresolved the state cannot move: that
+    // continue is a genuine refusal and keeps git's words.
+    assert!(matches!(
+        backend.continue_op(),
+        Err(BackendError::Git { .. })
+    ));
+    backend.resolve_file("c.txt", "resolved c\n").unwrap();
+    backend.continue_op().unwrap();
+    assert_eq!(backend.repo_state().unwrap(), RepoState::Idle);
+}
