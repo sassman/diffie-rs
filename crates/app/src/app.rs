@@ -3951,43 +3951,79 @@ impl ReviewApp {
                         // to resolve; the pair mirrors split/unified.
                         .when(self.conflicts_center_available(), |controls| {
                             let conflicts = self.center == CenterView::Conflicts;
-                            controls.child(
-                                ToggleGroup::new("center")
-                                    .outline()
-                                    .segmented()
-                                    .single()
-                                    .small()
-                                    .child(
-                                        Toggle::new("center-review")
-                                            .icon(Icon::new(Lucide::FileDiff))
-                                            .tooltip("Review view")
-                                            .checked(!conflicts),
-                                    )
-                                    .child(
-                                        Toggle::new("center-conflicts")
-                                            .icon(Icon::new(Lucide::GitMergeConflict))
-                                            .tooltip("Conflicts view")
-                                            .checked(conflicts),
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, checks: &Vec<bool>, window, cx| {
-                                            // Clicking the checked segment clears
-                                            // the group; an either-or keeps the
-                                            // current choice instead.
-                                            this.center = match checks.iter().position(|on| *on) {
-                                                Some(0) => CenterView::Review,
-                                                Some(_) => CenterView::Conflicts,
-                                                None => return,
-                                            };
-                                            // Focus follows the switch, so the
-                                            // jump keys work without a click
-                                            // into the column first.
-                                            if this.center == CenterView::Conflicts {
-                                                window.focus(&this.conflicts_focus, cx);
+                            let open = self.open_conflicts();
+                            let warning = cx.theme().warning;
+                            let group = ToggleGroup::new("center")
+                                .outline()
+                                .segmented()
+                                .single()
+                                .small()
+                                .child(
+                                    Toggle::new("center-review")
+                                        .icon(Icon::new(Lucide::FileDiff))
+                                        .tooltip("Review view")
+                                        .checked(!conflicts),
+                                )
+                                .child(
+                                    Toggle::new("center-conflicts")
+                                        .icon({
+                                            let icon = Icon::new(Lucide::GitMergeConflict);
+                                            // Open conflicts tint the segment
+                                            // so the switch is seen, not
+                                            // hunted for.
+                                            if open > 0 {
+                                                icon.text_color(warning)
+                                            } else {
+                                                icon
                                             }
-                                            cx.notify();
-                                        },
-                                    )),
+                                        })
+                                        .tooltip("Conflicts view")
+                                        .checked(conflicts),
+                                )
+                                .on_click(cx.listener(|this, checks: &Vec<bool>, window, cx| {
+                                    // Clicking the checked segment clears
+                                    // the group; an either-or keeps the
+                                    // current choice instead.
+                                    this.center = match checks.iter().position(|on| *on) {
+                                        Some(0) => CenterView::Review,
+                                        Some(_) => CenterView::Conflicts,
+                                        None => return,
+                                    };
+                                    // Focus follows the switch, so the
+                                    // jump keys work without a click
+                                    // into the column first.
+                                    if this.center == CenterView::Conflicts {
+                                        window.focus(&this.conflicts_focus, cx);
+                                    }
+                                    cx.notify();
+                                }));
+                            controls.child(
+                                div()
+                                    .relative()
+                                    .child(group)
+                                    // The count rides the group's corner like
+                                    // a notification badge, in the comment
+                                    // badge's shape; it falls off at zero.
+                                    .when(open > 0, |wrapped| {
+                                        wrapped.child(
+                                            div().absolute().top(px(-5.)).right(px(-5.)).child(
+                                                h_flex()
+                                                    .flex_none()
+                                                    .h(px(13.))
+                                                    .min_w(px(13.))
+                                                    .px(px(4.))
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .rounded_full()
+                                                    .bg(warning)
+                                                    .text_color(cx.theme().background)
+                                                    .text_size(px(9.5))
+                                                    .line_height(px(13.))
+                                                    .font_medium()
+                                                    .child(open.to_string()),
+                                            ),
+                                        )
+                                    }),
                             )
                         })
                         .child(
@@ -5403,6 +5439,23 @@ impl ReviewApp {
             .iter()
             .any(|seen| seen == path)
             .then_some(true)
+    }
+
+    /// How many conflicted files still want attention: the unmerged
+    /// paths of an interrupted operation, or the forecast files not yet
+    /// ticked. Feeds the center switch's badge.
+    fn open_conflicts(&self) -> usize {
+        if self.repo_state != RepoState::Idle {
+            self.conflicts.len()
+        } else if self.forecast_resolving() {
+            self.review
+                .predicted
+                .iter()
+                .filter(|conflict| !self.review.pr_resolved.contains(&conflict.path))
+                .count()
+        } else {
+            0
+        }
     }
 
     /// `]` and `[` in the conflicts center walk the conflicted files,
