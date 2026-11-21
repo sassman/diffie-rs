@@ -857,10 +857,12 @@ Decided (owner, 2026-11-19):
   Upstream changes right. Conflict blocks stay aligned across the panes via
   spacer rows; the outer column scrolls vertically and each pane scrolls
   its long lines horizontally. A file's block is sized to its folded
-  content; one taller than the viewport caps below it and scrolls
-  within its frame (2026-11-20, a consequence of the virtualized
-  renderer the owner picked - the list must own a definite height), so
-  the neighbouring files stay a wheel-turn away. Unchanged context
+  content, fully expanded, so the column is the only vertical scroll -
+  as the review view is. A viewport cap that made a tall file scroll
+  within its own frame was tried and dropped (owner, 2026-11-21: the
+  nested scroll felt wrong). The scrolled-into file's header pins over
+  the column's top edge, the review view's pinned-header idiom.
+  Unchanged context
   folds behind an
   "N unchanged lines" disclosure (owner nit, 2026-11-20), keeping three
   lines around each block like the Diff keeps around a change; a click

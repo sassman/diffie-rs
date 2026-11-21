@@ -85,8 +85,11 @@ first code: a working core and a first UI scaffold wired to it.
   it. The retained component stays in the Kit as the story's
   comparison baseline. The conflicts column pins the scrolled-into
   file's header over its top edge, the same idiom as the Diff's pinned
-  file headers, and a file's own resolver hands the wheel outward once
-  it sits at its edge, so the column scrolls on past it.
+  file headers, and every file sits fully expanded, so the column is
+  the only vertical scroll - a viewport cap that let a tall file scroll
+  within its own frame was dropped (owner, 2026-11-21, after feeling
+  the double scroll). The Kit's wheel hand-off stays: it is what makes
+  a nested resolver bubble an unconsumed turn outward at all.
 
 ## Verification status
 
@@ -136,6 +139,7 @@ Be exact about this when you report further work.
 | Forecast resolution UI: the Conflicts center on a pull request's predicted merge, in-memory ticks, the PR-menu and palette action with its blockers and the confirm dialog naming remote, branch and number, the re-pin and reload after a push | Compiled, clippy-clean; **not driven on screen** - it needs a real pull request with conflicts to dogfood |
 | The virtualized resolver in the app, 2026-11-20, against the mid-merge fixture: syntax-highlighted lines in all three panes, the fold bands above and below the conflict, the tinted block with its pick arrows and take-both glyph aligned by line numbers, the file's frame sized to its folded content inside the outer scroll | Verified by screenshot on macOS. A first wiring painted an empty body - the virtualized list collapses without a definite height - which is why `ResolverView` now sizes the frame from `display_len` and the published row height. Scroll feel inside a capped frame, picks and typing through the virtualized panes, and the forecast center were not driven on screen |
 | Sticky conflict file headers: the column pins the scrolled-into file's header over its top edge (both the operation and the forecast columns share the header builders), and the next file's header pushes the pinned copy up as it arrives; a resolver that consumed a wheel turn stops it so the outer column does not scroll too, and hands it outward at its edge | Pin verified on macOS on 2026-11-21 by screenshots against a two-file mid-merge fixture with the column's scroll forced through its handle (synthetic wheel events were abandoned - the owner was at the keyboard): the first file's header pinned flush, slid up and clipped at the column's top edge as the next header arrived, and at a deeper offset the second file's header pinned. The first wiring never fired: `bounds_for_item` reports layout bounds a scroll never moves, so the pin now adds the handle's clamped offset. A real wheel drive, the hand-off at a capped file's edge and the forecast column's pin (same helper and builders) were not driven on screen |
+| Conflict files fully expanded (owner, 2026-11-21, after feeling the capped frames' double scroll): every resolver takes its content height, the column is the only vertical scroll | Layout verified by screenshot on macOS, 2026-11-21: the tall fixture file runs from line 1 past the window edge with no inner frame edge; the scroll feel itself was not driven (no wheel input - the owner was at the keyboard) |
 | Found while verifying, unfixed: on some launches a virtualized resolver scrolls down on its own - the gpui list's scroll top climbs a couple of items per frame through the startup render burst while syntax highlighting streams in, and settles wherever the burst ends (seen at items 34 and 93 of 158, roughly one launch in three against the two-file fixture; wheel input plays no part) | Reproduced and logged on macOS, 2026-11-21, with a temporary local-path Kit patch printing `logical_scroll_top` per render. Kit-side, in `ConflictResolvVirtual` with gpui's `list`; the cause is not yet isolated, and the burst itself - hundreds of notifies while one file's highlighting streams in - deserves the same look |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 | Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
@@ -829,7 +833,12 @@ gpui's `list` layout for what advances the anchor during the highlight
 burst; quieting the burst itself may be the fix. Then iterate - the
 embedded editor in the middle pane (feed it the trusted stage texts, not
 the marker parse), the narrow-window fallback onto the Kit's inline
-conflict UI, and restoring the GitHub Cargo patch before merge.
+conflict UI, and restoring the GitHub Cargo patch before merge. Should a
+hugely conflicted file ever lag: a fully expanded frame makes the list
+lay out every unfolded row, so the folds are what keep it cheap now -
+the cure is the review view's idiom moved into the Kit, one virtualized
+list over all conflict files with the headers as items, which would
+also take over the app-side pinned header.
 
 On main, in this order, each one small enough to show the owner:
 

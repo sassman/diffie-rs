@@ -666,18 +666,18 @@ struct ResolverView {
 
 impl Render for ResolverView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The virtualized resolver scrolls itself, so it needs a definite
-        // height: its content's, capped below the viewport so a huge file
-        // scrolls within its frame and its neighbours stay reachable in
-        // the outer column.
+        // The virtualized resolver needs a definite height; it gets its full
+        // content's, so a file never scrolls within its frame and the
+        // conflicts column stays the one scroll surface, as the review view
+        // is. A viewport cap was tried and dropped: two nested scrolls felt
+        // wrong (owner, 2026-11-21).
         let rows = self.state.update(cx, |state, _| state.display_len());
         let content = ConflictResolvVirtual::HEADER_HEIGHT
             + ConflictResolvVirtual::row_height(window, cx) * rows as f32;
-        let cap = window.viewport_size().height * 0.8;
         div()
             .w_full()
             .flex_none()
-            .h(content.min(cap))
+            .h(content)
             .child(render_resolver(&self.state, &self.labels))
     }
 }
