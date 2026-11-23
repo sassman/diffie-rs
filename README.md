@@ -26,6 +26,20 @@ macOS, Windows and Linux.
   </a>
 </p>
 
+## Features
+
+- Review a whole branch, a commit range, or uncommitted changes
+- Pick and skip commits in the range, gaps allowed
+- Comment on lines and selections; comments anchor to the commit that
+  wrote the line and survive rebases
+- Mark files reviewed; "New for me" shows only what changed since
+- Reviews are TOML files under `.git/review/`, the repository is never touched
+- Agent loop: an agent reads your comments and answers them in place
+- Load GitHub PRs, publish comments, approve - only on your click
+- Cmd/Ctrl-click a name to jump to its definition
+- Keyboard-driven, with search across all commits and a command palette
+- Native Rust/GPUI, macOS, Linux, Windows
+
 This is an early alpha. Start with:
 
 - `docs/HANDOFF.md`: what exists, what was verified, what is next.

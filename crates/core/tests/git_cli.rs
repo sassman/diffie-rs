@@ -5,8 +5,8 @@ use std::process::Command;
 
 use diffie_core::review::{ReviewInput, ReviewedFile};
 use diffie_core::{
-    BackendError, CompareMode, Comparison, FileState, FileStatus, GitCli, NewSide, Oid,
-    ReviewBackend, Scope,
+    BackendError, CompareMode, Comparison, FileState, FileStatus, GitCli, NewSide, Oid, RepoState,
+    ResolutionPush, ReviewBackend, Scope,
 };
 
 fn git(directory: &Path, args: &[&str]) -> String {
@@ -18,6 +18,31 @@ fn git(directory: &Path, args: &[&str]) -> String {
         .env("GIT_AUTHOR_EMAIL", "ada@example.invalid")
         .env("GIT_COMMITTER_NAME", "Ada")
         .env("GIT_COMMITTER_EMAIL", "ada@example.invalid")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Like [`git`], but committing at a fixed instant so a test can assert
+/// the clocks the conflict labels carry.
+fn git_at(directory: &Path, date: &str, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Ada")
+        .env("GIT_AUTHOR_EMAIL", "ada@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Ada")
+        .env("GIT_COMMITTER_EMAIL", "ada@example.invalid")
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
@@ -55,6 +80,10 @@ impl Fixture {
         let root = directory.path();
         git(root, &["init", "-q", "-b", "main"]);
         git(root, &["config", "user.name", "Ada"]);
+        git(root, &["config", "user.email", "ada@example.invalid"]);
+        // The fixtures write and assert \n; Windows' default autocrlf
+        // would hand CRLF back after checkouts.
+        git(root, &["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("a.txt"), lines(&[])).unwrap();
         git(root, &["add", "."]);
         git(root, &["commit", "-q", "-m", "base"]);
@@ -1374,4 +1403,726 @@ fn opening_without_fetching_names_the_fetch_to_run() {
          `git fetch origin topic` and retry - diffie never fetches."
     );
     assert!(!backend.revision_exists(head.as_str()).unwrap());
+}
+
+/// Like [`git`], but for a merge or rebase that is expected to stop on a
+/// conflict: git exits non-zero, and that interrupted state is the fixture.
+fn git_conflicting(directory: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Ada")
+        .env("GIT_AUTHOR_EMAIL", "ada@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Ada")
+        .env("GIT_COMMITTER_EMAIL", "ada@example.invalid")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("git runs");
+    assert!(
+        !output.status.success(),
+        "git {args:?} should stop on a conflict"
+    );
+}
+
+/// `feat` and `main` both rewrite the one line of `t.txt`, so merging or
+/// rebasing one into the other always conflicts there; `calm.txt` only
+/// changes on `feat` and merges cleanly.
+struct ConflictFixture {
+    directory: tempfile::TempDir,
+}
+
+impl ConflictFixture {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.name", "Ada"]);
+        // The identity lives in the repo config, not just the test
+        // helper's env: continue commits through the backend, which
+        // inherits no env, and Windows' git refuses to guess an email.
+        git(root, &["config", "user.email", "ada@example.invalid"]);
+        git(root, &["config", "core.autocrlf", "false"]);
+        // diff3 markers carry the base section the resolver needs. Set on
+        // the throwaway repository; the app never touches a repo's config.
+        git(root, &["config", "merge.conflictStyle", "diff3"]);
+        // Commits detach a background auto-maintenance that briefly holds
+        // objects/maintenance.lock: a race against the no-write guard's
+        // object snapshots, and noise in a throwaway repository.
+        git(root, &["config", "maintenance.auto", "false"]);
+        git(root, &["config", "gc.auto", "0"]);
+        // Fixed commit instants so the label tests can assert the tips'
+        // clocks: feat's tip is four days before main's, feat's first
+        // commit five days before.
+        std::fs::write(root.join("t.txt"), "base line\n").unwrap();
+        std::fs::write(root.join("calm.txt"), "calm\n").unwrap();
+        git(root, &["add", "."]);
+        git_at(
+            root,
+            "2026-11-01T10:00:00+01:00",
+            &["commit", "-q", "-m", "base"],
+        );
+        git(root, &["checkout", "-q", "-b", "feat"]);
+        std::fs::write(root.join("t.txt"), "feat line\n").unwrap();
+        git_at(
+            root,
+            "2026-11-03T10:00:00+01:00",
+            &["commit", "-q", "-am", "feat rewrites t"],
+        );
+        std::fs::write(root.join("calm.txt"), "calm feat\n").unwrap();
+        git_at(
+            root,
+            "2026-11-04T10:00:00+01:00",
+            &["commit", "-q", "-am", "feat edits calm"],
+        );
+        git(root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("t.txt"), "main line\n").unwrap();
+        git_at(
+            root,
+            "2026-11-08T10:00:00+01:00",
+            &["commit", "-q", "-am", "main rewrites t"],
+        );
+        Self { directory }
+    }
+
+    fn root(&self) -> &Path {
+        self.directory.path()
+    }
+
+    fn backend(&self) -> GitCli {
+        GitCli::open(self.root()).unwrap()
+    }
+
+    /// Interrupt a merge of `feat` into `main`, conflicted on `t.txt`.
+    fn start_merge(&self) {
+        git_conflicting(self.root(), &["merge", "feat"]);
+    }
+
+    /// Interrupt a rebase of `feat` onto `main`: it stops at the first of
+    /// feat's two commits.
+    fn start_rebase(&self) {
+        git(self.root(), &["checkout", "-q", "feat"]);
+        git_conflicting(self.root(), &["rebase", "main"]);
+    }
+}
+
+#[test]
+fn repo_state_tells_a_merge_from_idle_per_worktree() {
+    let fixture = ConflictFixture::new();
+    assert_eq!(fixture.backend().repo_state().unwrap(), RepoState::Idle);
+
+    // A linked worktree on another branch stays idle while the main
+    // checkout merges: the state is read from the worktree's own git dir.
+    let aside = fixture.root().join("aside");
+    git(
+        fixture.root(),
+        &["worktree", "add", "-q", aside.to_str().unwrap(), "feat"],
+    );
+    fixture.start_merge();
+    assert_eq!(fixture.backend().repo_state().unwrap(), RepoState::Merge);
+    assert_eq!(
+        GitCli::open(&aside).unwrap().repo_state().unwrap(),
+        RepoState::Idle
+    );
+}
+
+#[test]
+fn repo_state_counts_rebase_progress() {
+    let fixture = ConflictFixture::new();
+    fixture.start_rebase();
+    assert_eq!(
+        fixture.backend().repo_state().unwrap(),
+        RepoState::Rebase { done: 1, total: 2 }
+    );
+}
+
+#[test]
+fn predicted_conflicts_see_the_collision_before_any_merge_starts() {
+    let fixture = ConflictFixture::new();
+    let objects_before = file_set(&fixture.root().join(".git/objects"));
+
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("feat", None, "main", None)
+        .unwrap();
+
+    assert_eq!(predicted.len(), 1);
+    assert_eq!(predicted[0].path, "t.txt");
+    let merged = predicted[0].merged.as_deref().unwrap();
+    assert!(merged.contains("<<<<<<< feat"), "{merged}");
+    assert!(merged.contains("feat line"), "{merged}");
+    assert!(merged.contains("main line"), "{merged}");
+    assert!(merged.contains(">>>>>>> main"), "{merged}");
+    // Prediction never starts the operation or writes merge objects into
+    // the repository: everything lands in the scratch directory.
+    assert_eq!(fixture.backend().repo_state().unwrap(), RepoState::Idle);
+    assert_eq!(
+        file_set(&fixture.root().join(".git/objects")),
+        objects_before
+    );
+}
+
+#[test]
+fn predicted_conflicts_stay_empty_for_branches_that_merge_cleanly() {
+    let fixture = ConflictFixture::new();
+    // Branched at the fixture's base commit so it shares no rewrite with
+    // feat: the two touch disjoint paths and the merge is clean.
+    git(fixture.root(), &["checkout", "-q", "-b", "docs", "feat~2"]);
+    std::fs::write(fixture.root().join("d.txt"), "docs\n").unwrap();
+    git(fixture.root(), &["add", "d.txt"]);
+    git(fixture.root(), &["commit", "-q", "-m", "docs add d"]);
+    git(fixture.root(), &["checkout", "-q", "main"]);
+
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("docs", None, "feat", None)
+        .unwrap();
+    assert_eq!(predicted, Vec::new());
+}
+
+#[test]
+fn predicted_conflicts_follow_the_pin_once_a_name_has_moved() {
+    let fixture = ConflictFixture::new();
+    let pinned = git(fixture.root(), &["rev-parse", "main"]);
+
+    // While the name and the pin agree, the name labels the markers.
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("feat", None, "main", Some(&pinned))
+        .unwrap();
+    let merged = predicted[0].merged.as_deref().unwrap();
+    assert!(merged.contains(">>>>>>> main"), "{merged}");
+
+    // Once main moves on, the review stays pinned: the forecast merges
+    // the pinned tip's content and the markers carry the pin.
+    git(fixture.root(), &["checkout", "-q", "main"]);
+    std::fs::write(fixture.root().join("t.txt"), "main line moved on\n").unwrap();
+    git(
+        fixture.root(),
+        &["commit", "-q", "-am", "main rewrites t again"],
+    );
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("feat", None, "main", Some(&pinned))
+        .unwrap();
+    let merged = predicted[0].merged.as_deref().unwrap();
+    assert!(merged.contains("main line\n"), "{merged}");
+    assert!(!merged.contains("main line moved on"), "{merged}");
+    assert!(merged.contains(&format!(">>>>>>> {pinned}")), "{merged}");
+}
+
+#[test]
+fn predicted_conflicts_keep_a_path_git_would_quote() {
+    let fixture = ConflictFixture::new();
+    // Added differently on both sides: a two-way conflict on a name that
+    // a C-quoting listing would mangle under LC_ALL=C.
+    git(fixture.root(), &["checkout", "-q", "feat"]);
+    std::fs::write(fixture.root().join("grüße.txt"), "feat greets\n").unwrap();
+    git(fixture.root(), &["add", "grüße.txt"]);
+    git(
+        fixture.root(),
+        &["commit", "-q", "-m", "feat adds greetings"],
+    );
+    git(fixture.root(), &["checkout", "-q", "main"]);
+    std::fs::write(fixture.root().join("grüße.txt"), "main greets\n").unwrap();
+    git(fixture.root(), &["add", "grüße.txt"]);
+    git(
+        fixture.root(),
+        &["commit", "-q", "-m", "main adds greetings"],
+    );
+
+    let predicted = fixture
+        .backend()
+        .predicted_conflicts("feat", None, "main", None)
+        .unwrap();
+    let greeting = predicted
+        .iter()
+        .find(|conflict| conflict.path == "grüße.txt")
+        .expect("the quoted-name path is listed verbatim");
+    let merged = greeting.merged.as_deref().unwrap();
+    assert!(merged.contains("feat greets"), "{merged}");
+    assert!(merged.contains("main greets"), "{merged}");
+}
+
+/// Every file under `directory`, relative, sorted: an assertion on the
+/// set names the file that appeared or vanished, where a count only says
+/// that one did.
+fn file_set(directory: &Path) -> Vec<String> {
+    fn walk(root: &Path, directory: &Path, into: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(root, &path, into);
+            } else if let Ok(relative) = path.strip_prefix(root) {
+                into.push(relative.display().to_string());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(directory, directory, &mut files);
+    files.sort();
+    files
+}
+
+/// A bare repository beside the fixture, wired up as remote `o` with the
+/// fixture's branches pushed, so a resolution push has somewhere real to
+/// land without the network.
+fn bare_remote(fixture: &ConflictFixture) -> tempfile::TempDir {
+    let remote = tempfile::tempdir().unwrap();
+    let url = remote.path().to_str().unwrap().to_string();
+    git(fixture.root(), &["init", "-q", "--bare", &url]);
+    git(fixture.root(), &["remote", "add", "o", &url]);
+    git(fixture.root(), &["push", "-q", "o", "main", "feat"]);
+    remote
+}
+
+#[test]
+fn push_resolution_builds_the_merge_and_moves_only_the_remote_branch() {
+    let fixture = ConflictFixture::new();
+    let remote = bare_remote(&fixture);
+    let feat = git(fixture.root(), &["rev-parse", "feat"]);
+    let main = git(fixture.root(), &["rev-parse", "main"]);
+
+    let pushed = fixture
+        .backend()
+        .push_resolution(&ResolutionPush {
+            remote: "o".into(),
+            branch: "feat".into(),
+            source: feat.clone(),
+            target: main.clone(),
+            message: "Merge branch 'main' into feat".into(),
+            resolutions: vec![("t.txt".into(), "merged line\n".into())],
+        })
+        .unwrap();
+
+    // The remote branch is the pushed merge commit, parented on the two
+    // tips, carrying the resolution and the clean side of the merge.
+    assert_eq!(git(remote.path(), &["rev-parse", "feat"]), pushed.as_str());
+    assert_eq!(
+        git(
+            fixture.root(),
+            &["log", "-1", "--format=%P", pushed.as_str()]
+        ),
+        format!("{feat} {main}")
+    );
+    assert_eq!(
+        git(
+            fixture.root(),
+            &["show", &format!("{}:t.txt", pushed.as_str())]
+        ),
+        "merged line"
+    );
+    assert_eq!(
+        git(
+            fixture.root(),
+            &["show", &format!("{}:calm.txt", pushed.as_str())]
+        ),
+        "calm feat"
+    );
+    // Nothing local moved: branch, working tree, index, operation state.
+    assert_eq!(git(fixture.root(), &["rev-parse", "feat"]), feat);
+    assert_eq!(git(fixture.root(), &["status", "--porcelain"]), "");
+    assert_eq!(fixture.backend().repo_state().unwrap(), RepoState::Idle);
+}
+
+#[test]
+fn push_resolution_refuses_an_uncovered_conflict_and_touches_nothing() {
+    let fixture = ConflictFixture::new();
+    let remote = bare_remote(&fixture);
+    let feat = git(fixture.root(), &["rev-parse", "feat"]);
+    let main = git(fixture.root(), &["rev-parse", "main"]);
+
+    let error = fixture
+        .backend()
+        .push_resolution(&ResolutionPush {
+            remote: "o".into(),
+            branch: "feat".into(),
+            source: feat.clone(),
+            target: main,
+            message: "Merge branch 'main' into feat".into(),
+            resolutions: Vec::new(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("t.txt"), "{error}");
+    assert_eq!(git(remote.path(), &["rev-parse", "feat"]), feat);
+}
+
+#[test]
+fn push_resolution_refuses_a_resolution_the_merge_did_not_conflict_on() {
+    let fixture = ConflictFixture::new();
+    let remote = bare_remote(&fixture);
+    let feat = git(fixture.root(), &["rev-parse", "feat"]);
+    let main = git(fixture.root(), &["rev-parse", "main"]);
+
+    // calm.txt merges cleanly; a stale resolution for it must refuse, not
+    // bury the cleanly merged content.
+    let error = fixture
+        .backend()
+        .push_resolution(&ResolutionPush {
+            remote: "o".into(),
+            branch: "feat".into(),
+            source: feat.clone(),
+            target: main,
+            message: "Merge branch 'main' into feat".into(),
+            resolutions: vec![
+                ("t.txt".into(), "merged line\n".into()),
+                ("calm.txt".into(), "stale\n".into()),
+            ],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("calm.txt"), "{error}");
+    assert_eq!(git(remote.path(), &["rev-parse", "feat"]), feat);
+}
+
+#[test]
+fn push_resolution_rejects_a_head_branch_that_moved_on() {
+    let fixture = ConflictFixture::new();
+    let remote = bare_remote(&fixture);
+    let pinned = git(fixture.root(), &["rev-parse", "feat"]);
+    let main = git(fixture.root(), &["rev-parse", "main"]);
+    // The branch moves on after the review pinned its head: the push must
+    // come back rejected instead of overwriting the newer work.
+    git(fixture.root(), &["checkout", "-q", "feat"]);
+    std::fs::write(fixture.root().join("calm.txt"), "calm moved on\n").unwrap();
+    git(fixture.root(), &["commit", "-q", "-am", "feat moves on"]);
+    git(fixture.root(), &["push", "-q", "o", "feat"]);
+    let moved = git(fixture.root(), &["rev-parse", "feat"]);
+
+    let result = fixture.backend().push_resolution(&ResolutionPush {
+        remote: "o".into(),
+        branch: "feat".into(),
+        source: pinned,
+        target: main,
+        message: "Merge branch 'main' into feat".into(),
+        resolutions: vec![("t.txt".into(), "merged line\n".into())],
+    });
+
+    assert!(result.is_err());
+    assert_eq!(git(remote.path(), &["rev-parse", "feat"]), moved);
+}
+
+#[test]
+fn forecast_labels_name_the_sides_with_their_clocks() {
+    let fixture = ConflictFixture::new();
+    let labels = fixture
+        .backend()
+        .forecast_labels("feat", "feat", "main", "main")
+        .unwrap();
+    assert_eq!(labels.yours, "feat");
+    assert_eq!(labels.upstream, "main");
+    assert_eq!(labels.yours_date, "2026-11-04 10:00");
+    assert!(labels.yours_time < labels.upstream_time);
+}
+
+#[test]
+fn conflicts_name_the_sides_of_a_merge() {
+    let fixture = ConflictFixture::new();
+    fixture.start_merge();
+    let conflicts = fixture.backend().conflicts().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    let file = &conflicts[0];
+    assert_eq!(file.path, "t.txt");
+    // Merging feat into main: git's ours is main, the user's own branch.
+    assert_eq!(file.base.as_deref(), Some("base line\n"));
+    assert_eq!(file.yours.as_deref(), Some("main line\n"));
+    assert_eq!(file.upstream.as_deref(), Some("feat line\n"));
+    assert_eq!(file.labels.yours, "main");
+    assert_eq!(file.labels.upstream, "feat");
+    // The yours tip anchors the recency comparison: its absolute date on
+    // the committer's clock, and feat's tip four days behind it.
+    assert_eq!(file.labels.yours_date, "2026-11-08 10:00");
+    assert_eq!(
+        file.labels.yours_time - file.labels.upstream_time,
+        4 * 86_400
+    );
+    // diff3 working text: both sides, the base section, all markers.
+    assert!(file.working.contains("<<<<<<<"));
+    assert!(file.working.contains("|||||||"));
+    assert!(file.working.contains(">>>>>>>"));
+    assert!(file.working.contains("main line"));
+    assert!(file.working.contains("feat line"));
+    assert!(file.working.contains("base line"));
+}
+
+#[test]
+fn conflicts_swap_the_sides_of_a_rebase() {
+    let fixture = ConflictFixture::new();
+    fixture.start_rebase();
+    let conflicts = fixture.backend().conflicts().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    let file = &conflicts[0];
+    assert_eq!(file.path, "t.txt");
+    // Rebasing feat onto main: git's ours is main - the upstream being
+    // rebased onto - and theirs is the user's replayed commit.
+    assert_eq!(file.base.as_deref(), Some("base line\n"));
+    assert_eq!(file.yours.as_deref(), Some("feat line\n"));
+    assert_eq!(file.upstream.as_deref(), Some("main line\n"));
+    assert_eq!(file.labels.yours, "feat rewrites t");
+    assert_eq!(file.labels.upstream, "main");
+    // The replayed commit anchors the comparison; the onto tip is five
+    // days ahead of it.
+    assert_eq!(file.labels.yours_date, "2026-11-03 10:00");
+    assert_eq!(
+        file.labels.upstream_time - file.labels.yours_time,
+        5 * 86_400
+    );
+    assert!(file.working.contains("<<<<<<<"));
+}
+
+#[test]
+fn conflicts_flag_a_side_that_is_not_text() {
+    let fixture = ConflictFixture::new();
+    let root = fixture.root();
+    // Both branches add raw.bin with clashing bytes; feat's side is not
+    // UTF-8, so its lossy text must never be written back.
+    git(root, &["checkout", "-q", "feat"]);
+    std::fs::write(root.join("raw.bin"), [0xff, 0xfe, 0x00]).unwrap();
+    git(root, &["add", "raw.bin"]);
+    git(root, &["commit", "-q", "-m", "feat adds raw"]);
+    git(root, &["checkout", "-q", "main"]);
+    std::fs::write(root.join("raw.bin"), "text\n").unwrap();
+    git(root, &["add", "raw.bin"]);
+    git(root, &["commit", "-q", "-m", "main adds raw"]);
+    fixture.start_merge();
+
+    let conflicts = fixture.backend().conflicts().unwrap();
+    assert_eq!(conflicts.len(), 2);
+    assert_eq!(conflicts[0].path, "raw.bin");
+    assert!(conflicts[0].binary);
+    assert_eq!(conflicts[1].path, "t.txt");
+    assert!(!conflicts[1].binary);
+}
+
+#[test]
+fn resolve_file_takes_glob_characters_in_a_path_literally() {
+    let fixture = ConflictFixture::new();
+    let root = fixture.root();
+    // As a glob pathspec `a[b].txt` matches ab.txt and never itself, so
+    // both files conflict and only literal matching stages the right one.
+    for (branch, text) in [("feat", "feat\n"), ("main", "main\n")] {
+        git(root, &["checkout", "-q", branch]);
+        std::fs::write(root.join("a[b].txt"), text).unwrap();
+        std::fs::write(root.join("ab.txt"), text).unwrap();
+        git(root, &["add", "a[b].txt", "ab.txt"]);
+        git(root, &["commit", "-q", "-m", "adds bracket files"]);
+    }
+    fixture.start_merge();
+    let backend = fixture.backend();
+    backend.resolve_file("a[b].txt", "settled\n").unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("a[b].txt")).unwrap(),
+        "settled\n"
+    );
+    assert_eq!(
+        git(root, &["ls-files", "-u", "--", ":(literal)a[b].txt"]),
+        ""
+    );
+    assert_ne!(git(root, &["ls-files", "-u", "--", ":(literal)ab.txt"]), "");
+
+    backend.unresolve_file("a[b].txt").unwrap();
+    assert_ne!(
+        git(root, &["ls-files", "-u", "--", ":(literal)a[b].txt"]),
+        ""
+    );
+}
+
+#[test]
+fn conflicts_label_the_rebase_upstream_the_user_named() {
+    let fixture = ConflictFixture::new();
+    let root = fixture.root();
+    // `release` and `main` share the onto commit; only the reflog's
+    // rebase start entry knows which one the user typed.
+    git(root, &["branch", "release", "main"]);
+    git(root, &["checkout", "-q", "feat"]);
+    git_conflicting(root, &["rebase", "release"]);
+
+    let conflicts = fixture.backend().conflicts().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].labels.upstream, "release");
+}
+
+#[test]
+fn resolve_file_writes_and_stages_the_resolution() {
+    let fixture = ConflictFixture::new();
+    fixture.start_merge();
+    let backend = fixture.backend();
+    backend.resolve_file("t.txt", "settled\n").unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(fixture.root().join("t.txt")).unwrap(),
+        "settled\n"
+    );
+    assert_eq!(git(fixture.root(), &["ls-files", "-u", "--", "t.txt"]), "");
+    assert!(backend.conflicts().unwrap().is_empty());
+    // Staging the last file does not continue anything by itself.
+    assert_eq!(backend.repo_state().unwrap(), RepoState::Merge);
+
+    // A path without a conflict is outside the narrow write exception.
+    assert!(matches!(
+        backend.resolve_file("calm.txt", "no\n"),
+        Err(BackendError::NotConflicted(path)) if path == "calm.txt"
+    ));
+}
+
+#[test]
+fn unresolve_file_regenerates_markers_after_staging_in_a_merge() {
+    let fixture = ConflictFixture::new();
+    fixture.start_merge();
+    let backend = fixture.backend();
+    backend.resolve_file("t.txt", "settled\n").unwrap();
+    backend.unresolve_file("t.txt").unwrap();
+
+    assert_ne!(git(fixture.root(), &["ls-files", "-u", "--", "t.txt"]), "");
+    let conflicts = backend.conflicts().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    let file = &conflicts[0];
+    // The markers are back; their labels are generic, so only the stage
+    // texts and the stored labels are trusted, never the marker lines.
+    assert!(file.working.contains("<<<<<<<"));
+    assert_eq!(file.yours.as_deref(), Some("main line\n"));
+    assert_eq!(file.upstream.as_deref(), Some("feat line\n"));
+}
+
+#[test]
+fn unresolve_file_regenerates_markers_after_staging_in_a_rebase() {
+    let fixture = ConflictFixture::new();
+    fixture.start_rebase();
+    let backend = fixture.backend();
+    backend.resolve_file("t.txt", "settled\n").unwrap();
+    backend.unresolve_file("t.txt").unwrap();
+
+    assert_ne!(git(fixture.root(), &["ls-files", "-u", "--", "t.txt"]), "");
+    let conflicts = backend.conflicts().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    let file = &conflicts[0];
+    assert!(file.working.contains("<<<<<<<"));
+    // The swap still holds after regeneration.
+    assert_eq!(file.yours.as_deref(), Some("feat line\n"));
+    assert_eq!(file.upstream.as_deref(), Some("main line\n"));
+}
+
+#[test]
+fn continue_finishes_a_merge_and_abort_discards_one() {
+    let fixture = ConflictFixture::new();
+    fixture.start_merge();
+    let backend = fixture.backend();
+    backend.resolve_file("t.txt", "settled\n").unwrap();
+    // GIT_EDITOR=true keeps `merge --continue` from waiting on an editor.
+    backend.continue_op().unwrap();
+    assert_eq!(backend.repo_state().unwrap(), RepoState::Idle);
+    // A real merge commit: two parents, carrying the resolution.
+    git(fixture.root(), &["rev-parse", "--verify", "HEAD^2"]);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root().join("t.txt")).unwrap(),
+        "settled\n"
+    );
+
+    let fixture = ConflictFixture::new();
+    fixture.start_merge();
+    let backend = fixture.backend();
+    backend.abort_op().unwrap();
+    assert_eq!(backend.repo_state().unwrap(), RepoState::Idle);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root().join("t.txt")).unwrap(),
+        "main line\n"
+    );
+}
+
+#[test]
+fn continue_finishes_a_rebase_and_abort_discards_one() {
+    let fixture = ConflictFixture::new();
+    fixture.start_rebase();
+    let backend = fixture.backend();
+    backend.resolve_file("t.txt", "settled\n").unwrap();
+    // The second commit replays cleanly, so one continue finishes it all.
+    backend.continue_op().unwrap();
+    assert_eq!(backend.repo_state().unwrap(), RepoState::Idle);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root().join("t.txt")).unwrap(),
+        "settled\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root().join("calm.txt")).unwrap(),
+        "calm feat\n"
+    );
+
+    let fixture = ConflictFixture::new();
+    fixture.start_rebase();
+    let backend = fixture.backend();
+    backend.abort_op().unwrap();
+    assert_eq!(backend.repo_state().unwrap(), RepoState::Idle);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root().join("t.txt")).unwrap(),
+        "feat line\n"
+    );
+}
+
+#[test]
+fn continue_and_abort_refuse_an_idle_repository() {
+    let fixture = ConflictFixture::new();
+    let backend = fixture.backend();
+    assert!(matches!(
+        backend.continue_op(),
+        Err(BackendError::NoOperation)
+    ));
+    assert!(matches!(backend.abort_op(), Err(BackendError::NoOperation)));
+}
+
+#[test]
+fn continue_reports_the_next_conflicted_commit_as_progress() {
+    // Two feat commits, each conflicting with main: git exits non-zero
+    // when the continue stops at the second one, but that stop is
+    // progress, not a refusal.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.name", "Ada"]);
+    git(root, &["config", "user.email", "ada@example.invalid"]);
+    git(root, &["config", "core.autocrlf", "false"]);
+    std::fs::write(root.join("t.txt"), "base t\n").unwrap();
+    std::fs::write(root.join("c.txt"), "base c\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "feat"]);
+    std::fs::write(root.join("t.txt"), "feat t\n").unwrap();
+    git(root, &["commit", "-q", "-am", "feat t"]);
+    std::fs::write(root.join("c.txt"), "feat c\n").unwrap();
+    git(root, &["commit", "-q", "-am", "feat c"]);
+    git(root, &["checkout", "-q", "main"]);
+    std::fs::write(root.join("t.txt"), "main t\n").unwrap();
+    std::fs::write(root.join("c.txt"), "main c\n").unwrap();
+    git(root, &["commit", "-q", "-am", "main both"]);
+    git(root, &["checkout", "-q", "feat"]);
+    git_conflicting(root, &["rebase", "main"]);
+
+    let backend = GitCli::open(root).unwrap();
+    assert_eq!(
+        backend.repo_state().unwrap(),
+        RepoState::Rebase { done: 1, total: 2 }
+    );
+    backend.resolve_file("t.txt", "resolved t\n").unwrap();
+    backend.continue_op().unwrap();
+    assert_eq!(
+        backend.repo_state().unwrap(),
+        RepoState::Rebase { done: 2, total: 2 }
+    );
+    let conflicts = backend.conflicts().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].path, "c.txt");
+    // With the conflict still unresolved the state cannot move: that
+    // continue is a genuine refusal and keeps git's words.
+    assert!(matches!(
+        backend.continue_op(),
+        Err(BackendError::Git { .. })
+    ));
+    backend.resolve_file("c.txt", "resolved c\n").unwrap();
+    backend.continue_op().unwrap();
+    assert_eq!(backend.repo_state().unwrap(), RepoState::Idle);
 }

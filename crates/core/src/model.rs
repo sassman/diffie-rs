@@ -185,6 +185,97 @@ pub struct ChangedRegion {
     pub new_lines: usize,
 }
 
+/// Whether the repository sits in an interrupted merge or rebase. Polled on
+/// load and reload only; while not [`RepoState::Idle`] the UI offers the
+/// conflict view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepoState {
+    Idle,
+    Merge,
+    /// `done` is the 1-based number of the commit the rebase stopped on,
+    /// `total` how many it set out to replay: "commit `done` of `total`".
+    Rebase {
+        done: usize,
+        total: usize,
+    },
+}
+
+/// One unmerged path of an interrupted merge or rebase, with git's sides
+/// already mapped to the review's semantic names: `yours` is always the
+/// reviewer's own work, `upstream` what it collides with, whichever stage
+/// git stored each in. The mapping lives in the backend, nowhere else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictFile {
+    pub path: String,
+    /// The common ancestor's text. Missing when both sides added the path.
+    pub base: Option<String>,
+    /// The reviewer's side. Missing when their side deleted the path.
+    pub yours: Option<String>,
+    /// The side being merged in or rebased onto. Missing when it deleted
+    /// the path.
+    pub upstream: Option<String>,
+    /// The marker-laden working-tree text, empty when the file is gone.
+    /// Markers carry generic side labels, so they are display material
+    /// only; the texts and labels above are what resolution trusts.
+    pub working: String,
+    /// Some side's bytes are not valid UTF-8, so the texts above are lossy
+    /// decodes: fine to show, never to write back as a resolution.
+    pub binary: bool,
+    pub labels: ConflictLabels,
+}
+
+/// What the conflict panes are suffixed with. The strings "ours" and
+/// "theirs" never appear: a merge names the two branches, a rebase names
+/// the upstream and the replayed commit's title.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictLabels {
+    pub yours: String,
+    pub upstream: String,
+    /// When the reviewer's tip was committed, on the committer's own
+    /// clock ("2026-11-17 14:02"). The yours pane anchors the comparison
+    /// with this absolute date; the upstream pane is phrased relative to
+    /// it from the two times below. Empty when the tip could not be read.
+    pub yours_date: String,
+    /// The two tips' commit times, unix seconds; 0 when unreadable.
+    pub yours_time: i64,
+    pub upstream_time: i64,
+}
+
+/// One path a merge of the comparison's tips would collide on, predicted
+/// without starting the merge: nothing in the repository moves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PredictedConflict {
+    pub path: String,
+    /// Git's auto-merge of the file, conflict markers included, labelled
+    /// with the two revisions as passed: the source tip is the current
+    /// side of each marker, the target the incoming one. `None` when the
+    /// merged file is not text or one side deleted it; the path still
+    /// deserves its warning, there is just nothing to show inline.
+    pub merged: Option<String>,
+}
+
+/// One push of a conflict resolution to a pull request's head branch
+/// (owner-sanctioned, design document section 20): the merge commit is
+/// built from objects alone, and the only ref that moves anywhere is the
+/// remote branch, on the reviewer's confirmed click.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolutionPush {
+    pub remote: String,
+    /// The pull request's head branch on that remote.
+    pub branch: String,
+    /// The pinned head the review ran on: the merge commit's first
+    /// parent, and the safety anchor - a branch that moved on since
+    /// rejects the push, nothing is ever forced.
+    pub source: String,
+    /// The base tip merged in: the second parent.
+    pub target: String,
+    /// The merge commit's message.
+    pub message: String,
+    /// Every conflicted path with its resolved contents, full text; the
+    /// push refuses when the merge's conflicted set is not covered.
+    pub resolutions: Vec<(String, String)>,
+}
+
 /// The commit that wrote a line, and the line's number in that commit's
 /// version of the file. This pair is what a comment is anchored to.
 #[derive(Clone, Debug, PartialEq, Eq)]

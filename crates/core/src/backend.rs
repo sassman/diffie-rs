@@ -4,7 +4,8 @@
 //! from the render path, and must be able to show a loading state for each.
 
 use crate::model::{
-    BlameLine, ChangedRegion, Commit, Comparison, LineOrigin, Oid, Resolved, Scope, ScopedPatch,
+    BlameLine, ChangedRegion, Commit, Comparison, ConflictFile, ConflictLabels, LineOrigin, Oid,
+    PredictedConflict, RepoState, ResolutionPush, Resolved, Scope, ScopedPatch,
 };
 use crate::review::ReviewInput;
 
@@ -20,6 +21,12 @@ pub enum BackendError {
     NoMergeBase { source_rev: String, target: String },
     #[error("git {command} failed: {stderr}")]
     Git { command: String, stderr: String },
+    #[error("no merge or rebase is in progress")]
+    NoOperation,
+    #[error("`{0}` has no conflict to resolve")]
+    NotConflicted(String),
+    #[error("the merge still conflicts on {0}; resolve every path before pushing")]
+    UnresolvedPaths(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -147,6 +154,81 @@ pub trait ReviewBackend: Send + Sync {
     /// request whose commits are not here yet. Never touches local
     /// branches, the index or the working tree.
     fn fetch(&self, remote: &str, refspecs: &[String]) -> Result<()>;
+
+    /// Whether the repository sits in an interrupted merge or rebase.
+    /// Read per worktree: a merge in one checkout leaves the others idle.
+    fn repo_state(&self) -> Result<RepoState>;
+
+    /// The checked-out branch, `None` on a detached HEAD. The UI needs it
+    /// where a comparison's source names no revision (an uncommitted
+    /// review) but the work still has a committed tip to reason from.
+    fn current_branch(&self) -> Result<Option<String>>;
+
+    /// Every unmerged path of the interrupted operation, sides already
+    /// mapped to yours/upstream and labelled for display. Empty when
+    /// [`Self::repo_state`] is idle.
+    fn conflicts(&self) -> Result<Vec<ConflictFile>>;
+
+    /// The paths a merge of `source` into `target` would collide on,
+    /// each with git's auto-merged text, markers included. Purely
+    /// predictive: merge objects go to a scratch directory and the
+    /// repository, its index and its working tree stay untouched. Empty
+    /// means the merge would be clean.
+    ///
+    /// The names feed git's marker labels, so each side is merged under
+    /// its name - unless its pin says the name has moved on: a review
+    /// pinned to a startup or pull-request revision must forecast that
+    /// revision, not whatever a local branch of the same name points at
+    /// today.
+    fn predicted_conflicts(
+        &self,
+        source: &str,
+        source_pin: Option<&str>,
+        target: &str,
+        target_pin: Option<&str>,
+    ) -> Result<Vec<PredictedConflict>>;
+
+    /// The labels a forecast's resolver panes carry, in the shape an
+    /// interrupted operation's labels have: yours is the source side,
+    /// upstream the target. The names are display material (a branch
+    /// that only exists on the forge still labels its pane); the clocks
+    /// come from the revisions, which must resolve here.
+    fn forecast_labels(
+        &self,
+        source: &str,
+        source_rev: &str,
+        target: &str,
+        target_rev: &str,
+    ) -> Result<ConflictLabels>;
+
+    /// Build the merge commit that resolves a pull request's predicted
+    /// conflicts and push it to the pull request's head branch. The
+    /// second sanctioned write family (owner decision, 2026-11-20,
+    /// design document section 20): blobs, trees and one commit enter
+    /// the object database - no local ref, index or working-tree change -
+    /// and the remote branch moves only by this explicitly confirmed
+    /// push, never forced. Returns the pushed commit.
+    fn push_resolution(&self, push: &ResolutionPush) -> Result<Oid>;
+
+    /// Write `contents` as the resolution of `path` and stage it. The one
+    /// sanctioned repository write: only a path that is unmerged in the
+    /// index may be written, anything else is [`BackendError::NotConflicted`].
+    /// Full text crosses this boundary, never a patch.
+    fn resolve_file(&self, path: &str, contents: &str) -> Result<()>;
+
+    /// Put the conflict markers back for `path`, even after it was staged
+    /// by [`Self::resolve_file`]. The regenerated markers carry generic
+    /// side labels, so callers keep trusting [`ConflictFile`], not them.
+    fn unresolve_file(&self, path: &str) -> Result<()>;
+
+    /// Continue the interrupted merge or rebase. An error carries git's
+    /// stderr verbatim; in an idle repository it is
+    /// [`BackendError::NoOperation`].
+    fn continue_op(&self) -> Result<()>;
+
+    /// Abort the interrupted merge or rebase, discarding resolutions. The
+    /// same errors as [`Self::continue_op`].
+    fn abort_op(&self) -> Result<()>;
 
     /// The reviewer's name as git knows it (`user.name`).
     fn author_name(&self) -> Result<String>;
