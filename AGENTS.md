@@ -50,6 +50,10 @@ Windows and Linux.
    PR's commits are not here - objects and remote-tracking refs only, on
    that explicit click, never in the background. The CLI still never
    fetches.
+   One sanctioned exception (design document, section 20): while an
+   interrupted merge or rebase exists, the app may write resolved content
+   to paths that are unmerged in the index, stage exactly those paths, and
+   run continue or abort - each only on the reviewer's explicit click.
 6. **Never block the UI thread.** Backend calls and file writes run in
    background tasks. Every load has a loading state and discards stale
    results (see the `revision` counter in `app.rs`).

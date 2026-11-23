@@ -11,7 +11,6 @@ use std::ops::Range;
 
 use super::*;
 use diffie_symbols::{FileSymbols, Origin, RevisionView, SymbolIndex, Target};
-use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::diff::DiffTextPosition;
 use gpui_kit::{Modifiers, MouseButton, Pixels, Point, anchored, point};
