@@ -936,3 +936,81 @@ Open:
 - The block editor scrolls its long lines within its own width instead
   of following the pane's horizontal scroll, so columns can shear at a
   resolved block; whether the pane should drive one shared offset.
+
+## 21. Stacked pull requests
+
+Decided (owner, 2026-11-24):
+
+- **Wording.** A stack's ends are "latest" (the tip, listed first) and
+  "first" (nearest the target branch, merged first). The latest end reads
+  "latest PRs on the stack". "Top", "bottom", "parent" and "child" stay
+  out of the UI, as "merge-base" already does.
+- **A stack is one comparison.** `--stack <no>` pins `source` to the
+  latest member's head and `target` to the first member's base, and the
+  window keeps exactly one `PerReview`. A stack is a labelling of that
+  comparison's commits, never several concurrent reviews, so `adopt`
+  keeps replacing the review wholesale and the single-slot tasks stay
+  single-slot. `PerReview` carries `stack`; `pull` holds the latest
+  member so the pull-request button and its status keep working.
+- **Detection reads GitHub's native stack first.** A pull request carries
+  a `stack` object and one query returns every member with its position,
+  so membership survives a member merging or closing, which ref chaining
+  does not. Ref chaining - a member's base is the one below it's head -
+  is the fallback, needed because native stacks are GitHub.com only and
+  forbid forks. The fallback compares repository id with ref, never a
+  bare branch name, and counts merged and closed members as structural.
+  A chain broken by retargeting yields a shorter stack, never an error.
+- **The picker groups by member**, latest first, replacing the review-state
+  split while a stack is in view; without one it renders as before. A
+  stack is linear, so the commit list partitions into contiguous ranges
+  and the existing group machinery carries this: a header with the
+  member's state icon, its number and branch, and the `{checked} of
+  {len}` counter that already stands in for a tristate checkbox.
+  Already-reviewed commits keep their muted treatment as row styling.
+- **A comment publishes to the member that owns its commit.** Comments
+  already attach to the commit that wrote the line, and every published
+  card carries a link to its forge copy, so a comment landing on another
+  member is visible rather than mysterious. One publish becomes one
+  review per member that has comments - one notification each, none for
+  a member with nothing to say. A comment whose commit belongs to no
+  member stays unpublished and the status bar counts it.
+- **GitHub is reached through `octocrab`, not the `gh` CLI**, migrated
+  first on its own with no behaviour change. The implementation moves to
+  a `diffie-github` crate on the `diffie-symbols` precedent, so the core
+  keeps its three dependencies and nothing async enters it; the trait
+  stays sync and the crate blocks on one current-thread runtime. The
+  token comes from `GITHUB_TOKEN`, then `GH_TOKEN`, then `gh auth token`,
+  so a developer still configures nothing. Pagination replaces the
+  fifty-pull-request cap, which stack detection makes a correctness
+  matter rather than a cosmetic one.
+
+Assumed (working defaults):
+
+- **Verdicts stay per member.** Approve and request-changes are reached
+  by navigating to a member, not applied across the stack: approving is
+  heavier than commenting and five approvals on one click should be
+  asked for, not inferred.
+- A commit no member claims, which needs non-linear history, falls into
+  a trailing muted group, "Not in a pull request".
+- The stack button sits beside the pull-request button at the same
+  metrics, labelled with the stack's number and size, or with the member
+  count alone when ref chaining found it and there is no number. Its
+  menu lists the members in the pull-request picker's row style, each
+  opening that member as a plain `--pr` review.
+- `--stack` takes a number that may name either a pull request or a
+  stack, since both come from one sequence: it is read as a pull request
+  first, then as a stack.
+- Third-party tool stacks are found by ref chaining alone. `ghstack` and
+  `spr`'s default mode point at a synthetic base, so chaining cannot see
+  them; they and Sapling and `av` each write a parseable block into the
+  body instead, and Graphite writes nothing.
+
+Open:
+
+- Whether to parse those body markers.
+- Whether a verdict should ever apply across a whole stack.
+- Whether a stack's comments belong in one review file or one per
+  member. They land in the latest branch's file today, because a review
+  file is keyed by the comparison's source branch, and so sit apart from
+  the files the same commits get when reviewed one at a time.
+- Whether the palette should list stacks whose every member is closed.
