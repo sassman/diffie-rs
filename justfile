@@ -18,3 +18,6 @@ release-prepare version:
     perl -pi -e 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
     cargo update --workspace
     git-cliff --tag v{{version}} --output CHANGELOG.md
+    # Only the version a visitor installs; the page's other version names the
+    # release its demo clips were recorded from and moves with the clips.
+    perl -pi -e 's/(?<=class="app-version">)v[0-9.]+/v{{version}}/' website/index.html

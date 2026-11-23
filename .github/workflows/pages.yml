@@ -1,0 +1,37 @@
+name: Pages
+on:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# One site is live at a time, so a running deploy finishes instead of being
+# cancelled: a half-uploaded site must never be what visitors get served.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/configure-pages@v6
+      # The page is static HTML and CSS: the folder ships as it stands, there
+      # is nothing to build.
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: website
+      - id: deploy
+        uses: actions/deploy-pages@v5
