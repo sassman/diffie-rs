@@ -317,8 +317,16 @@ header nav.scrolled {
   grid-template-columns: 1fr;
   gap: 1rem;
 }
-@media (min-width: 640px) { .cards { grid-template-columns: repeat(2, 1fr); } }
-@media (min-width: 1024px) { .cards { grid-template-columns: repeat(4, 1fr); } }
+/* nine cards: three by three on a desktop. In the two-column band the last
+   one would hang alone, so it takes the full row */
+@media (min-width: 640px) {
+  .cards { grid-template-columns: repeat(2, 1fr); }
+  .cards > .card:last-child { grid-column: span 2; }
+}
+@media (min-width: 1024px) {
+  .cards { grid-template-columns: repeat(3, 1fr); }
+  .cards > .card:last-child { grid-column: auto; }
+}
 
 .card {
   position: relative;

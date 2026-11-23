@@ -9,8 +9,8 @@
 <meta property="og:title" content="diffie - review git changes, commit by commit">
 <meta property="og:description" content="A native desktop app for reading git changes commit by commit. You comment, they fix, you decide.">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://sassman.github.io/diffie-rs/">
-<meta property="og:image" content="https://sassman.github.io/diffie-rs/assets/main-screen-hero.png">
+<meta property="og:url" content="https://diffie.app/">
+<meta property="og:image" content="https://diffie.app/assets/main-screen-hero.png">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" type="image/svg+xml" href="assets/icon.svg">
 <link rel="icon" type="image/png" sizes="256x256" href="assets/icon-256.png">
@@ -70,8 +70,8 @@
         <a class="btn-secondary" href="https://github.com/sassman/diffie-rs">View on GitHub</a>
       </div>
       <p class="hero-meta rise" style="animation-delay:.3s">
-        <span class="app-version">v0.3.0</span> &middot; free &middot; early alpha &middot;
-        macOS &amp; Linux &middot; Windows untested
+        <span class="app-version">v0.4.0</span> &middot; free &middot; early alpha &middot;
+        tested on macOS only
       </p>
       <div class="hero-shot rise" style="animation-delay:.38s">
         <div class="halo"></div>
@@ -150,6 +150,13 @@
         </div>
         <div class="card glass">
           <div class="corner-glow"></div>
+          <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="6.5" cy="5.5" r="2.5"/><circle cx="17.5" cy="5.5" r="2.5"/><path d="M6.5 8v2a4 4 0 0 0 4 4h3"/><path d="M17.5 8v2a4 4 0 0 1-4 4h-3"/><circle cx="12" cy="18.5" r="2.5"/></svg></span>
+          <h3>Conflicts, fixed in the review</h3>
+          <p>A review warns while you read when a file would collide with the target.
+             Resolve it in three panes; on a pull request, push the merge from here.</p>
+        </div>
+        <div class="card glass">
+          <div class="corner-glow"></div>
           <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="6.5" cy="6" r="2.5"/><circle cx="6.5" cy="18" r="2.5"/><path d="M6.5 8.5v7"/><circle cx="17.5" cy="18" r="2.5"/><path d="M17.5 15.5V9.5a3 3 0 0 0-3-3h-3"/><path d="M13.5 4l-2.5 2.5 2.5 2.5"/></svg></span>
           <h3>Pull requests, on your click</h3>
           <p>Load a GitHub pull request by number or from the palette. Publish your
@@ -165,7 +172,7 @@
     <div class="container">
       <div class="section-head">
         <h2>In action</h2>
-        <p>diffie v0.3.0 reviewing its own repository.</p>
+        <p>diffie reviewing its own repository.</p>
       </div>
       <div class="show-rows">
         <div class="show-row">
@@ -199,10 +206,10 @@
         </div>
         <div class="show-row wide">
           <div class="show-text">
-            <div class="num">03 - Work in progress</div>
+            <div class="num">03 - Conflicts</div>
             <h3>Conflicts, resolved where you review</h3>
-            <p>Conflicts for a change or a pull request, resolved inside the review.
-               On a branch today, not in a release yet.</p>
+            <p>Three panes - your changes, the result, upstream. Pick a side, or edit
+               the result by hand, tick the file and carry on.</p>
           </div>
           <div class="show-media">
             <video src="assets/conflict-resolve.mp4" poster="assets/conflict-resolve-poster.jpg"
@@ -278,7 +285,7 @@
 <span class="c"># or from source</span>
 <span class="p">$</span> cargo install --locked --git https://github.com/sassman/diffie-rs diffie</pre>
       </div>
-      <p class="install-note">Early alpha, tested on macOS and Linux. Run
+      <p class="install-note">Early alpha, tested on macOS only. Run
          <code>diffie</code> in a repository: it shows your uncommitted changes, or
          on a clean tree, your branch going into main. Prebuilt binaries are
          attached to <a href="https://github.com/sassman/diffie-rs/releases">every
@@ -309,8 +316,6 @@
         <div class="road-col glass">
           <span class="road-badge now">In progress</span>
           <ul>
-            <li><strong>Conflict resolution</strong>
-                <span>for changes and pull requests, inside the review, on a branch today</span></li>
             <li><strong>Mechanical changes, folded away</strong>
                 <span>big renames, moved functions and repeated edits, so your attention
                   goes to the rest</span></li>
@@ -377,21 +382,26 @@
           <summary>Does diffie touch my repository?
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
           </summary>
-          <p>No. It writes nothing to your objects, index, refs, config or working
-             tree. The only files it writes are review files under
-             <code>.git/review/</code> - inside the git directory, so they can't be
-             committed by accident. The one exception: loading a pull request whose
-             commits aren't local yet runs a single <code>git fetch</code>, on that
-             explicit click.</p>
+          <p>Reading one writes nothing: no objects, no index, no refs, no config,
+             no working tree. Your review is a TOML file under
+             <code>.git/review/</code> - inside the git directory, so it can't be
+             committed by accident.</p>
+          <p>Three things write, each behind a click you confirm: loading a pull
+             request whose commits aren't here runs one <code>git fetch</code>;
+             resolving an interrupted merge or rebase writes the files you resolved
+             and stages exactly those; and resolving a pull request's conflicts
+             writes the merge commit and pushes it to the PR's branch, never
+             forced.</p>
         </details>
         <details class="glass">
           <summary>What are the requirements?
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
           </summary>
-          <p>git, and a machine to run it on: macOS (Apple Silicon and Intel) or
-             Linux x86_64 with a Vulkan driver. A Windows build exists but is not
-             tested yet. The pull-request features need the <code>gh</code> CLI;
-             everything else works offline.</p>
+          <p>git, and a Mac to run it on: diffie is built and tested on macOS,
+             Apple Silicon and Intel. Linux x86_64 with a Vulkan driver and Windows
+             builds come with every release, but neither has been tested yet - try
+             them and say how it went. The pull-request features need the
+             <code>gh</code> CLI; everything else works offline.</p>
         </details>
         <details class="glass">
           <summary>How do I share a review with a colleague?
@@ -411,7 +421,7 @@
     <div class="container">
       <img class="close-mark" src="assets/logo.svg" width="64" height="64" loading="lazy" alt="" aria-hidden="true">
       <h2>An eagle's eye on every change</h2>
-      <p>Free, early alpha, for macOS and Linux.</p>
+      <p>Free, early alpha, tested on macOS.</p>
       <div class="close-ctas">
         <a class="btn-primary" href="#install">Install diffie</a>
         <a class="btn-secondary" href="https://github.com/sassman/diffie-rs">View on GitHub</a>
