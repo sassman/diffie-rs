@@ -2065,7 +2065,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=diff-conflict-resolv#3747000e0fdee67bf5ac848aec45d6af505b1bab"
+source = "git+https://github.com/sassman/gpui-kit?branch=diff-conflict-edit#b5914e4a24a5e501f1dc97fb759fd7b310850fbc"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2106,7 +2106,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=diff-conflict-resolv#3747000e0fdee67bf5ac848aec45d6af505b1bab"
+source = "git+https://github.com/sassman/gpui-kit?branch=diff-conflict-edit#b5914e4a24a5e501f1dc97fb759fd7b310850fbc"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2154,7 +2154,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=diff-conflict-resolv#3747000e0fdee67bf5ac848aec45d6af505b1bab"
+source = "git+https://github.com/sassman/gpui-kit?branch=diff-conflict-edit#b5914e4a24a5e501f1dc97fb759fd7b310850fbc"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2165,7 +2165,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=diff-conflict-resolv#3747000e0fdee67bf5ac848aec45d6af505b1bab"
+source = "git+https://github.com/sassman/gpui-kit?branch=diff-conflict-edit#b5914e4a24a5e501f1dc97fb759fd7b310850fbc"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -2179,7 +2179,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.9.1"
-source = "git+https://github.com/sassman/gpui-kit?branch=diff-conflict-resolv#3747000e0fdee67bf5ac848aec45d6af505b1bab"
+source = "git+https://github.com/sassman/gpui-kit?branch=diff-conflict-edit#b5914e4a24a5e501f1dc97fb759fd7b310850fbc"
 dependencies = [
  "anyhow",
  "gpui-pre",
