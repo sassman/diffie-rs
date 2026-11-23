@@ -128,5 +128,5 @@ Working from a checkout, link it instead so `git pull` updates it:
 ln -s "$PWD/skills/diffie-review" ~/.claude/skills/diffie-review
 ```
 
-Then ask the agent to "review my changes", and "address the review" once
-you are done commenting.
+Then tell the agent "I want to review", and "address the review" once you are
+done commenting.
