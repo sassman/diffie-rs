@@ -4,8 +4,8 @@
 //! from the render path, and must be able to show a loading state for each.
 
 use crate::model::{
-    BlameLine, ChangedRegion, Commit, Comparison, ConflictFile, LineOrigin, Oid, PredictedConflict,
-    RepoState, Resolved, Scope, ScopedPatch,
+    BlameLine, ChangedRegion, Commit, Comparison, ConflictFile, ConflictLabels, LineOrigin, Oid,
+    PredictedConflict, RepoState, ResolutionPush, Resolved, Scope, ScopedPatch,
 };
 use crate::review::ReviewInput;
 
@@ -25,6 +25,8 @@ pub enum BackendError {
     NoOperation,
     #[error("`{0}` has no conflict to resolve")]
     NotConflicted(String),
+    #[error("the merge still conflicts on {0}; resolve every path before pushing")]
+    UnresolvedPaths(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -185,6 +187,28 @@ pub trait ReviewBackend: Send + Sync {
         target: &str,
         target_pin: Option<&str>,
     ) -> Result<Vec<PredictedConflict>>;
+
+    /// The labels a forecast's resolver panes carry, in the shape an
+    /// interrupted operation's labels have: yours is the source side,
+    /// upstream the target. The names are display material (a branch
+    /// that only exists on the forge still labels its pane); the clocks
+    /// come from the revisions, which must resolve here.
+    fn forecast_labels(
+        &self,
+        source: &str,
+        source_rev: &str,
+        target: &str,
+        target_rev: &str,
+    ) -> Result<ConflictLabels>;
+
+    /// Build the merge commit that resolves a pull request's predicted
+    /// conflicts and push it to the pull request's head branch. The
+    /// second sanctioned write family (owner decision, 2026-11-20,
+    /// design document section 20): blobs, trees and one commit enter
+    /// the object database - no local ref, index or working-tree change -
+    /// and the remote branch moves only by this explicitly confirmed
+    /// push, never forced. Returns the pushed commit.
+    fn push_resolution(&self, push: &ResolutionPush) -> Result<Oid>;
 
     /// Write `contents` as the resolution of `path` and stage it. The one
     /// sanctioned repository write: only a path that is unmerged in the

@@ -856,7 +856,10 @@ Decided (owner, 2026-11-19):
   three-pane block: Your changes left, the editable result in the middle,
   Upstream changes right. Conflict blocks stay aligned across the panes via
   spacer rows; only the outer column scrolls vertically, each pane scrolls
-  its long lines horizontally.
+  its long lines horizontally. Unchanged context folds behind an
+  "N unchanged lines" disclosure (owner nit, 2026-11-20), keeping three
+  lines around each block like the Diff keeps around a change; a click
+  on the band in any pane opens it.
 - Editing in the middle pane is block-scoped (owner, 2026-11-20,
   narrowing the earlier free-typing intent): a block's result region
   becomes editable once it has a pick (take a side, take both), typing
@@ -890,17 +893,19 @@ Decided (owner, 2026-11-19):
   hide, because there is nothing a click could write before the real
   merge. The forecast is advisory: when the backend cannot compute it,
   the review loads without one rather than failing.
-- Next stage (owner, 2026-11-20): a pull-request review resolves its
-  predicted conflicts with the same three-pane mechanics and pushes the
-  resolution to the pull request. The pushed shape is a merge commit of
-  the base into the PR's head branch - what GitHub's own resolve button
-  produces, plain push, no force - built as pure objects (no checkout,
-  no index, no working tree moves) and sent by one action in the PR menu
-  and the palette that always confirms first, naming the remote, the
-  branch and the pull request number. Same-repository PRs first; a
-  fork's PR shows its conflicts read-only until push support follows.
-  The object-database writes and the push each need their own sanctioned
-  exception in constraint 5 before that stage lands.
+- A pull-request review resolves its predicted conflicts in-app (owner,
+  2026-11-20): the same three-pane mechanics work on the predicted
+  merge, the Resolved tick is in-memory, and the result leaves the app
+  only as a merge commit of the base into the PR's head branch - what
+  GitHub's own resolve button produces, plain push, no force - built as
+  pure objects (no checkout, no index, no working-tree moves) and sent
+  by one action in the PR menu and the palette that always confirms
+  first, naming the remote, the branch and the pull request number.
+  Same-repository PRs only; a fork's PR shows its conflicts read-only
+  with the fork named as the place to resolve. A file the app cannot
+  resolve (binary, a deleted side) blocks the push, so markered content
+  never reaches the pull request. Constraint 5 carries the two
+  sanctioned exceptions: the object-database writes and the push.
 
 Assumed:
 
@@ -912,7 +917,10 @@ Assumed:
 
 Open:
 
-- A keyboard model for the conflict view beyond the palette.
+- A keyboard model for the conflict view beyond the palette and the
+  `]`/`[` file jumps it has (owner nit, 2026-11-20; the view also
+  filters the file tree down to the conflicted files). Jumps between
+  the blocks inside a file need the component to expose block rows.
 - Whether comments can attach to lines inside the conflict view.
 - The block editor scrolls its long lines within its own width instead
   of following the pane's horizontal scroll, so columns can shear at a
