@@ -241,6 +241,19 @@ pub struct ConflictLabels {
     pub upstream_time: i64,
 }
 
+/// One path a merge of the comparison's tips would collide on, predicted
+/// without starting the merge: nothing in the repository moves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PredictedConflict {
+    pub path: String,
+    /// Git's auto-merge of the file, conflict markers included, labelled
+    /// with the two revisions as passed: the source tip is the current
+    /// side of each marker, the target the incoming one. `None` when the
+    /// merged file is not text or one side deleted it; the path still
+    /// deserves its warning, there is just nothing to show inline.
+    pub merged: Option<String>,
+}
+
 /// The commit that wrote a line, and the line's number in that commit's
 /// version of the file. This pair is what a comment is anchored to.
 #[derive(Clone, Debug, PartialEq, Eq)]

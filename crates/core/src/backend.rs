@@ -4,8 +4,8 @@
 //! from the render path, and must be able to show a loading state for each.
 
 use crate::model::{
-    BlameLine, ChangedRegion, Commit, Comparison, ConflictFile, LineOrigin, Oid, RepoState,
-    Resolved, Scope, ScopedPatch,
+    BlameLine, ChangedRegion, Commit, Comparison, ConflictFile, LineOrigin, Oid, PredictedConflict,
+    RepoState, Resolved, Scope, ScopedPatch,
 };
 use crate::review::ReviewInput;
 
@@ -157,10 +157,34 @@ pub trait ReviewBackend: Send + Sync {
     /// Read per worktree: a merge in one checkout leaves the others idle.
     fn repo_state(&self) -> Result<RepoState>;
 
+    /// The checked-out branch, `None` on a detached HEAD. The UI needs it
+    /// where a comparison's source names no revision (an uncommitted
+    /// review) but the work still has a committed tip to reason from.
+    fn current_branch(&self) -> Result<Option<String>>;
+
     /// Every unmerged path of the interrupted operation, sides already
     /// mapped to yours/upstream and labelled for display. Empty when
     /// [`Self::repo_state`] is idle.
     fn conflicts(&self) -> Result<Vec<ConflictFile>>;
+
+    /// The paths a merge of `source` into `target` would collide on,
+    /// each with git's auto-merged text, markers included. Purely
+    /// predictive: merge objects go to a scratch directory and the
+    /// repository, its index and its working tree stay untouched. Empty
+    /// means the merge would be clean.
+    ///
+    /// The names feed git's marker labels, so each side is merged under
+    /// its name - unless its pin says the name has moved on: a review
+    /// pinned to a startup or pull-request revision must forecast that
+    /// revision, not whatever a local branch of the same name points at
+    /// today.
+    fn predicted_conflicts(
+        &self,
+        source: &str,
+        source_pin: Option<&str>,
+        target: &str,
+        target_pin: Option<&str>,
+    ) -> Result<Vec<PredictedConflict>>;
 
     /// Write `contents` as the resolution of `path` and stage it. The one
     /// sanctioned repository write: only a path that is unmerged in the

@@ -22,7 +22,8 @@ use crate::settings::{LayoutMode, Settings, WindowSettings};
 use diffie_core::time::{ago, relative_age};
 use diffie_core::{
     BlameLine, ChangedRegion, Commit, Comparison, ConflictFile, ConflictLabels, FileState,
-    FileStatus, FileSummary, NewSide, Oid, RepoState, Resolved, ReviewBackend, Scope, ScopedPatch,
+    FileStatus, FileSummary, NewSide, Oid, PredictedConflict, RepoState, Resolved, ReviewBackend,
+    Scope, ScopedPatch,
 };
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
@@ -748,6 +749,11 @@ struct Loaded {
     /// Synthetic snippet files for orphaned threads; joined to the Diff's
     /// set only while the earlier-comments toggle is on.
     orphan_files: Vec<DiffFile>,
+    /// The idle repository's merge forecast, and the marker-bearing
+    /// document for each predicted path whose merged text is showable;
+    /// both empty during an interrupted operation.
+    predicted: Vec<PredictedConflict>,
+    predicted_files: Vec<DiffFile>,
 }
 
 /// What annotation and header callbacks may read. They receive an `App`, not
@@ -761,6 +767,8 @@ struct Snapshot {
     resolved_markers: Vec<ResolvedMarker>,
     /// The line under the pointer; its marker brightens.
     hovered_line: Option<DiffLinePosition>,
+    /// The comparison's target name, for the forecast warning's wording.
+    forecast_target: SharedString,
 }
 
 /// A line's resolved threads, behind one gutter-lane marker.
@@ -866,6 +874,19 @@ struct FileView {
     /// A definition entry: the repository path behind its Diff key.
     /// Read-only, closable, nothing to tick.
     definition: Option<SharedString>,
+    /// The merge this review feeds would collide on this file.
+    forecast: Option<ForecastView>,
+}
+
+/// What a predicted collision means for one file's header.
+#[derive(Clone, Copy, PartialEq)]
+enum ForecastView {
+    /// Nothing to show inline (a binary side, or a side's delete): the
+    /// warning stands alone.
+    BadgeOnly,
+    /// A predicted-merge document exists; `shown` says it is on screen
+    /// in place of the review diff.
+    Showable { shown: bool },
 }
 
 /// A file with nothing to report: what an entry outside the comparison
@@ -890,6 +911,7 @@ impl Default for FileView {
             changed_code_comments: 0,
             orphan: false,
             definition: None,
+            forecast: None,
         }
     }
 }
@@ -934,6 +956,21 @@ struct PerReview {
     /// Synthetic snippet files for orphaned threads, kept apart from the
     /// Diff's set so toggle flips can join or withhold them.
     orphan_files: Vec<DiffFile>,
+    /// The merge forecast of an idle repository: the paths a merge of the
+    /// comparison would collide on, from the backend's prediction. The
+    /// tree badges every one; the diff can only show the showable.
+    predicted: Vec<PredictedConflict>,
+    /// The forecast documents, marker-bearing and parsed off-thread, for
+    /// the predicted paths whose merged text is showable.
+    predicted_files: HashMap<String, DiffFile>,
+    /// Paths whose diff body currently shows the forecast document.
+    predicted_shown: HashSet<String>,
+    /// The review documents put aside while their forecast shows, to come
+    /// back exactly as they were when the swap flips back.
+    plain_files: HashMap<String, DiffFile>,
+    /// The moved-block folds of this load, the one canonical set every
+    /// `set_files` re-applies: the diff state starts its folds over.
+    folds: Vec<DiffFold>,
     /// The comment `n`/`p` last jumped to, so the walk continues from
     /// there instead of restarting at the top.
     comment_cursor: Option<String>,
@@ -1014,6 +1051,11 @@ impl PerReview {
             review_path: PathBuf::new(),
             placed: Vec::new(),
             orphan_files: Vec::new(),
+            predicted: Vec::new(),
+            predicted_files: HashMap::new(),
+            predicted_shown: HashSet::new(),
+            plain_files: HashMap::new(),
+            folds: Vec::new(),
             comment_cursor: None,
             unfolded: HashSet::new(),
             fading: HashSet::new(),
@@ -1172,7 +1214,14 @@ impl ReviewApp {
             Some(LayoutMode::Unified) => DiffMode::Unified,
             _ => DiffMode::Split,
         };
-        let diff = cx.new(|cx| DiffState::new([], cx).with_mode(mode));
+        // Conflicts in this Diff are always forecasts - a real operation's
+        // conflicts live in the Conflicts center - so resolving is not
+        // offered: there is nothing a click here could write.
+        let diff = cx.new(|cx| {
+            DiffState::new([], cx)
+                .with_mode(mode)
+                .with_conflicts_read_only(true)
+        });
         let picker_query =
             cx.new(|cx| InputState::new(window, cx).placeholder("Message, hash or author"));
         let search_query =
@@ -1394,13 +1443,66 @@ impl ReviewApp {
                     .map(|file| file.path.clone())
                     .collect();
                 self.review.orphan_files = loaded.orphan_files;
+                // Forecast state first: the file sync below swaps the
+                // forecasts the reviewer had open back in, over the fresh
+                // review documents (the put-aside copies are stale).
+                self.review.predicted = loaded.predicted;
+                self.review.predicted_files = loaded
+                    .predicted_files
+                    .into_iter()
+                    .map(|file| (file.path().to_string(), file))
+                    .collect();
+                self.review.plain_files.clear();
+                self.review
+                    .predicted_shown
+                    .retain(|path| self.review.predicted_files.contains_key(path));
                 let mut diff_files = loaded.files;
                 if self.show_other_revisions && !self.review.orphan_files.is_empty() {
                     diff_files.extend(self.review.orphan_files.iter().cloned());
                     diff_files.sort_by(|a, b| tree_order(a.path().as_ref(), b.path().as_ref()));
                 }
+                let diff_files = self.forecast_swapped(diff_files);
+                // Verbatim-moved blocks fold behind a label on both ends;
+                // a click reveals them when the address change matters.
+                self.review.folds = loaded
+                    .moved
+                    .iter()
+                    .flat_map(|block| {
+                        let span = |start: usize, end: usize| {
+                            if start == end {
+                                format!("{start}")
+                            } else {
+                                format!("{start}-{end}")
+                            }
+                        };
+                        [
+                            DiffFold::new(
+                                block.from_path.clone(),
+                                DiffSide::Original,
+                                block.from_start,
+                                block.lines,
+                                format!(
+                                    "moved to {}:{}",
+                                    block.to_path,
+                                    span(block.to_start, block.to_end())
+                                ),
+                            ),
+                            DiffFold::new(
+                                block.to_path.clone(),
+                                DiffSide::Modified,
+                                block.to_start,
+                                block.lines,
+                                format!(
+                                    "moved from {}:{}",
+                                    block.from_path,
+                                    span(block.from_start, block.from_end())
+                                ),
+                            ),
+                        ]
+                    })
+                    .collect();
+                self.sync_files_and_folds(diff_files, cx);
                 self.diff.update(cx, |state, cx| {
-                    state.set_files(diff_files, cx);
                     // One rebuild; collapsing one by one froze a review
                     // with thousands of ticked or generated files.
                     state.set_files_collapsed(
@@ -1410,44 +1512,6 @@ impl ReviewApp {
                             .chain(&removed)
                             .map(|path| SharedString::from(path.clone())),
                         true,
-                        cx,
-                    );
-                    // Verbatim-moved blocks fold behind a label on both ends;
-                    // a click reveals them when the address change matters.
-                    state.set_folds(
-                        loaded.moved.iter().flat_map(|block| {
-                            let span = |start: usize, end: usize| {
-                                if start == end {
-                                    format!("{start}")
-                                } else {
-                                    format!("{start}-{end}")
-                                }
-                            };
-                            [
-                                DiffFold::new(
-                                    block.from_path.clone(),
-                                    DiffSide::Original,
-                                    block.from_start,
-                                    block.lines,
-                                    format!(
-                                        "moved to {}:{}",
-                                        block.to_path,
-                                        span(block.to_start, block.to_end())
-                                    ),
-                                ),
-                                DiffFold::new(
-                                    block.to_path.clone(),
-                                    DiffSide::Modified,
-                                    block.to_start,
-                                    block.lines,
-                                    format!(
-                                        "moved from {}:{}",
-                                        block.from_path,
-                                        span(block.from_start, block.from_end())
-                                    ),
-                                ),
-                            ]
-                        }),
                         cx,
                     );
                 });
@@ -3408,6 +3472,20 @@ impl ReviewApp {
                         changed_code_comments: tally.map_or(0, |tally| tally.changed_since),
                         orphan: file.state == FileState::NotInComparison,
                         definition: None,
+                        forecast: self
+                            .review
+                            .predicted
+                            .iter()
+                            .any(|conflict| conflict.path == file.path)
+                            .then(|| {
+                                if self.review.predicted_files.contains_key(&file.path) {
+                                    ForecastView::Showable {
+                                        shown: self.review.predicted_shown.contains(&file.path),
+                                    }
+                                } else {
+                                    ForecastView::BadgeOnly
+                                }
+                            }),
                     },
                 )
             })
@@ -3449,6 +3527,7 @@ impl ReviewApp {
             draft,
             resolved_markers,
             hovered_line: self.review.hovered_line.clone(),
+            forecast_target: self.review.comparison.target.clone().into(),
         }
     }
 
@@ -4867,10 +4946,16 @@ impl ReviewApp {
     }
 
     /// The tree's conflict marker for a path: unresolved in warning,
-    /// resolved in success, nothing outside an interrupted operation.
+    /// resolved in success. An idle repository warns ahead with the same
+    /// marker when the merge this review feeds would collide on the path.
     fn conflict_badge(&self, path: &str) -> Option<bool> {
         if self.repo_state == RepoState::Idle {
-            return None;
+            return self
+                .review
+                .predicted
+                .iter()
+                .any(|conflict| conflict.path == path)
+                .then_some(false);
         }
         if self.conflicts.iter().any(|file| file.path == path) {
             return Some(false);
@@ -4879,6 +4964,83 @@ impl ReviewApp {
             .iter()
             .any(|seen| seen == path)
             .then_some(true)
+    }
+
+    /// The header's swap between a file's review diff and the forecast of
+    /// how the merge would conflict on it.
+    fn toggle_forecast(&mut self, path: &str, cx: &mut Context<Self>) {
+        if !self.review.predicted_files.contains_key(path) {
+            return;
+        }
+        if !self.review.predicted_shown.remove(path) {
+            self.review.predicted_shown.insert(path.to_string());
+        }
+        let top = self.diff.read(cx).top_line();
+        let files = self.forecast_swapped(self.diff.read(cx).files().to_vec());
+        self.sync_files_and_folds(files, cx);
+        // The swap must not lose the reader's place; `set_files` resets it.
+        if let Some(top) = top {
+            self.diff
+                .update(cx, |state, cx| state.scroll_to_top_line(top, cx));
+        }
+        cx.notify();
+    }
+
+    /// `files` with every open forecast swapped in and every closed one
+    /// swapped back to the review document it put aside.
+    fn forecast_swapped(&mut self, mut files: Vec<DiffFile>) -> Vec<DiffFile> {
+        for file in files.iter_mut() {
+            let path = file.path().to_string();
+            if self.review.predicted_shown.contains(&path) {
+                if let Some(forecast) = self.review.predicted_files.get(&path) {
+                    // Put the review document aside once: swapping twice
+                    // must not bury it under the forecast copy.
+                    self.review
+                        .plain_files
+                        .entry(path.clone())
+                        .or_insert_with(|| file.clone());
+                    *file = forecast.clone();
+                }
+            } else if let Some(plain) = self.review.plain_files.remove(&path) {
+                *file = plain;
+            }
+        }
+        files
+    }
+
+    /// Hands the diff a file set and puts the moved-block folds back,
+    /// which `set_files` starts over - minus the files whose body shows a
+    /// forecast document: the review diff's fold coordinates describe
+    /// lines the predicted merge does not have. Revealed folds stay
+    /// revealed; callers restore or move the viewport themselves.
+    fn sync_files_and_folds(&mut self, files: Vec<DiffFile>, cx: &mut Context<Self>) {
+        let key = |fold: &DiffFold| (fold.path().clone(), fold.side(), fold.start(), fold.lines());
+        let revealed: Vec<_> = {
+            let state = self.diff.read(cx);
+            state
+                .folds()
+                .iter()
+                .enumerate()
+                .filter(|(ix, _)| state.is_fold_revealed(*ix))
+                .map(|(_, fold)| key(fold))
+                .collect()
+        };
+        let folds: Vec<DiffFold> = self
+            .review
+            .folds
+            .iter()
+            .filter(|fold| !self.review.predicted_shown.contains(fold.path().as_ref()))
+            .cloned()
+            .collect();
+        self.diff.update(cx, |state, cx| {
+            state.set_files(files, cx);
+            state.set_folds(folds.iter().cloned(), cx);
+            for (ix, fold) in folds.iter().enumerate() {
+                if revealed.contains(&key(fold)) {
+                    state.set_fold_revealed(ix, true, cx);
+                }
+            }
+        });
     }
 
     /// Whether any ancestor folder of `path` is shut in the file panel.
@@ -4991,6 +5153,49 @@ impl ReviewApp {
                                     .filter(|file| file.state != FileState::NotInComparison)
                                     .count()
                             )),
+                    )
+                    .when_some(
+                        {
+                            // A collision can sit on a path this scope does
+                            // not show (an unpicked commit's file): without
+                            // a row to badge, the warning moves up here so
+                            // the forecast never passes for clean.
+                            let hidden: Vec<&str> = self
+                                .review
+                                .predicted
+                                .iter()
+                                .filter(|conflict| {
+                                    !self
+                                        .review
+                                        .files
+                                        .iter()
+                                        .any(|file| file.path == conflict.path)
+                                })
+                                .map(|conflict| conflict.path.as_str())
+                                .collect();
+                            (!hidden.is_empty()).then(|| {
+                                format!(
+                                    "Would conflict with {}, outside this view: {}",
+                                    self.review.comparison.target,
+                                    hidden.join(", ")
+                                )
+                            })
+                        },
+                        |row, tip| {
+                            row.child(
+                                Button::new("hidden-forecasts")
+                                    .ghost()
+                                    .xsmall()
+                                    .w(px(18.))
+                                    .h(px(18.))
+                                    .icon(
+                                        Icon::new(Lucide::GitMergeConflict)
+                                            .xsmall()
+                                            .text_color(cx.theme().warning),
+                                    )
+                                    .tooltip(tip),
+                            )
+                        },
                     )
                     .child(
                         Button::new("hide-files")
@@ -5534,6 +5739,46 @@ impl ReviewApp {
                                 .child(note),
                         )
                     })
+                    // The forecast warning stands apart from the quiet
+                    // notes: the point is to be caught before the merge.
+                    .when(view.is_some_and(|view| view.forecast.is_some()), |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_color(warning)
+                                .child(format!("would conflict with {}", snapshot.forecast_target)),
+                        )
+                    })
+                    .when_some(
+                        view.and_then(|view| match view.forecast {
+                            Some(ForecastView::Showable { shown }) => Some(shown),
+                            _ => None,
+                        }),
+                        |row, shown| {
+                            let owner = owner.clone();
+                            let forecast_path = path.clone();
+                            row.child(
+                                Button::new(SharedString::from(format!("forecast-{path}")))
+                                    .ghost()
+                                    .xsmall()
+                                    .label(if shown {
+                                        "Show changes"
+                                    } else {
+                                        "Show conflict"
+                                    })
+                                    .tooltip(if shown {
+                                        "Back to this review's changes"
+                                    } else {
+                                        "Show how the merge would conflict here"
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        let _ = owner.update(cx, |this, cx| {
+                                            this.toggle_forecast(&forecast_path, cx)
+                                        });
+                                    }),
+                            )
+                        },
+                    )
                     // A definition entry leaves the way it came: by hand.
                     .when(definition.is_some(), |row| {
                         let owner = owner.clone();
@@ -6741,6 +6986,48 @@ fn load(
                 .map_err(|error| error.to_string())
         })
         .collect();
+    // An idle repository forecasts instead: the paths a merge of the
+    // comparison would collide on. Advisory - a forecast the backend
+    // cannot compute (unrelated histories, an unresolvable side) must
+    // not take the review down, it just warns about nothing.
+    let predicted = match repo_state {
+        RepoState::Idle => {
+            // An uncommitted comparison's source ("working tree") is no
+            // revision to merge: the forecast rides on the tip beneath
+            // it, named by its branch so the marker labels read well.
+            let source = if comparison.uncommitted {
+                backend
+                    .current_branch()
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "HEAD".to_string())
+            } else {
+                comparison.source.clone()
+            };
+            // Names with their pins: the backend merges each side under
+            // its name - "main" reads where an OID would not - but falls
+            // back to the pinned revision for a name that has moved on or
+            // does not resolve (a pull request's branch may exist only as
+            // its pinned commit).
+            backend
+                .predicted_conflicts(
+                    &source,
+                    comparison.source_rev.as_deref(),
+                    &comparison.target,
+                    comparison.target_rev.as_deref(),
+                )
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    let predicted_files: Vec<DiffFile> = predicted
+        .iter()
+        .filter_map(|conflict| {
+            let merged = conflict.merged.as_deref()?;
+            DiffFile::parse_conflicts(conflict.path.clone(), merged).ok()
+        })
+        .filter(|file| !file.conflicts().is_empty())
+        .collect();
     let resolved = backend.resolve(comparison).map_err(text)?;
     let commits = backend.commits(&resolved).map_err(text)?;
     // Only now is it known what HEAD gained; the caller could only say
@@ -6945,6 +7232,8 @@ fn load(
         repo_state,
         conflicts,
         conflict_parses,
+        predicted,
+        predicted_files,
         resolved,
         commits,
         reviews,
