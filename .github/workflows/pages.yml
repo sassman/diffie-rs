@@ -1,10 +1,11 @@
 name: Pages
 on:
+  # Every push to main, with no path filter: the page states what the app is
+  # and what it does, so work that never touches website/ can still make it
+  # stale. Deploying is a copy of a folder - cheaper than deciding each time
+  # whether a change counts.
   push:
     branches: [main]
-    paths:
-      - "website/**"
-      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 # One site is live at a time, so a running deploy finishes instead of being
