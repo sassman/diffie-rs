@@ -27,6 +27,26 @@ commitment. Deferred is an archive, maybe revisited later.
   palette's PR picker (#7).
 - PR context: show which comments are not yet published, per comment and in
   an overview beside the open-comment count.
+- Image preview for png, svg and bmp files in the diff, instead of (or
+  alongside) the binary-file placeholder. Open: side-by-side old/new, an
+  overlay/toggle, or both; how this interacts with Kit's `Diff` component
+  since it is not text.
+- Video files in the diff get a play affordance (a player-symbol button)
+  that hands the file to the OS's registered handler, rather than any
+  in-app playback. Open: where that button sits in the file row/header.
+- Commit signature status shown in the commit picker: signed tends
+  green-ish, unsigned tends yellow/orange, a bad signature tends red.
+  Open: the exact colors, clear of the comment-status colors already in
+  use; where in the two-row item it sits; whether theme light/dark both
+  keep the signal readable.
+- A `--stack <no>` CLI arg: pull together all the PRs in a stack and show
+  their commits grouped by PR in the commit picker, so a whole stack entry
+  (all its commits) can be unselected or reviewed together. Likely needs a
+  top-bar button next to the PR button for stack info, with navigation from
+  there to the individual PRs. The palette gets an "Open Stack of PRs"
+  command listing GitHub's stacked PRs with their status, in the same
+  professional look as the open-PR list. Open: how a stack is detected
+  (GitHub's native stacking, a naming convention, or both).
 
 ## Deferred
 
