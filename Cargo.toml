@@ -6,6 +6,7 @@ members = ["crates/core", "crates/symbols", "crates/app"]
 version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
+license = "MIT"
 repository = "https://github.com/sassman/diffie-rs"
 # Releases ship as GitHub Release binaries and a Homebrew formula, not
 # through crates.io.

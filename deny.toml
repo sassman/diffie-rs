@@ -23,7 +23,8 @@ allow = [
     "Unicode-3.0",
     "Zlib",
 ]
-# The workspace's own crates are unpublished and carry no license field.
+# The workspace's own crates are unpublished, so the check skips them; the
+# project itself is MIT.
 private = { ignore = true }
 
 [sources]

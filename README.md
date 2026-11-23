@@ -144,3 +144,7 @@ ln -s "$PWD/skills/diffie-review" ~/.claude/skills/diffie-review
 
 Then tell the agent "I want to review", and "address the review" once you are
 done commenting.
+
+## License
+
+MIT - see [LICENSE](LICENSE).
