@@ -5,11 +5,13 @@ on:
     paths-ignore:
       - "docs/**"
       - "skills/**"
+      - "website/**"
       - "**.md"
   pull_request:
     paths-ignore:
       - "docs/**"
       - "skills/**"
+      - "website/**"
       - "**.md"
   merge_group:
 
