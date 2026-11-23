@@ -34,7 +34,7 @@ use gpui_kit::component::{
         ToggleVariants as _,
     },
     checkbox::Checkbox,
-    conflict_resolv::{ConflictResolv, ConflictResolvEvent, ConflictResolvState},
+    conflict_resolv::{ConflictResolvEvent, ConflictResolvState, ConflictResolvVirtual},
     diff::{
         Diff, DiffAnnotation, DiffChangeIndicator, DiffDecoration, DiffEvent, DiffFile, DiffFold,
         DiffGutterMarker, DiffHunkSeparator, DiffLinePosition, DiffLineRange, DiffMode, DiffSide,
@@ -55,8 +55,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClipboardItem, Context,
-    ElementId, Entity, FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, Render, ScrollHandle, SharedString,
+    Div, ElementId, Entity, FocusHandle, Focusable as _, Hsla, InteractiveElement as _,
+    IntoElement, KeyBinding, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window,
     WindowBounds, deferred, div, prelude::FluentBuilder as _, px, rgb,
 };
@@ -665,8 +665,18 @@ struct ResolverView {
 }
 
 impl Render for ResolverView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        render_resolver(&self.state, &self.labels)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The virtualized resolver needs a definite height; it gets its full
+        // content's, so a file never scrolls within its frame and the
+        // conflicts column stays the one scroll surface, as the review view
+        // is. A viewport cap was tried and dropped: two nested scrolls felt
+        // wrong (owner, 2026-11-21).
+        let rows = self.state.update(cx, |state, _| state.display_len());
+        div()
+            .w_full()
+            .flex_none()
+            .h(ConflictResolvVirtual::frame_height(rows, window, cx))
+            .child(render_resolver(&self.state, &self.labels))
     }
 }
 
@@ -5004,7 +5014,26 @@ impl ReviewApp {
                 )
                 .into_any_element();
         }
-        column.into_any_element()
+        let pinned = self
+            .pinned_conflict(0, self.conflict_seen.len())
+            .map(|(i, slide)| {
+                let path = self.conflict_seen[i].clone();
+                let header = match self.conflicts.iter().position(|f| f.path == path) {
+                    Some(ix) => self.conflict_file_header(ix, &mono, cx),
+                    None => self.render_resolved_file(&path, &mono, cx),
+                };
+                Self::pinned_overlay(header, slide)
+            });
+        div()
+            .relative()
+            // Clips the pinned copy while the next header slides it up, so
+            // it leaves through the column's top edge, not over the bar
+            // above.
+            .overflow_hidden()
+            .size_full()
+            .child(column)
+            .children(pinned)
+            .into_any_element()
     }
 
     /// The Conflicts center of a pull-request forecast: the same
@@ -5031,14 +5060,8 @@ impl ReviewApp {
         } else {
             format!("Resolved {ticked} of {resolvable} files")
         };
-        let header = h_flex()
-            .flex_none()
-            .h(px(28.))
-            .px(px(10.))
-            .gap_2()
-            .bg(cx.theme().sidebar)
-            .border_b_1()
-            .border_color(cx.theme().border)
+        let header = self
+            .conflict_header_bar(cx)
             .text_size(px(12.))
             .child(div().text_color(muted).child(format!(
                 "Would conflict with {} - resolve here, then push to the pull request",
@@ -5052,7 +5075,7 @@ impl ReviewApp {
             .iter()
             .map(|conflict| self.render_forecast_file(conflict, &mono, cx))
             .collect::<Vec<_>>();
-        v_flex()
+        let column = v_flex()
             .id("conflicts")
             .key_context("Conflicts")
             .track_focus(&self.conflicts_focus)
@@ -5060,7 +5083,26 @@ impl ReviewApp {
             .overflow_y_scroll()
             .track_scroll(&self.conflicts_scroll)
             .child(header)
-            .children(rows)
+            .children(rows);
+        let pinned = self
+            .pinned_conflict(1, self.review.predicted.len())
+            .map(|(i, slide)| {
+                let conflict = &self.review.predicted[i];
+                let header = if self.review.pr_resolved.contains(&conflict.path) {
+                    self.render_resolved_file(&conflict.path, &mono, cx)
+                } else {
+                    self.forecast_file_header(conflict, &mono, cx)
+                };
+                Self::pinned_overlay(header, slide)
+            });
+        div()
+            .relative()
+            // Same clip as the operation column: the slide exits through
+            // the top edge.
+            .overflow_hidden()
+            .size_full()
+            .child(column)
+            .children(pinned)
             .into_any_element()
     }
 
@@ -5079,22 +5121,10 @@ impl ReviewApp {
         if self.review.pr_resolved.contains(&conflict.path) {
             return self.render_resolved_file(&conflict.path, mono, cx);
         }
-        let path = conflict.path.clone();
         let view = self
             .conflict_views
             .iter()
             .find(|view| view.path == conflict.path);
-        let ready = matches!(
-            view.map(|view| &view.body),
-            Some(ConflictBody::Resolver(state, ..)) if state.read(cx).all_resolved()
-        );
-        let (badge, badge_color) = if conflict.merged.is_none() {
-            ("on the forge", cx.theme().warning)
-        } else if ready {
-            ("ready", cx.theme().success)
-        } else {
-            ("unresolved", cx.theme().warning)
-        };
         let body = match (conflict.merged.as_ref(), view.map(|view| &view.body)) {
             (None, _) => div()
                 .px(px(10.))
@@ -5117,37 +5147,73 @@ impl ReviewApp {
         v_flex()
             .w_full()
             .flex_none()
-            .child(
-                h_flex()
-                    .flex_none()
-                    .h(px(28.))
-                    .px(px(10.))
-                    .gap_2()
-                    .bg(cx.theme().sidebar)
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(div().font_family(mono.clone()).child(conflict.path.clone()))
-                    .child(
-                        div()
-                            .flex_none()
-                            .px(px(6.))
-                            .rounded(px(4.))
-                            .text_size(px(10.5))
-                            .bg(badge_color.opacity(0.15))
-                            .text_color(badge_color)
-                            .child(badge),
-                    )
-                    .child(div().flex_1())
-                    .when(conflict.merged.is_some(), |row| {
-                        row.child(self.render_resolved_box(
-                            &path,
-                            false,
-                            ready && !self.op_running,
-                            cx,
-                        ))
-                    }),
-            )
+            .child(self.forecast_file_header(conflict, mono, cx))
             .child(body)
+            .into_any_element()
+    }
+
+    /// Every conflict header bar's height; the product rule fixes file
+    /// headers at 28px, and the pin slide measures against the same
+    /// number.
+    const CONFLICT_HEADER_HEIGHT: Pixels = px(28.);
+
+    /// The chrome every bar in the conflicts column shares - one
+    /// builder, so the in-flow bars and their pinned copies cannot
+    /// drift apart.
+    fn conflict_header_bar(&self, cx: &Context<Self>) -> Div {
+        h_flex()
+            .flex_none()
+            .h(Self::CONFLICT_HEADER_HEIGHT)
+            .px(px(10.))
+            .gap_2()
+            .bg(cx.theme().sidebar)
+            .border_b_1()
+            .border_color(cx.theme().border)
+    }
+
+    /// The readiness pill on a conflict header.
+    fn conflict_badge_pill(badge: &'static str, color: Hsla) -> Div {
+        div()
+            .flex_none()
+            .px(px(6.))
+            .rounded(px(4.))
+            .text_size(px(10.5))
+            .bg(color.opacity(0.15))
+            .text_color(color)
+            .child(badge)
+    }
+
+    /// The header bar of a forecast file; the pinned copy over the
+    /// column renders through the same call.
+    fn forecast_file_header(
+        &self,
+        conflict: &PredictedConflict,
+        mono: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let path = conflict.path.clone();
+        let view = self
+            .conflict_views
+            .iter()
+            .find(|view| view.path == conflict.path);
+        let ready = matches!(
+            view.map(|view| &view.body),
+            Some(ConflictBody::Resolver(state, ..)) if state.read(cx).all_resolved()
+        );
+        let (badge, badge_color) = if conflict.merged.is_none() {
+            ("on the forge", cx.theme().warning)
+        } else if ready {
+            ("ready", cx.theme().success)
+        } else {
+            ("unresolved", cx.theme().warning)
+        };
+        self.conflict_header_bar(cx)
+            .child(div().font_family(mono.clone()).child(conflict.path.clone()))
+            .child(Self::conflict_badge_pill(badge, badge_color))
+            .child(div().flex_1())
+            .when(conflict.merged.is_some(), |row| {
+                row.child(self.render_resolved_box(&path, false, ready && !self.op_running, cx))
+            })
             .into_any_element()
     }
 
@@ -5159,14 +5225,7 @@ impl ReviewApp {
         mono: &SharedString,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        h_flex()
-            .flex_none()
-            .h(px(28.))
-            .px(px(10.))
-            .gap_2()
-            .bg(cx.theme().sidebar)
-            .border_b_1()
-            .border_color(cx.theme().border)
+        self.conflict_header_bar(cx)
             .child(
                 Icon::new(IconName::Check)
                     .small()
@@ -5202,17 +5261,6 @@ impl ReviewApp {
                 ConflictBody::Resolver(state, ..) => state.read(cx).block_count() == 0,
                 ConflictBody::Unparsed(_) => false,
             };
-        let ready = !markerless
-            && match &view.body {
-                ConflictBody::Resolver(state, ..) => state.read(cx).all_resolved(),
-                ConflictBody::Unparsed(_) => false,
-            };
-        let (badge, badge_color) = if ready {
-            ("ready", cx.theme().success)
-        } else {
-            ("unresolved", cx.theme().warning)
-        };
-        let path = file.path.clone();
         let body = match &view.body {
             ConflictBody::Resolver(..) if markerless => div()
                 .px(px(10.))
@@ -5234,30 +5282,42 @@ impl ReviewApp {
         v_flex()
             .w_full()
             .flex_none()
-            .child(
-                h_flex()
-                    .flex_none()
-                    .h(px(28.))
-                    .px(px(10.))
-                    .gap_2()
-                    .bg(cx.theme().sidebar)
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(div().font_family(mono.clone()).child(file.path.clone()))
-                    .child(
-                        div()
-                            .flex_none()
-                            .px(px(6.))
-                            .rounded(px(4.))
-                            .text_size(px(10.5))
-                            .bg(badge_color.opacity(0.15))
-                            .text_color(badge_color)
-                            .child(badge),
-                    )
-                    .child(div().flex_1())
-                    .child(self.render_resolved_box(&path, false, ready && !self.op_running, cx)),
-            )
+            .child(self.conflict_file_header(ix, mono, cx))
             .child(body)
+            .into_any_element()
+    }
+
+    /// The 28px header bar of `conflicts[ix]`, built in one place so the
+    /// in-flow bar and its pinned copy over the column cannot drift apart.
+    fn conflict_file_header(
+        &self,
+        ix: usize,
+        mono: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let file = &self.conflicts[ix];
+        let view = &self.conflict_views[ix];
+        let markerless = file.binary
+            || match &view.body {
+                ConflictBody::Resolver(state, ..) => state.read(cx).block_count() == 0,
+                ConflictBody::Unparsed(_) => false,
+            };
+        let ready = !markerless
+            && match &view.body {
+                ConflictBody::Resolver(state, ..) => state.read(cx).all_resolved(),
+                ConflictBody::Unparsed(_) => false,
+            };
+        let (badge, badge_color) = if ready {
+            ("ready", cx.theme().success)
+        } else {
+            ("unresolved", cx.theme().warning)
+        };
+        let path = file.path.clone();
+        self.conflict_header_bar(cx)
+            .child(div().font_family(mono.clone()).child(file.path.clone()))
+            .child(Self::conflict_badge_pill(badge, badge_color))
+            .child(div().flex_1())
+            .child(self.render_resolved_box(&path, false, ready && !self.op_running, cx))
             .into_any_element()
     }
 
@@ -5495,6 +5555,49 @@ impl ReviewApp {
         }
     }
 
+    /// The pinned copy's wrapper: absolute over the column's top edge,
+    /// slid up as the next file's header arrives.
+    fn pinned_overlay(header: AnyElement, slide: Pixels) -> Div {
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(-slide)
+            .child(header)
+    }
+
+    /// The conflicts column's scrolled distance, for placing its children:
+    /// `bounds_for_item` reports layout bounds, which a scroll never moves,
+    /// and this puts them where the last paint drew them. Clamped, because
+    /// a wheel turn past the end leaves the handle overshooting until the
+    /// next prepaint clamps it - unclamped, that would name a child the
+    /// paint never reached.
+    fn conflicts_scrolled(&self) -> Pixels {
+        self.conflicts_scroll
+            .offset()
+            .y
+            .clamp(-self.conflicts_scroll.max_offset().y, px(0.))
+    }
+
+    /// The file whose block spans the column's top edge - its own header
+    /// has scrolled out, so a copy pins over the column - and how far the
+    /// next file's header has pushed that copy up. `first` is the first
+    /// file child's index in the scroll column (the forecast column leads
+    /// with its summary row). Bounds come from the last paint, and a
+    /// wheel turn repaints, so the pin follows the scroll.
+    fn pinned_conflict(&self, first: usize, count: usize) -> Option<(usize, Pixels)> {
+        let top = self.conflicts_scroll.bounds().top();
+        let scroll = self.conflicts_scrolled();
+        (0..count).find_map(|i| {
+            let bounds = self.conflicts_scroll.bounds_for_item(first + i)?;
+            let (item_top, item_bottom) = (bounds.top() + scroll, bounds.bottom() + scroll);
+            (item_top < top - px(1.) && item_bottom > top + px(1.)).then(|| {
+                let slide = (top + Self::CONFLICT_HEADER_HEIGHT - item_bottom).max(px(0.));
+                (i, slide)
+            })
+        })
+    }
+
     /// `]` and `[` in the conflicts center walk the files that still
     /// have blocks to pick, from wherever the viewport stands: the next
     /// such file below its top, or the previous one above, aligned to
@@ -5541,10 +5644,11 @@ impl ReviewApp {
         // Just past the alignment line, so the file already sitting on it
         // is never its own jump target.
         let epsilon = px(4.);
+        let scroll = self.conflicts_scrolled();
         let child_top = |ix: usize| {
             self.conflicts_scroll
                 .bounds_for_item(ix)
-                .map(|bounds| bounds.top())
+                .map(|bounds| bounds.top() + scroll)
         };
         let target = if direction > 0 {
             targets
@@ -6676,7 +6780,8 @@ fn render_resolver(state: &Entity<ConflictResolvState>, labels: &ConflictLabels)
             relative_age(labels.upstream_time, labels.yours_time)
         );
     }
-    ConflictResolv::new(state)
+    ConflictResolvVirtual::new(state)
+        .size_full()
         .yours_label(yours)
         .upstream_label(upstream)
         .into_any_element()
