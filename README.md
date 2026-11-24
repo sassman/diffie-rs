@@ -20,41 +20,28 @@ A native desktop app for reviewing git changes across several commits or a
 whole branch, with comments on lines and selections. Rust and GPUI Kit, for
 macOS, Windows and Linux.
 
+A GitHub PR needs the code pushed first, costs your agent tokens fetching
+comments through the API, and its replies would land under your own account.
+diffie reviews earlier, while changes are still cheap to rework, and your
+agent reads and answers a local file directly.
+
 <p align="center">
-  <a href="docs/screenshots/comment-resolve.mp4">
-    <img src="docs/screenshots/main-screen.png" alt="diffie reviewing a pull request: file tree, scope bar with the commit range, and a review comment on the diff answered by the agent - click to watch the review loop in motion">
-  </a>
+  <img src="docs/screenshots/comment-resolve.gif" alt="diffie reviewing a pull request: a comment on a line, the agent's answer appearing in the thread under a robot badge, and the thread folding away once resolved">
 </p>
 
 ## Features
 
+- Comment on a line or selection; your agent reads it back and answers or
+  fixes the code, right in the thread, no tool switch
 - Review a whole branch, a commit range, or uncommitted changes
 - Pick and skip commits in the range, gaps allowed
-- Comment on lines and selections; comments anchor to the commit that
-  wrote the line and survive rebases
+- Comments anchor to the commit that wrote the line and survive rebases
 - Mark files reviewed; "New for me" shows only what changed since
 - Reviews are TOML files under `.git/review/`, the repository is never touched
-- Agent loop: an agent reads your comments and answers them in place
 - Load GitHub PRs, publish comments, approve - only on your click
 - Cmd/Ctrl-click a name to jump to its definition
 - Keyboard-driven, with search across all commits and a command palette
 - Native Rust/GPUI, macOS, Linux, Windows
-
-This is an early alpha. Start with:
-
-- `docs/HANDOFF.md`: what exists, what was verified, what is next.
-- `docs/design-decisions.md`: how the app is meant to behave.
-- `docs/mockup/main-screen.html`: the visual reference (open in a browser).
-- `AGENTS.md`: rules for agents working here.
-
-## Layout
-
-```text
-crates/core     diffie-core: repository access, diffs, the review file. No UI.
-crates/symbols  diffie-symbols: where a name is defined, from syntax. No UI.
-crates/app      diffie: the GPUI Kit window and binary.
-docs/         design decisions, handoff, mockup
-```
 
 ## Install
 
@@ -144,6 +131,22 @@ ln -s "$PWD/skills/diffie-review" ~/.claude/skills/diffie-review
 
 Then tell the agent "Let me review", and "address the findings" once you are
 done commenting.
+
+## Development
+
+This is an early alpha, designed and built in the open. Start with:
+
+- `docs/HANDOFF.md`: what exists, what was verified, what is next.
+- `docs/design-decisions.md`: how the app is meant to behave.
+- `docs/mockup/main-screen.html`: the visual reference (open in a browser).
+- `AGENTS.md`: rules for agents working here.
+
+```text
+crates/core     diffie-core: repository access, diffs, the review file. No UI.
+crates/symbols  diffie-symbols: where a name is defined, from syntax. No UI.
+crates/app      diffie: the GPUI Kit window and binary.
+docs/           design decisions, handoff, mockup
+```
 
 ## License
 
