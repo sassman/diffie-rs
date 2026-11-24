@@ -946,71 +946,111 @@ Decided (owner, 2026-11-24):
   "latest PRs on the stack". "Top", "bottom", "parent" and "child" stay
   out of the UI, as "merge-base" already does.
 - **A stack is one comparison.** `--stack <no>` pins `source` to the
-  latest member's head and `target` to the first member's base, and the
-  window keeps exactly one `PerReview`. A stack is a labelling of that
-  comparison's commits, never several concurrent reviews, so `adopt`
-  keeps replacing the review wholesale and the single-slot tasks stay
-  single-slot. `PerReview` carries `stack`; `pull` holds the latest
-  member so the pull-request button and its status keep working.
-- **Detection reads GitHub's native stack first.** A pull request carries
-  a `stack` object and one query returns every member with its position,
-  so membership survives a member merging or closing, which ref chaining
-  does not. Ref chaining - a member's base is the one below it's head -
-  is the fallback, needed because native stacks are GitHub.com only and
-  forbid forks. The fallback compares repository id with ref, never a
-  bare branch name, and counts merged and closed members as structural.
-  A chain broken by retargeting yields a shorter stack, never an error.
-- **The picker groups by member**, latest first, replacing the review-state
-  split while a stack is in view; without one it renders as before. A
-  stack is linear, so the commit list partitions into contiguous ranges
-  and the existing group machinery carries this: a header with the
-  member's state icon, its number and branch, and the `{checked} of
-  {len}` counter that already stands in for a tristate checkbox.
-  Already-reviewed commits keep their muted treatment as row styling.
-- **A comment publishes to the member that owns its commit.** Comments
-  already attach to the commit that wrote the line, and every published
-  card carries a link to its forge copy, so a comment landing on another
-  member is visible rather than mysterious. One publish becomes one
-  review per member that has comments - one notification each, none for
-  a member with nothing to say. A comment whose commit belongs to no
-  member stays unpublished and the status bar counts it.
-- **GitHub is reached through `octocrab`, not the `gh` CLI**, migrated
-  first on its own with no behaviour change. The implementation moves to
-  a `diffie-github` crate on the `diffie-symbols` precedent, so the core
-  keeps its three dependencies and nothing async enters it; the trait
-  stays sync and the crate blocks on one current-thread runtime. The
-  token comes from `GITHUB_TOKEN`, then `GH_TOKEN`, then `gh auth token`,
-  so a developer still configures nothing. Pagination replaces the
-  fifty-pull-request cap, which stack detection makes a correctness
-  matter rather than a cosmetic one.
+  latest member's head, and resolves `target` from the first member the
+  way section 4 already decides it for a single pull request: the base
+  branch's remote-tracking ref while that member is open, its recorded
+  base commit once merged. The window keeps exactly one `PerReview`. A
+  stack is a labelling of that comparison's commits, never several
+  concurrent reviews, so `adopt` keeps replacing the review wholesale
+  and the single-slot tasks stay single-slot. `PerReview` carries
+  `stack`; `pull` holds the latest member so the pull-request button and
+  its status keep working.
+- **Detection reads GitHub's native stack.** A pull request carries a
+  `stack` object, `null` when it is not in one, and a single query
+  returns every member with its position, its refs and its oids.
+  Membership survives a member merging or closing. It is reached through
+  the `graphql()` helper the forge already has, so detection costs no new
+  dependency. A pull request with no `stack` is reported as not being in
+  a stack, naming `--pr`.
+- **Which member owns a commit is decided by ancestry, not by position.**
+  The commit list is committer-date ordered over the whole reachable set,
+  merge commits included, so a member kept current by a merge rather than
+  a rebase, or a member whose head the one above has not rebased onto,
+  breaks any attempt to partition the list by index. Ownership is total:
+  every commit is owned by exactly one member or explicitly unclaimed,
+  because an unclaimed commit would otherwise be selected by
+  `enter_custom`, feed the diff, and be unreachable from any checkbox. A
+  member whose head is absent from the list is reported, not skipped.
+- **The picker groups by member**, latest first, replacing the
+  review-state split while a stack is in view; without one it renders as
+  before. A header carries the member's state icon, its number and
+  branch, and the `{checked} of {len}` counter that already stands in for
+  a tristate checkbox. Already-reviewed commits keep their muted
+  treatment as row styling. "Commits since last review" stays reachable
+  as a row above the groups: section 5 decides that range definition must
+  exist, and the two-group arrangement that provides it today is only an
+  assumed default.
+- **Unchecking a lower member gives a partial diff, and says so.**
+  Unchecking a group switches to the Custom scope, which replays the
+  picked commits onto the parent of the first and gives up per file when
+  a skipped commit touched the same lines. Unchecking the latest members
+  truncates and always works; unchecking a lower one often cannot, since
+  later members routinely touch what earlier ones wrote. The group header
+  says where a skipped member caused it, so a partial result reads as
+  partial. Commits of other members must not read as an error state
+  merely for being unchecked.
+- **One batched fetch for a stack.** Resolving a stack issues a single
+  `git fetch` carrying every member's refspec, on that explicit action,
+  never in the background, objects and remote-tracking refs only. This
+  extends constraint 5's exception, which words it for picking one pull
+  request. The CLI still never fetches.
+- **A comment publishes to the member that owns its commit**, by the
+  ownership above. Every published card carries a link to its forge copy,
+  so a comment landing on another member is visible rather than
+  mysterious. One publish becomes one review per member that has comments
+  - one notification each, none for a member with nothing to say. Each
+  member's draft carries that member's head, or the forge refuses it. A
+  comment owned by no member is withheld locally and counted, which is a
+  new outcome: today's refusals come back from the forge.
+- **Verdicts work in the stack view, per member**, offered from the stack
+  button's menu. They cannot be reached by navigating to the member:
+  that loads the member's own review file, which does not hold the
+  comments written in the stack view.
+- **GitHub is reached through `octocrab` eventually, as its own epic**,
+  not as part of this one. It buys distribution, since a shipped app
+  cannot assume `gh` on `PATH`, and forge test coverage on Windows, where
+  there is none. It buys stacks nothing. Its cost is recorded with the
+  spec: the owner/repo/host resolution `gh` does from the working
+  directory's remotes, an error mapper for a client whose errors display
+  as the bare word "GitHub" or carry a backtrace, two clients per host
+  because REST and GraphQL sit at different Enterprise paths, and new
+  GraphQL for `reviewDecision` and `statusCheckRollup`.
 
 Assumed (working defaults):
 
-- **Verdicts stay per member.** Approve and request-changes are reached
-  by navigating to a member, not applied across the stack: approving is
-  heavier than commenting and five approvals on one click should be
-  asked for, not inferred.
-- A commit no member claims, which needs non-linear history, falls into
-  a trailing muted group, "Not in a pull request".
+- A commit no member claims gets a trailing muted group, "Not in a pull
+  request", and the groups together cover the commit list exhaustively.
+- The latest member's group owns the "Uncommitted changes" row, which is
+  reachable from the first group only.
 - The stack button sits beside the pull-request button at the same
-  metrics, labelled with the stack's number and size, or with the member
-  count alone when ref chaining found it and there is no number. Its
-  menu lists the members in the pull-request picker's row style, each
-  opening that member as a plain `--pr` review.
-- `--stack` takes a number that may name either a pull request or a
-  stack, since both come from one sequence: it is read as a pull request
-  first, then as a stack.
-- Third-party tool stacks are found by ref chaining alone. `ghstack` and
-  `spr`'s default mode point at a synthetic base, so chaining cannot see
-  them; they and Sapling and `av` each write a parseable block into the
-  body instead, and Graphite writes nothing.
+  metrics, labelled with the stack's number and size, or the member count
+  alone when there is no stack number. Its menu lists the members in the
+  pull-request picker's row style, each opening that member as a plain
+  `--pr` review, with a row back to the whole stack so navigating in is
+  not a one-way door.
+- `--stack` takes a number naming either a pull request or a stack. The
+  two share one sequence but each number is claimed by exactly one
+  object, so reading it as a pull request and then as a stack is
+  unambiguous.
+- The fifty-pull-request cap stays. It is a product decision, and the
+  stack list groups one page rather than paging the archive.
 
 Open:
 
-- Whether to parse those body markers.
+- Ref chaining, for Enterprise Server, forks and third-party tools, where
+  the native stack is unavailable. Deferred, with its edge cases
+  recorded. The tool body markers `ghstack`, `spr`, Sapling and `av`
+  write are the weaker signal again, and Graphite writes none.
+- What the title bar reads for a stack, whose source and target are no
+  member's comparison, and whether swapping stays offered.
+- Whether a reload re-resolves the stack, or the button only reports that
+  member states may be stale.
+- What a stack of one does: hide the button, show one group, or fall back
+  to a `--pr` review.
 - Whether a verdict should ever apply across a whole stack.
 - Whether a stack's comments belong in one review file or one per
   member. They land in the latest branch's file today, because a review
   file is keyed by the comparison's source branch, and so sit apart from
   the files the same commits get when reviewed one at a time.
+- Keyboard: moving between members, and reaching the stack menu.
 - Whether the palette should list stacks whose every member is closed.
