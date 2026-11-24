@@ -142,7 +142,7 @@ Working from a checkout, link it instead so `git pull` updates it:
 ln -s "$PWD/skills/diffie-review" ~/.claude/skills/diffie-review
 ```
 
-Then tell the agent "I want to review", and "address the review" once you are
+Then tell the agent "Let me review", and "address the findings" once you are
 done commenting.
 
 ## License
