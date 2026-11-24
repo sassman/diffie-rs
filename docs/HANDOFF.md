@@ -96,8 +96,9 @@ first code: a working core and a first UI scaffold wired to it.
   the decisions are design document section 21. The core half is in:
   `Stack`, `StackSummary`, `PrSummary.head`/`base`, `ownership`, which
   labels each commit with the member that owns it by ancestry,
-  `Forge::stack`/`stacks` against GitHub's native stack, `pr::open_stack`
-  and the `--stack` argument. See "Stacked pull requests, the core half".
+  `Forge::stack`/`stack_numbered`/`stacks` against GitHub's native stack,
+  `pr::open_stack` and the `--stack <stack-number>` argument. See
+  "Stacked pull requests, the core half".
   The only visible effect is an ordinary comparison spanning the stack -
   the epic ships as four pull requests and the UI starts with the second.
 
@@ -166,7 +167,7 @@ Be exact about this when you report further work.
 | Kit fork additions (`on_text_hover` including the modifier-at-rest case, `on_text_click` and its claim, `has_line`, `DiffFile::excerpts`) | Kit tests with simulated pointer and modifier events, macOS, 2026-11-18. The pointing-hand cursor and the underline style compile and render in those tests; how they look was not seen |
 | Symbol navigation in the window: Cmd-hover link styling and cursor, Cmd-click landing inside the diff with the focus mark, the origin card for a name from another crate, "Copy symbol" in the context menu, the tie dialog, a definition entry (excerpt rows, header note and x, panel row), Cmd+[ back from each, chained jumps inside an entry | Compiled, clippy-clean. The window was started once against this repository and loaded with the views built; **no gesture was exercised** - synthetic mouse events do not reach the handlers (see the orphan row above) |
 | Moved-code folds surviving the earlier-comments toggle (`sync_diff_files` puts them back after `set_files`; before, the toggle dropped them whenever orphan entries existed) | Compiled; not seen on screen |
-| Stack detection and `--stack`: the GraphQL selection, the entry order, paging, the null-stack answer, the number-resolution order, `open_stack`'s endpoints and the batched fetch | Run read-only against real GitHub on 2026-11-24: `--stack https://github.com/cli/cli/pull/15073` resolved that twelve-member stack and named its latest member's missing head commit; `gh api repos/cli/cli/stacks/15082` returns all twelve members base-end first, unpaged, and 404s for an unknown number; `--stack 15082`, the stack's own number, resolved to the same stack through REST and then GraphQL in an empty repository whose only remote is `cli/cli`, naming the same latest member as the member URL did; `--stack 1` in this repository reported a pull request in no stack; `--stack 999999` reported neither. The rest is covered by `FakeGh` and throwaway-repository tests. The window was not run with `--stack`; a second entry page was only ever driven through the fake; `stacks()` has never met a repository that has a stack |
+| Stack detection and `--stack`: the GraphQL selection, the entry order, paging, the null-stack answer, the stack-number lookup, the three refusals, `open_stack`'s endpoints and the batched fetch | Run read-only against real GitHub on 2026-11-24: `gh api repos/cli/cli/stacks/15082` returns all twelve members base-end first, unpaged, and 404s for an unknown number; `--stack 15082` resolved that stack through REST and then GraphQL in an empty repository whose only remote is `cli/cli`, and named its latest member's missing head commit; `--stack 15073`, a member's number, was refused there with "it belongs to stack 15082 - try `--stack 15082`"; `--stack 1` in this repository reported a pull request in no stack; `--stack 999999` reported neither. The rest is covered by `FakeGh` and throwaway-repository tests. The window was not run with `--stack`; a second entry page was only ever driven through the fake; `stacks()` has never met a repository that has a stack |
 
 ## Build, run, test
 
@@ -199,12 +200,14 @@ A `--pr` review is connected to its pull request: the title bar gains a
 pull-request icon whose menu opens it in the browser, publishes the
 reviewer's comments to it, and approves it (see "Pull requests and the
 forge" below).
-`diffie --stack <number>` reviews a whole stack of pull requests as that
-one comparison: the latest member's head going into the first member's
-base, resolved by the same rules. The number is any member's or the
-stack's own; a pull request in no stack is refused, naming `--pr`. The
-window is connected to the latest member, and carries nothing else of
-the stack yet.
+`diffie --stack <stack-number>` reviews a whole stack of pull requests as
+that one comparison: the latest member's head going into the first
+member's base, resolved by the same rules. The number is the stack's own
+and nothing else - a pull request's number or URL goes to `--pr` - and a
+number that is a pull request is refused with the number of the stack it
+belongs to, so the refusal names what would have worked. The window is
+connected to the latest member, and carries nothing else of the stack
+yet.
 `diffie --prompt [<review>]` opens no window: it prints the open review
 comments the way "Copy all as prompt" does (no name works only for a sole
 review, several are listed and refused; `--all` includes resolved ones,
@@ -431,21 +434,34 @@ pull request is in stack 42", GraphQL answers "what are that stack's
 members". Resolving a number must never scan `stacks`, whose page cap
 would lose a stack whose members all sit past it.
 
-`pr::open_stack` mirrors `pr::open`: it resolves the number (a member's
-number first; only a number GitHub refuses as a pull request is read as a
-stack's own, through `stack_numbered`), then pins the latest member's head as the
-source and resolves the first member's base by exactly the single pull
-request's rule - the remote-tracking ref while that member is open, the
-recorded base commit once merged. `endpoints` is that shared rule, and
-`fetch_missing` now takes every pull request whose head must be here, so
-a stack's fetch is one `git fetch` carrying every member's
-`refs/pull/<n>/head` plus the first member's base branch.
+`pr::open_stack` mirrors `pr::open`. It takes a stack's number, not a
+`PrArgument`: `--stack` names a stack and `--pr` a pull request, the two
+number themselves separately, and neither flag reaches into the other's
+schema (owner, 2026-11-24; design document section 21). `parse_stack`
+enforces it on the command line - digits only, so a URL is refused with
+the usage message. `resolve_stack` is then one `stack_numbered` call;
+nothing is read as a pull request on the way in. It pins the latest
+member's head as the source and resolves the first member's base by
+exactly the single pull request's rule - the remote-tracking ref while
+that member is open, the recorded base commit once merged. `endpoints`
+is that shared rule, and `fetch_missing` takes every pull request whose
+head must be here, so a stack's fetch is one `git fetch` carrying every
+member's `refs/pull/<n>/head` plus the first member's base branch.
 
-`--stack <number>` takes either reading of the number, refuses to combine
-with `--pr`, revisions, `--prompt` or `--reply`, and never fetches: it
-prints the fetch to run, as `--pr` does. It hands the window the latest
-member as its `Pull`, so the pull-request button, its status and its menu
-keep working; `app.rs` is untouched and `PerReview` carries no stack yet.
+`not_a_stack` keeps a refusal from being a dead end: it runs only when
+the lookup failed, reads the pull request of that number, and words one
+of three answers - a pull request in a stack names both and offers
+`--stack <that stack>`, one in no stack names `--pr <the number>`, and a
+number in neither schema says so and carries the stack endpoint's own
+words. This is the one place `Forge::stack`, the member-to-stack read,
+is used on the command-line path; PR 2 needs it to navigate from a
+member to its stack.
+
+`--stack <stack-number>` refuses to combine with `--pr`, revisions,
+`--prompt` or `--reply`, and never fetches: it prints the fetch to run,
+as `--pr` does. It hands the window the latest member as its `Pull`, so
+the pull-request button, its status and its menu keep working; `app.rs`
+is untouched and `PerReview` carries no stack yet.
 
 Still missing for the feature: everything in the UI - the stack button,
 the picker's member groups, the palette's stack list and per-member

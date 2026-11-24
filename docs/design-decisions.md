@@ -960,8 +960,20 @@ Decided (owner, 2026-11-24):
   returns every member with its position, its refs and its oids.
   Membership survives a member merging or closing. It is reached through
   the `graphql()` helper the forge already has, so detection costs no new
-  dependency. A pull request with no `stack` is reported as not being in
-  a stack, naming `--pr`.
+  dependency. A stack's own number, though, is answered only by REST
+  (`GET /repos/{owner}/{repo}/stacks/{number}`): GraphQL can reach a
+  stack through a member alone. That lookup is direct, never a scan of
+  the stack list, whose page cap would hide a stack behind it.
+- **`--stack` takes a stack's number, `--pr` a pull request's**
+  (owner, 2026-11-24). Stacks and pull requests number themselves
+  separately, so the two flags can never mean the same thing and neither
+  reaches into the other's schema. A URL is refused: a URL names a pull
+  request. Refusal still hands over what would have worked, by looking
+  the pull request of that number up on the error path only: a pull
+  request in a stack names both, and offers `--stack <that stack>` or
+  `--pr <the number>` for the pull request alone; one in no stack names
+  `--pr`; a number in neither schema says so and carries the stack
+  endpoint's own words.
 - **Which member owns a commit is decided by ancestry, not by position.**
   The commit list is committer-date ordered over the whole reachable set,
   merge commits included, so a member kept current by a merge rather than
@@ -1032,10 +1044,6 @@ Assumed (working defaults):
   pull-request picker's row style, each opening that member as a plain
   `--pr` review, with a row back to the whole stack so navigating in is
   not a one-way door.
-- `--stack` takes a number naming either a pull request or a stack. The
-  two share one sequence but each number is claimed by exactly one
-  object, so reading it as a pull request and then as a stack is
-  unambiguous.
 - The fifty-pull-request cap stays. It is a product decision, and the
   stack list groups one page rather than paging the archive.
 

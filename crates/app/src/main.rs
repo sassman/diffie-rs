@@ -14,7 +14,7 @@ use gpui_kit::{
 const USAGE: &str = "\
 Usage: diffie [-C <path>] [<revision> [<revision>]] [--every-difference]
        diffie [-C <path>] --pr <pull-request> [--every-difference]
-       diffie [-C <path>] --stack <number> [--every-difference]
+       diffie [-C <path>] --stack <stack-number> [--every-difference]
        diffie [-C <path>] --prompt [<review>] [--all]
        diffie [-C <path>] --reply <id> <answer> [--session <id>]
 
@@ -39,10 +39,11 @@ to it, approve it. Requires gh on PATH.
 
 --stack reviews a whole stack of pull requests as one comparison: the
 latest member's branch going into the branch the first member merges
-into. Give the number of any member, or the stack's own. GitHub's native
-stacks are the source, so a pull request in none is refused, naming
---pr. The window carries no stack controls; it shows that one
-comparison. Requires gh on PATH.
+into. Give the stack's own number - stacks and pull requests number
+themselves separately, so a pull request's number belongs to --pr, and
+--stack says which stack it is in if you give one by mistake. GitHub's
+native stacks are the source. The window carries no stack controls; it
+shows that one comparison. Requires gh on PATH.
 
 --prompt opens no window: it prints the open review comments the way the
 app's \"Copy all as prompt\" button does, and exits. Without a review name
@@ -152,7 +153,7 @@ fn main() {
             }
             "--stack" => {
                 let Some(value) = arguments.next() else {
-                    exit_usage("--stack needs the number of a pull request or of a stack.");
+                    exit_usage("--stack needs a stack's number; a pull request's goes to --pr.");
                 };
                 stack = Some(value.to_string_lossy().into_owned());
             }
@@ -326,14 +327,14 @@ fn main() {
     // pull-request button, its status and its menu working; nothing here
     // shows the stack itself yet.
     let stack_comparison = stack.map(|value| {
-        let argument = match diffie_core::pr::parse(&value) {
-            Ok(argument) => argument,
+        let number = match diffie_core::pr::parse_stack(&value) {
+            Ok(number) => number,
             Err(message) => exit_usage(&message),
         };
         let opened = diffie_core::pr::open_stack(
             &*backend,
             &*forge,
-            &argument,
+            number,
             mode,
             diffie_core::pr::FetchMode::Never,
         );

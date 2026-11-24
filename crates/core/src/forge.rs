@@ -43,15 +43,17 @@ pub trait Forge: Send + Sync {
 
     /// The stack the named pull request belongs to, every member resolved
     /// to its oids, latest first. `Ok(None)` is a pull request in no
-    /// stack. A number that names no pull request at all is an `Err` in
-    /// the forge's own words - [`crate::pr::open_stack`] then reads the
-    /// number as a stack's own, which is the other thing it can be.
+    /// stack, and a number that names no pull request at all is an `Err`
+    /// in the forge's own words. This is the member-to-stack direction:
+    /// navigating from a pull request, and telling a reviewer who gave
+    /// `--stack` a pull request's number which stack to ask for instead.
     fn stack(&self, argument: &PrArgument) -> Result<Option<Stack>, ForgeError>;
 
-    /// The stack of that number, where the number is the stack's own and
-    /// not a member's. A direct lookup, never a scan of
-    /// [`Self::stacks`]: a stack whose members all sit past that list's
-    /// page must still be reachable by its number.
+    /// The stack of that number - a stack's own number, never a
+    /// member's; the two are separate schemas. What `--stack` resolves
+    /// through. A direct lookup, never a scan of [`Self::stacks`]: a
+    /// stack whose members all sit past that list's page must still be
+    /// reachable by its number.
     fn stack_numbered(&self, number: u64) -> Result<Option<Stack>, ForgeError>;
 
     /// The stacks among the repository's pull requests, the newest

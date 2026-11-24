@@ -6,8 +6,9 @@
 //!
 //! `--stack` reviews a whole stack of pull requests as one comparison.
 //! [`Stack`] is the resolved stack, [`StackSummary`] the row a list shows,
-//! [`open_stack`] turns a named stack into that one comparison, and
-//! [`ownership`] says which member each commit belongs to.
+//! [`parse_stack`] reads the stack's own number off the command line,
+//! [`open_stack`] turns it into that one comparison, and [`ownership`]
+//! says which member each commit belongs to.
 
 use std::collections::{HashMap, HashSet};
 
@@ -239,11 +240,11 @@ pub fn open(
 pub fn open_stack(
     backend: &dyn ReviewBackend,
     forge: &dyn Forge,
-    argument: &PrArgument,
+    number: u64,
     mode: CompareMode,
     fetch: FetchMode,
 ) -> Result<(Stack, Comparison), String> {
-    let stack = resolve_stack(forge, argument)?;
+    let stack = resolve_stack(forge, number)?;
     let (Some(latest), Some(first)) = (stack.pulls.first(), stack.pulls.last()) else {
         return Err("the stack has no pull requests to review.".to_string());
     };
@@ -262,41 +263,57 @@ pub fn open_stack(
     Ok((stack, comparison))
 }
 
-/// The stack `--stack`'s number names. A pull request's answer is final:
-/// pull requests and stacks share one number sequence, with each number
-/// claimed by exactly one object, so a number that is a pull request in no
-/// stack is in no stack at all. Only when the forge says that number is no
-/// pull request does the number's other reading - a stack's own - apply,
-/// and [`Forge::stack_numbered`] looks that one up directly: scanning
+/// The stack of that number, looked up as a stack and nothing else
+/// (owner, 2026-11-24): stacks and pull requests number themselves
+/// separately, so `--stack` never reaches into `--pr`'s schema.
+/// [`Forge::stack_numbered`] is the direct lookup - scanning
 /// [`Forge::stacks`] would lose a stack sitting past that list's page.
-fn resolve_stack(forge: &dyn Forge, argument: &PrArgument) -> Result<Stack, String> {
-    let number = argument.number;
-    let refused = match forge.stack(argument) {
+fn resolve_stack(forge: &dyn Forge, number: u64) -> Result<Stack, String> {
+    let refused = match forge.stack_numbered(number) {
         Ok(Some(stack)) => return Ok(stack),
+        // A stack the forge knows but reports no members for. The empty
+        // list is the answer; `open_stack` is where that is worded.
         Ok(None) => {
-            return Err(format!(
-                "pull request #{number} is not in a stack; review it on its own with \
-                 `--pr {number}`."
-            ));
+            return Ok(Stack {
+                number: Some(number),
+                pulls: Vec::new(),
+            });
         }
         Err(error) => error.to_string(),
     };
-    let neither = || {
-        format!(
+    Err(not_a_stack(forge, number, &refused))
+}
+
+/// Why that number is no stack, and what to type instead. Only ever on
+/// the way out, so the pull-request lookup it costs never slows a
+/// resolve that worked: a reviewer who typed a pull request's number
+/// gets handed the number that would have worked.
+fn not_a_stack(forge: &dyn Forge, number: u64, refused: &str) -> String {
+    match forge.stack(&PrArgument { number, url: None }) {
+        Ok(Some(stack)) => match stack.number {
+            Some(stack) => format!(
+                "{number} is a pull request, not a stack; it belongs to stack {stack} - \
+                 try `--stack {stack}`, or `--pr {number}` for that pull request alone."
+            ),
+            // The forge knows the stack but gives it no number, so
+            // nothing can be typed for it.
+            None => format!(
+                "{number} is a pull request, not a stack; its stack carries no number \
+                 here - use `--pr {number}` for that pull request alone."
+            ),
+        },
+        Ok(None) => format!(
+            "{number} is a pull request, not a stack, and it is not in one - \
+             use `--pr {number}`."
+        ),
+        // Neither namespace knows it. The stack lookup's words, since
+        // that is the question `--stack` asked - a refusal that is not a
+        // plain "no such stack" must still reach the reviewer.
+        Err(_) => format!(
             "{number} is neither a pull request nor a stack here ({refused}); \
              name a pull request with `--pr`."
-        )
-    };
-    // A URL names a pull request by construction, so its number has no
-    // second reading - and a stack of that number is looked for in this
-    // checkout's repository, not the URL's.
-    if argument.url.is_some() {
-        return Err(refused);
+        ),
     }
-    forge
-        .stack_numbered(number)
-        .map_err(|_| neither())?
-        .ok_or_else(neither)
 }
 
 /// The revision the comparison's target end is pinned to. `head` is the
@@ -617,6 +634,24 @@ pub fn parse(value: &str) -> Result<PrArgument, String> {
     })
 }
 
+/// Parses the `--stack` value: a stack's own number, nothing else.
+/// Stacks and pull requests number themselves separately (owner,
+/// 2026-11-24), so neither flag takes the other's names - a pull
+/// request, by number or URL, belongs to `--pr`.
+pub fn parse_stack(value: &str) -> Result<u64, String> {
+    let complaint = || {
+        format!(
+            "`{value}` is not a stack number. --stack takes a stack's number; \
+             a pull request's number or URL goes to --pr."
+        )
+    };
+    // `str::parse` alone would take a leading `+`.
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(complaint());
+    }
+    value.parse().map_err(|_| complaint())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,6 +712,22 @@ mod tests {
         assert!(parse("https://github.com/o/r/pull/abc").is_err());
         assert!(parse("https://github.com/o/r/pull/+5").is_err());
         assert!(parse("https://github.com/o/r/pull/").is_err());
+    }
+
+    #[test]
+    fn a_stack_takes_a_number_and_nothing_else() {
+        assert_eq!(parse_stack("15082").unwrap(), 15082);
+        // A pull request, by number or URL, is `--pr`'s to name.
+        for value in [
+            "https://github.com/o/r/pull/5",
+            "#42",
+            "+5",
+            "",
+            "feat/stack-model",
+        ] {
+            let message = parse_stack(value).unwrap_err();
+            assert!(message.contains("--pr"), "{value}: {message}");
+        }
     }
 
     fn member(number: u64, head: &str, base: &str) -> PullRequest {

@@ -1551,7 +1551,10 @@ impl diffie_core::forge::Forge for StackForge {
             .unwrap()
             .push(format!("stack_numbered {number}"));
         if self.number != Some(number) {
-            return Ok(None);
+            // What the stack endpoint answers for a number that is none.
+            return Err(diffie_core::forge::ForgeError::Refused(
+                "Not Found (HTTP 404)".into(),
+            ));
         }
         Ok(Some(Stack {
             number: self.number,
@@ -1620,10 +1623,6 @@ impl StackFixture {
     }
 }
 
-fn numbered(number: u64) -> PrArgument {
-    PrArgument { number, url: None }
-}
-
 #[test]
 fn a_stack_reviews_the_latest_member_into_the_first_members_base() {
     let fixture = StackFixture::new();
@@ -1631,7 +1630,7 @@ fn a_stack_reviews_the_latest_member_into_the_first_members_base() {
     let (stack, comparison) = open_stack(
         &fixture.backend(),
         &forge,
-        &numbered(2),
+        42,
         CompareMode::BranchAdds,
         FetchMode::Never,
     )
@@ -1648,8 +1647,6 @@ fn a_stack_reviews_the_latest_member_into_the_first_members_base() {
     // ref, which has moved past the commit the stack branched from.
     assert_eq!(comparison.target, "main");
     assert_eq!(comparison.target_rev.as_deref(), Some("o/main"));
-    // A member's number is a pull request, so the list is never asked.
-    assert_eq!(forge.calls(), ["stack 2"]);
 }
 
 #[test]
@@ -1661,7 +1658,7 @@ fn a_merged_first_member_pins_the_base_commit_it_recorded() {
     let (_, comparison) = open_stack(
         &fixture.backend(),
         &forge,
-        &numbered(3),
+        42,
         CompareMode::BranchAdds,
         FetchMode::Never,
     )
@@ -1679,21 +1676,42 @@ fn a_merged_first_member_pins_the_base_commit_it_recorded() {
 fn a_stack_number_resolves_with_its_members_past_the_list() {
     let fixture = StackFixture::new();
     let forge = StackForge::new(fixture.members());
-    let (stack, comparison) = open_stack(
+    let (stack, _) = open_stack(
         &fixture.backend(),
         &forge,
-        &numbered(42),
+        42,
         CompareMode::BranchAdds,
         FetchMode::Never,
     )
     .unwrap();
 
     assert_eq!(stack.number, Some(42));
-    assert_eq!(comparison.source, "feat/c");
-    // 42 is the stack's own number and so no pull request. It is looked
-    // up directly: the list reports nothing here, as it would for a stack
-    // whose members all sit past its page, and that must not lose it.
-    assert_eq!(forge.calls(), ["stack 42", "stack_numbered 42"]);
+    // The stack endpoint and nothing else: no pull request is read first,
+    // and the list reports nothing here, as it would for a stack whose
+    // members all sit past its page. That must not lose it.
+    assert_eq!(forge.calls(), ["stack_numbered 42"]);
+}
+
+#[test]
+fn a_pull_requests_number_hands_over_its_stacks_number() {
+    let fixture = StackFixture::new();
+    let forge = StackForge::new(fixture.members());
+    let error = open_stack(
+        &fixture.backend(),
+        &forge,
+        3,
+        CompareMode::BranchAdds,
+        FetchMode::Never,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        "3 is a pull request, not a stack; it belongs to stack 42 - \
+         try `--stack 42`, or `--pr 3` for that pull request alone."
+    );
+    // The pull-request read only happens on the way out.
+    assert_eq!(forge.calls(), ["stack_numbered 3", "stack 3"]);
 }
 
 #[test]
@@ -1706,16 +1724,17 @@ fn a_pull_request_in_no_stack_names_the_pr_flag() {
     let error = open_stack(
         &fixture.backend(),
         &forge,
-        &numbered(9),
+        9,
         CompareMode::BranchAdds,
         FetchMode::Never,
     )
     .unwrap_err();
 
-    assert!(error.contains("not in a stack"), "{error}");
-    assert!(error.contains("--pr 9"), "{error}");
-    // A pull request's answer is final: no stack carries its number.
-    assert_eq!(forge.calls(), ["stack 9"]);
+    assert_eq!(
+        error,
+        "9 is a pull request, not a stack, and it is not in one - use `--pr 9`."
+    );
+    assert_eq!(forge.calls(), ["stack_numbered 9", "stack 9"]);
 }
 
 #[test]
@@ -1725,7 +1744,7 @@ fn a_number_that_names_neither_names_the_pr_flag() {
     let error = open_stack(
         &fixture.backend(),
         &forge,
-        &numbered(77),
+        77,
         CompareMode::BranchAdds,
         FetchMode::Never,
     )
@@ -1735,8 +1754,11 @@ fn a_number_that_names_neither_names_the_pr_flag() {
         error.contains("neither a pull request nor a stack"),
         "{error}"
     );
+    // The stack endpoint's own words, so a refusal that is not a plain
+    // "no such stack" still reaches the reviewer.
+    assert!(error.contains("Not Found (HTTP 404)"), "{error}");
     assert!(error.contains("`--pr`"), "{error}");
-    assert_eq!(forge.calls(), ["stack 77", "stack_numbered 77"]);
+    assert_eq!(forge.calls(), ["stack_numbered 77", "stack 77"]);
 }
 
 /// Upstream with a three-member stack, each head also reachable as
@@ -1793,7 +1815,7 @@ fn opening_a_stack_fetches_every_member_in_one_call() {
     let (_, comparison) = open_stack(
         &backend,
         &forge,
-        &numbered(3),
+        42,
         CompareMode::BranchAdds,
         FetchMode::OnDemand,
     )
