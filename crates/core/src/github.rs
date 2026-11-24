@@ -278,13 +278,15 @@ impl Forge for GitHubCli {
                 .args(["--limit", PR_PAGE])
                 .args([
                     "--json",
-                    "number,title,author,updatedAt,isDraft,state,statusCheckRollup",
+                    "number,title,author,updatedAt,isDraft,state,\
+                     headRefName,baseRefName,statusCheckRollup",
                     // One @tsv line per pull request; the rollup rides
                     // along as one column of `status;conclusion;state`
                     // triples so the line count stays one per row.
                     "--jq",
                     ".[] | [(.number|tostring), .title, .author.login // \"\", \
                      .updatedAt, (.isDraft|tostring), .state, \
+                     .headRefName, .baseRefName, \
                      ([.statusCheckRollup // [] | .[] | \
                      [(.status // \"\"), (.conclusion // \"\"), (.state // \"\")] \
                      | join(\";\")] | join(\",\"))] | @tsv",
@@ -456,6 +458,7 @@ fn parse_summary(line: &str) -> Result<PrSummary, ForgeError> {
         _ => return Err(unexpected()),
     };
     let state = parse_state(column()?).ok_or_else(unexpected)?;
+    let (head, base) = (untsv(column()?), untsv(column()?));
     let checks = column()?
         .split(',')
         .filter(|check| !check.is_empty())
@@ -473,6 +476,8 @@ fn parse_summary(line: &str) -> Result<PrSummary, ForgeError> {
         state,
         draft,
         checks,
+        head,
+        base,
     })
 }
 
@@ -791,8 +796,9 @@ esac
     fn lists_open_pull_requests_newest_first() {
         let gh = FakeGh::new(concat!(
             r#"  *"pr list --state open"*) printf '"#,
-            r#"17\tTab\\there\talice\t2026-11-16T10:00:00Z\tfalse\tOPEN\tCOMPLETED;SUCCESS;,IN_PROGRESS;;\n"#,
-            r#"21\tA draft\tbob\t2026-11-16T11:00:00Z\ttrue\tOPEN\t\n' ;;"#
+            r#"17\tTab\\there\talice\t2026-11-16T10:00:00Z\tfalse\tOPEN\tfeat/a\tmain"#,
+            r#"\tCOMPLETED;SUCCESS;,IN_PROGRESS;;\n"#,
+            r#"21\tA draft\tbob\t2026-11-16T11:00:00Z\ttrue\tOPEN\tfeat/b\tfeat/a\t\n' ;;"#
         ));
         let rows = gh.forge().pull_requests(PrList::Open).unwrap();
         assert_eq!(
@@ -806,6 +812,8 @@ esac
                     state: PrState::Open,
                     draft: true,
                     checks: None,
+                    head: "feat/b".into(),
+                    base: "feat/a".into(),
                 },
                 PrSummary {
                     number: 17,
@@ -815,13 +823,16 @@ esac
                     state: PrState::Open,
                     draft: false,
                     checks: Some(CheckState::Running),
+                    head: "feat/a".into(),
+                    base: "main".into(),
                 },
             ]
         );
         assert!(
             gh.calls()[0].starts_with(
                 "pr list --state open --limit 50 --json \
-                 number,title,author,updatedAt,isDraft,state,statusCheckRollup"
+                 number,title,author,updatedAt,isDraft,state,\
+                 headRefName,baseRefName,statusCheckRollup"
             ),
             "{}",
             gh.calls()[0]
@@ -834,8 +845,9 @@ esac
         // tell them apart by the state field.
         let gh = FakeGh::new(concat!(
             r#"  *"pr list --state closed"*) printf '"#,
-            r#"3\tLanded\tcarol\t2026-11-10T09:00:00Z\tfalse\tMERGED\tCOMPLETED;FAILURE;\n"#,
-            r#"5\tAbandoned\tdave\t2026-11-12T09:00:00Z\tfalse\tCLOSED\t\n' ;;"#
+            r#"3\tLanded\tcarol\t2026-11-10T09:00:00Z\tfalse\tMERGED\tfeat/c\tmain"#,
+            r#"\tCOMPLETED;FAILURE;\n"#,
+            r#"5\tAbandoned\tdave\t2026-11-12T09:00:00Z\tfalse\tCLOSED\tfeat/d\tmain\t\n' ;;"#
         ));
         let rows = gh.forge().pull_requests(PrList::Finished).unwrap();
         assert_eq!(

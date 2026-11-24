@@ -1018,8 +1018,12 @@ Decided (owner, 2026-11-24):
 
 Assumed (working defaults):
 
-- A commit no member claims gets a trailing muted group, "Not in a pull
-  request", and the groups together cover the commit list exhaustively.
+- The member groups cover the commit list exhaustively, and no "Not in a
+  pull request" group is built: the comparison's source is the latest
+  member's head, so every commit in it is reachable from that head and
+  the latest member claims whatever no lower member took. The core still
+  reports unclaimed commits, so the invariant stays checkable and the
+  group can arrive if the staleness question changes the pin.
 - The latest member's group owns the "Uncommitted changes" row, which is
   reachable from the first group only.
 - The stack button sits beside the pull-request button at the same

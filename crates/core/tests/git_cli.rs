@@ -3,10 +3,11 @@
 use std::path::Path;
 use std::process::Command;
 
+use diffie_core::pr::{Ownership, PrState, PullRequest, Stack, ownership};
 use diffie_core::review::{ReviewInput, ReviewedFile};
 use diffie_core::{
-    BackendError, CompareMode, Comparison, FileState, FileStatus, GitCli, NewSide, Oid, RepoState,
-    ResolutionPush, ReviewBackend, Scope,
+    BackendError, Commit, CompareMode, Comparison, FileState, FileStatus, GitCli, NewSide, Oid,
+    RepoState, ResolutionPush, ReviewBackend, Scope,
 };
 
 fn git(directory: &Path, args: &[&str]) -> String {
@@ -2125,4 +2126,265 @@ fn continue_reports_the_next_conflicted_commit_as_progress() {
     backend.resolve_file("c.txt", "resolved c\n").unwrap();
     backend.continue_op().unwrap();
     assert_eq!(backend.repo_state().unwrap(), RepoState::Idle);
+}
+
+/// A stack of pull requests over a throwaway repository. Every commit gets
+/// an explicit instant: `commits` is committer-date ordered, and the
+/// orderings below are what ownership has to survive.
+struct StackRepo {
+    directory: tempfile::TempDir,
+}
+
+impl StackRepo {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.name", "Ada"]);
+        git(root, &["config", "user.email", "ada@example.invalid"]);
+        git(root, &["config", "core.autocrlf", "false"]);
+        let repo = Self { directory };
+        repo.commit("09:00", "base");
+        repo
+    }
+
+    fn root(&self) -> &Path {
+        self.directory.path()
+    }
+
+    /// One commit adding `name`, at `time` of a fixed day.
+    fn commit(&self, time: &str, name: &str) -> Oid {
+        std::fs::write(self.root().join(name), format!("{name}\n")).unwrap();
+        let date = format!("2026-01-01T{time}:00Z");
+        git_at(self.root(), &date, &["add", "."]);
+        git_at(self.root(), &date, &["commit", "-q", "-m", name]);
+        Oid::new(git(self.root(), &["rev-parse", "HEAD"]))
+    }
+
+    fn branch(&self, name: &str) {
+        git(self.root(), &["checkout", "-q", "-b", name]);
+    }
+
+    fn checkout(&self, name: &str) {
+        git(self.root(), &["checkout", "-q", name]);
+    }
+
+    /// Merges `name` into the checked-out branch at `time`.
+    fn merge(&self, time: &str, name: &str) -> Oid {
+        let date = format!("2026-01-01T{time}:00Z");
+        let message = format!("merge {name}");
+        git_at(
+            self.root(),
+            &date,
+            &["merge", "-q", "--no-ff", name, "-m", &message],
+        );
+        Oid::new(git(self.root(), &["rev-parse", "HEAD"]))
+    }
+
+    fn backend(&self) -> GitCli {
+        GitCli::open(self.root()).unwrap()
+    }
+
+    /// The comparison a stack review runs on: the latest member's head
+    /// against the first member's base.
+    fn commits(&self, source: &str, target: &str) -> Vec<Commit> {
+        let backend = self.backend();
+        let resolved = backend
+            .resolve(&Comparison {
+                source: source.into(),
+                target: target.into(),
+                mode: CompareMode::BranchAdds,
+                uncommitted: false,
+                ..Default::default()
+            })
+            .unwrap();
+        backend.commits(&resolved).unwrap()
+    }
+}
+
+/// One stack member. `target_commit` stays empty: ownership reads the head
+/// and the branch names, never the base commit.
+fn member(number: u64, branch: &str, head: &Oid, base: &str) -> PullRequest {
+    PullRequest {
+        number,
+        id: format!("PR_{number}"),
+        url: format!("https://github.com/o/r/pull/{number}"),
+        state: PrState::Open,
+        source_branch: branch.into(),
+        source_commit: head.to_string(),
+        target_branch: base.into(),
+        target_commit: String::new(),
+        cross_repository: false,
+        head_owner: "o".into(),
+    }
+}
+
+/// Latest first, as the forge's entries are read in.
+fn stack(pulls: Vec<PullRequest>) -> Stack {
+    Stack {
+        number: Some(99),
+        pulls,
+    }
+}
+
+fn group(ownership: &Ownership, number: u64) -> &[Oid] {
+    let group = ownership
+        .groups
+        .iter()
+        .find(|group| group.number == number)
+        .unwrap_or_else(|| panic!("#{number} has no group"));
+    &group.commits
+}
+
+/// Every commit is owned by exactly one member or explicitly unclaimed.
+fn assert_total(ownership: &Ownership, commits: &[Commit]) {
+    let grouped: usize = ownership
+        .groups
+        .iter()
+        .map(|group| group.commits.len())
+        .sum();
+    assert_eq!(grouped + ownership.unclaimed.len(), commits.len());
+    for commit in commits {
+        let owner = ownership.owner(&commit.id).map(|group| group.number);
+        let unclaimed = ownership.unclaimed.contains(&commit.id);
+        assert!(
+            owner.is_some() != unclaimed,
+            "{} is owned by {owner:?} and unclaimed {unclaimed}",
+            commit.id
+        );
+    }
+}
+
+#[test]
+fn a_rebased_stack_gives_each_member_its_own_commits() {
+    let repo = StackRepo::new();
+    repo.branch("feat/a");
+    let a1 = repo.commit("10:00", "a1");
+    let a2 = repo.commit("11:00", "a2");
+    repo.branch("feat/b");
+    let b1 = repo.commit("12:00", "b1");
+    repo.branch("feat/c");
+    let c1 = repo.commit("13:00", "c1");
+
+    let commits = repo.commits("feat/c", "main");
+    let stack = stack(vec![
+        member(3, "feat/c", &c1, "feat/b"),
+        member(2, "feat/b", &b1, "feat/a"),
+        member(1, "feat/a", &a2, "main"),
+    ]);
+    let owned = ownership(&repo.backend(), &stack, &commits).unwrap();
+
+    assert_eq!(group(&owned, 3), [c1]);
+    assert_eq!(group(&owned, 2), [b1]);
+    assert_eq!(group(&owned, 1), [a2, a1]);
+    assert!(owned.unclaimed.is_empty());
+    assert!(owned.stale.is_empty());
+    assert!(owned.off_chain.is_empty());
+    assert_total(&owned, &commits);
+}
+
+#[test]
+fn a_member_kept_current_by_a_merge_keeps_the_commits_above_it() {
+    let repo = StackRepo::new();
+    repo.branch("feat/a");
+    let a1 = repo.commit("10:00", "a1");
+    repo.branch("feat/b");
+    let b1 = repo.commit("11:00", "b1");
+    // The review fix lands on the member below after the member above
+    // committed, and the member above takes it by merging.
+    repo.checkout("feat/a");
+    let a2 = repo.commit("12:00", "a2");
+    repo.checkout("feat/b");
+    let merge = repo.merge("13:00", "feat/a");
+
+    let commits = repo.commits("feat/b", "main");
+    // The trap an index range falls into: the lower member's head sits
+    // above the upper member's own commit in the list, so a range taken
+    // from it would hand `b1` to #1.
+    assert_eq!(
+        commits.iter().map(|commit| &commit.id).collect::<Vec<_>>(),
+        vec![&merge, &a2, &b1, &a1]
+    );
+
+    let stack = stack(vec![
+        member(2, "feat/b", &merge, "feat/a"),
+        member(1, "feat/a", &a2, "main"),
+    ]);
+    let owned = ownership(&repo.backend(), &stack, &commits).unwrap();
+
+    assert_eq!(group(&owned, 2), [merge, b1]);
+    assert_eq!(group(&owned, 1), [a2, a1]);
+    assert!(owned.stale.is_empty());
+    assert_total(&owned, &commits);
+}
+
+#[test]
+fn a_member_head_outside_the_comparison_is_reported() {
+    let repo = StackRepo::new();
+    repo.branch("feat/a");
+    let a1 = repo.commit("10:00", "a1");
+    repo.branch("feat/b");
+    let b1 = repo.commit("11:00", "b1");
+    // The member below takes a review fix and the one above has not
+    // rebased onto it, so #1's head is nowhere in the comparison.
+    repo.checkout("feat/a");
+    let a2 = repo.commit("12:00", "a2");
+
+    let commits = repo.commits("feat/b", "main");
+    let stack = stack(vec![
+        member(2, "feat/b", &b1, "feat/a"),
+        member(1, "feat/a", &a2, "main"),
+    ]);
+    let owned = ownership(&repo.backend(), &stack, &commits).unwrap();
+
+    assert_eq!(owned.stale, vec![1]);
+    // Reported, not skipped: the commits it does carry are still its own.
+    assert_eq!(group(&owned, 1), [a1]);
+    assert_eq!(group(&owned, 2), [b1]);
+    assert_total(&owned, &commits);
+}
+
+#[test]
+fn commits_no_member_claims_can_sit_anywhere_in_the_list() {
+    let repo = StackRepo::new();
+    repo.branch("feat/a");
+    let a1 = repo.commit("10:00", "a1");
+    repo.branch("feat/b");
+    let b1 = repo.commit("12:00", "b1");
+    // Work that belongs to no pull request, merged into the latest
+    // branch after the stack was resolved on `b1`.
+    repo.checkout("feat/a");
+    repo.branch("side");
+    let u1 = repo.commit("11:00", "u1");
+    repo.checkout("feat/b");
+    let merge = repo.merge("13:00", "side");
+
+    let commits = repo.commits("feat/b", "main");
+    let stack = stack(vec![
+        member(2, "feat/b", &b1, "feat/a"),
+        member(1, "feat/a", &a1, "main"),
+    ]);
+    let owned = ownership(&repo.backend(), &stack, &commits).unwrap();
+
+    assert_eq!(group(&owned, 2), [b1]);
+    assert_eq!(group(&owned, 1), [a1]);
+    // `u1` sits between two owned commits, not at the end of the list.
+    assert_eq!(commits[2].id, u1);
+    assert_eq!(owned.unclaimed, vec![merge, u1]);
+    assert_total(&owned, &commits);
+}
+
+#[test]
+fn a_stack_with_no_members_leaves_every_commit_unclaimed() {
+    let repo = StackRepo::new();
+    repo.branch("feat/a");
+    let a1 = repo.commit("10:00", "a1");
+    let a2 = repo.commit("11:00", "a2");
+
+    let commits = repo.commits("feat/a", "main");
+    let owned = ownership(&repo.backend(), &stack(Vec::new()), &commits).unwrap();
+
+    assert!(owned.groups.is_empty());
+    assert_eq!(owned.unclaimed, vec![a2, a1]);
+    assert_total(&owned, &commits);
 }

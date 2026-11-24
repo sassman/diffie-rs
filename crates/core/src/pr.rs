@@ -1,12 +1,18 @@
 //! `--pr`: the pull request a review is connected to, as a
-//! [`Forge`](crate::forge::Forge) describes it, the parsing of the
-//! command-line value that names it, and [`open`], which turns the named
-//! pull request into the comparison a review runs on - for the command
-//! line and for the in-app picker alike.
+//! [`Forge`] describes it, the parsing of the command-line value that
+//! names it, and [`open`], which turns the named pull request into the
+//! comparison a review runs on - for the command line and for the in-app
+//! picker alike.
+//!
+//! `--stack` reviews a whole stack of pull requests as one comparison.
+//! [`Stack`] is the resolved stack, [`StackSummary`] the row a list shows,
+//! and [`ownership`] says which member each commit belongs to.
+
+use std::collections::{HashMap, HashSet};
 
 use crate::backend::ReviewBackend;
 use crate::forge::Forge;
-use crate::model::{CompareMode, Comparison};
+use crate::model::{Commit, CompareMode, Comparison, Oid};
 
 /// The `--pr` value, parsed but not yet resolved.
 #[derive(Debug, PartialEq, Eq)]
@@ -116,6 +122,77 @@ pub struct PrSummary {
     pub draft: bool,
     /// The head commit's checks folded to one verdict; `None` without any.
     pub checks: Option<CheckState>,
+    /// The branch it merges (`headRefName`), and the branch it merges into
+    /// (`baseRefName`). A row shows neither; they are what tells a stack's
+    /// members apart from each other and from the branch below.
+    pub head: String,
+    pub base: String,
+}
+
+/// A stack as a list shows it: enough for a row, not enough to review.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackSummary {
+    /// The forge's number for the stack itself, where it has one.
+    pub number: Option<u64>,
+    /// The branch the first member merges into.
+    pub base: String,
+    /// Latest first, like [`Stack::pulls`].
+    pub members: Vec<PrSummary>,
+}
+
+/// A resolved stack: every member carries its oids.
+#[derive(Clone, Debug)]
+pub struct Stack {
+    pub number: Option<u64>,
+    /// Latest first: the member the comparison's source comes from leads,
+    /// the one nearest the target branch is last.
+    pub pulls: Vec<PullRequest>,
+}
+
+/// Which member of a stack owns each commit of the comparison.
+///
+/// Total by construction: every commit handed to [`ownership`] sits in
+/// exactly one group or in `unclaimed`. The picker seeds a Custom
+/// selection from all of them, so a commit in no group would be selected,
+/// feed the diff, and be reachable from no checkbox.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ownership {
+    /// One group per member, latest first, so a group shares its index
+    /// with [`Stack::pulls`].
+    pub groups: Vec<MemberCommits>,
+    /// The commits no member contains, in the commit list's order. They
+    /// can sit anywhere in it, not only at its end.
+    pub unclaimed: Vec<Oid>,
+    /// Members whose head is not among the commits, latest first: a member
+    /// below has moved on and this one has not rebased onto it, so the
+    /// stack is out of date. Reported rather than skipped, because an
+    /// empty group hides the fault.
+    pub stale: Vec<u64>,
+    /// Members whose base branch is not the head branch of the member
+    /// below, latest first. The order is what decides ownership, so a list
+    /// that is no chain makes the groups under it suspect. Ancestry cannot
+    /// answer this: a member the one above has not rebased onto is off the
+    /// ancestry line and still a proper link.
+    pub off_chain: Vec<u64>,
+    /// Which group holds a commit, so the picker and the publish routing
+    /// ask the same question without walking the groups.
+    by_commit: HashMap<Oid, usize>,
+}
+
+/// One member's commits, in the commit list's own order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemberCommits {
+    pub number: u64,
+    /// The member's head branch, for the group header.
+    pub branch: String,
+    pub commits: Vec<Oid>,
+}
+
+impl Ownership {
+    /// The member that owns `commit`, `None` when no member contains it.
+    pub fn owner(&self, commit: &Oid) -> Option<&MemberCommits> {
+        self.groups.get(*self.by_commit.get(commit)?)
+    }
 }
 
 /// Whether [`open`] may fetch missing commits. The command line never
@@ -308,6 +385,91 @@ fn fetch_missing(backend: &dyn ReviewBackend, pull: &PullRequest) -> Result<(), 
         .map_err(|error| error.to_string())
 }
 
+/// Which member of `stack` owns each of `commits`: the lowest member -
+/// the one nearest the target branch - that contains a commit owns it.
+/// Separate and tested because the picker groups by it and publishing
+/// routes by it, and both must agree. The error is the message to show.
+///
+/// Position cannot decide this. The commit list is committer-date ordered
+/// over the whole reachable set, merge commits included, so a member kept
+/// current by merging the member below rather than rebasing onto it puts
+/// that member's head in the middle of the list; an index range taken
+/// from there hands the lower member the commits of the one above, which
+/// would then publish its comments to the wrong pull request.
+///
+/// One ancestry call per member, so the cost follows the stack's size,
+/// not the comparison's length.
+pub fn ownership(
+    backend: &dyn ReviewBackend,
+    stack: &Stack,
+    commits: &[Commit],
+) -> Result<Ownership, String> {
+    let ids: Vec<Oid> = commits.iter().map(|commit| commit.id.clone()).collect();
+    let listed: HashSet<&str> = ids.iter().map(Oid::as_str).collect();
+    let mut groups = Vec::with_capacity(stack.pulls.len());
+    let mut claimed: HashSet<Oid> = HashSet::new();
+    let mut stale = Vec::new();
+    // Lowest first, so the member nearest the target branch claims a
+    // commit before any member above it sees it.
+    for pull in stack.pulls.iter().rev() {
+        let mut group = MemberCommits {
+            number: pull.number,
+            branch: pull.source_branch.clone(),
+            commits: Vec::new(),
+        };
+        // A head outside the comparison is the routine "the member below
+        // took a review fix and this one has not rebased" state. Its
+        // earlier commits are still in the list, so it is still asked -
+        // unless the head is not here at all and nothing can be asked.
+        let reachable = if listed.contains(pull.source_commit.as_str()) {
+            true
+        } else {
+            stale.push(pull.number);
+            backend
+                .revision_exists(&pull.source_commit)
+                .map_err(|error| error.to_string())?
+        };
+        if reachable {
+            let mine = backend
+                .contains_commits(&pull.source_commit, &ids)
+                .map_err(|error| error.to_string())?;
+            for id in mine {
+                if claimed.insert(id.clone()) {
+                    group.commits.push(id);
+                }
+            }
+        }
+        groups.push(group);
+    }
+    groups.reverse();
+    stale.reverse();
+    Ok(Ownership {
+        by_commit: groups
+            .iter()
+            .enumerate()
+            .flat_map(|(index, group)| group.commits.iter().map(move |id| (id.clone(), index)))
+            .collect(),
+        unclaimed: ids
+            .iter()
+            .filter(|id| !claimed.contains(id))
+            .cloned()
+            .collect(),
+        groups,
+        stale,
+        off_chain: off_chain(&stack.pulls),
+    })
+}
+
+/// The members whose base branch does not name the member below them.
+/// `pulls` is latest first, as [`Stack::pulls`] is.
+fn off_chain(pulls: &[PullRequest]) -> Vec<u64> {
+    pulls
+        .windows(2)
+        .filter(|link| link[0].target_branch != link[1].source_branch)
+        .map(|link| link[0].number)
+        .collect()
+}
+
 /// Parses the `--pr` value: a decimal number, or an http(s) URL shaped
 /// `https://<host>/<owner>/<repo>/pull/<number>` with trailing path segments,
 /// query or fragment ignored. Pure, so the command line refuses a typo
@@ -420,5 +582,42 @@ mod tests {
         assert!(parse("https://github.com/o/r/pull/abc").is_err());
         assert!(parse("https://github.com/o/r/pull/+5").is_err());
         assert!(parse("https://github.com/o/r/pull/").is_err());
+    }
+
+    fn member(number: u64, head: &str, base: &str) -> PullRequest {
+        PullRequest {
+            number,
+            id: format!("PR_{number}"),
+            url: format!("https://github.com/o/r/pull/{number}"),
+            state: PrState::Open,
+            source_branch: head.into(),
+            source_commit: "h".repeat(40),
+            target_branch: base.into(),
+            target_commit: "b".repeat(40),
+            cross_repository: false,
+            head_owner: "o".into(),
+        }
+    }
+
+    #[test]
+    fn a_chain_of_members_reports_no_broken_link() {
+        let pulls = vec![
+            member(3, "feat/c", "feat/b"),
+            member(2, "feat/b", "feat/a"),
+            member(1, "feat/a", "main"),
+        ];
+        assert_eq!(off_chain(&pulls), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn a_member_based_past_the_one_below_is_off_the_chain() {
+        // #3 is based on main, so the list is no chain and the groups
+        // under it cannot be trusted to be ordered base-first.
+        let pulls = vec![
+            member(3, "feat/c", "main"),
+            member(2, "feat/b", "feat/a"),
+            member(1, "feat/a", "main"),
+        ];
+        assert_eq!(off_chain(&pulls), vec![3]);
     }
 }

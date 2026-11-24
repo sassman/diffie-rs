@@ -90,6 +90,15 @@ first code: a working core and a first UI scaffold wired to it.
   within its own frame was dropped (owner, 2026-11-21, after feeling
   the double scroll). The Kit's wheel hand-off stays: it is what makes
   a nested resolver bubble an unconsumed turn outward at all.
+- **Stacked pull requests** (branch `feat/stack-model`), started
+  2026-11-24: the spec is
+  `docs/superpowers/specs/2026-11-24-stacked-pull-requests-design.md` and
+  the decisions are design document section 21. The core model is in:
+  `Stack`, `StackSummary`, `PrSummary.head`/`base`, and `ownership`,
+  which labels each commit with the member that owns it by ancestry.
+  See "Stacked pull requests, the core half". Nothing is visible in the
+  app yet, by design - the epic ships as four pull requests and this is
+  the first.
 
 ## Verification status
 
@@ -301,6 +310,11 @@ website/                      the product page: static HTML and CSS, no
   files costs one subprocess per file otherwise, which read as a stalled
   "Reading the repository". The file panel is a virtualized `uniform_list`
   for the same reason: an element per row each frame froze large reviews.
+- `contains_commits(rev, candidates)`: which of `candidates` are reachable
+  from `rev`, in the order given. One call for any number of candidates, so
+  labelling a stack's commits by ancestry costs one per member. `GitCli`
+  asks `rev-list --no-walk=unsorted --stdin` with `^rev` - which can only
+  name the candidates `rev` does *not* reach - and takes the complement.
 - `author_name`, `review_dir`.
 
 How `GitCli` produces each scope:
@@ -356,6 +370,36 @@ branch names, exact commits, its page and its forge id. `main.rs` turns that
 into a comparison whose `source_rev`/`target_rev` pin the PR's commits while
 `source`/`target` keep the branch names for the title and the review file;
 `GitCli::resolve` resolves the pinned revision when one is set.
+
+### Stacked pull requests, the core half
+
+`pr.rs` carries the stack model from the spec
+(`docs/superpowers/specs/2026-11-24-stacked-pull-requests-design.md`,
+sections 5 and 5.1; design document section 21). `StackSummary` is a row a
+list shows - a stack number, the first member's base branch and its
+members as `PrSummary`, so the stack menu and the palette reuse
+`pr_picker`'s row renderer. `Stack` is the resolved thing: the members as
+`PullRequest`, latest first. `PrSummary` grew `head` and `base`, the
+branch names that tell the members apart.
+
+`ownership(backend, stack, commits)` says which member owns each commit:
+the lowest member - nearest the target branch - that contains it, by
+ancestry. Position cannot decide it, because `commits` is committer-date
+ordered over the whole reachable set with merges interleaved: a member
+kept current by merging the one below rather than rebasing onto it puts
+that member's head mid-list, and an index range from there hands the
+lower member the commits of the one above. The returned `Ownership` is
+total - every commit is in exactly one group or in `unclaimed`, because
+`enter_custom` seeds its selection from all of them and a commit in no
+group would be unreachable from any checkbox. It also reports `stale`
+(members whose head is not in the comparison, the routine "the member
+below took a review fix and this one has not rebased" state) and
+`off_chain` (a member whose base branch does not name the member below,
+which makes the order ownership relies on unfounded).
+
+Still missing for the feature: `Forge::stack` and `Forge::stacks`,
+`pr::open_stack` with its single batched fetch, the `--stack` argument,
+and everything in the UI.
 
 ### Pull requests and the forge
 
