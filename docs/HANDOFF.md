@@ -93,12 +93,13 @@ first code: a working core and a first UI scaffold wired to it.
 - **Stacked pull requests** (branch `feat/stack-model`), started
   2026-11-24: the spec is
   `docs/superpowers/specs/2026-11-24-stacked-pull-requests-design.md` and
-  the decisions are design document section 21. The core model is in:
-  `Stack`, `StackSummary`, `PrSummary.head`/`base`, and `ownership`,
-  which labels each commit with the member that owns it by ancestry.
-  See "Stacked pull requests, the core half". Nothing is visible in the
-  app yet, by design - the epic ships as four pull requests and this is
-  the first.
+  the decisions are design document section 21. The core half is in:
+  `Stack`, `StackSummary`, `PrSummary.head`/`base`, `ownership`, which
+  labels each commit with the member that owns it by ancestry,
+  `Forge::stack`/`stacks` against GitHub's native stack, `pr::open_stack`
+  and the `--stack` argument. See "Stacked pull requests, the core half".
+  The only visible effect is an ordinary comparison spanning the stack -
+  the epic ships as four pull requests and the UI starts with the second.
 
 ## Verification status
 
@@ -165,6 +166,7 @@ Be exact about this when you report further work.
 | Kit fork additions (`on_text_hover` including the modifier-at-rest case, `on_text_click` and its claim, `has_line`, `DiffFile::excerpts`) | Kit tests with simulated pointer and modifier events, macOS, 2026-11-18. The pointing-hand cursor and the underline style compile and render in those tests; how they look was not seen |
 | Symbol navigation in the window: Cmd-hover link styling and cursor, Cmd-click landing inside the diff with the focus mark, the origin card for a name from another crate, "Copy symbol" in the context menu, the tie dialog, a definition entry (excerpt rows, header note and x, panel row), Cmd+[ back from each, chained jumps inside an entry | Compiled, clippy-clean. The window was started once against this repository and loaded with the views built; **no gesture was exercised** - synthetic mouse events do not reach the handlers (see the orphan row above) |
 | Moved-code folds surviving the earlier-comments toggle (`sync_diff_files` puts them back after `set_files`; before, the toggle dropped them whenever orphan entries existed) | Compiled; not seen on screen |
+| Stack detection and `--stack`: the GraphQL selection, the entry order, paging, the null-stack answer, the number-resolution order, `open_stack`'s endpoints and the batched fetch | The query and both fallback paths were run read-only against real GitHub on 2026-11-24: `--stack https://github.com/cli/cli/pull/15073` resolved that twelve-member stack and named its latest member's missing head commit; `--stack 1` in this repository reported a pull request in no stack; `--stack 999999` reported neither, after the stack list came back empty. The rest is covered by `FakeGh` and throwaway-repository tests. The window was not run with `--stack`, a stack past one entry page was never seen live (only the fake pages), and `stacks()` has never met a repository that has one |
 
 ## Build, run, test
 
@@ -197,6 +199,12 @@ A `--pr` review is connected to its pull request: the title bar gains a
 pull-request icon whose menu opens it in the browser, publishes the
 reviewer's comments to it, and approves it (see "Pull requests and the
 forge" below).
+`diffie --stack <number>` reviews a whole stack of pull requests as that
+one comparison: the latest member's head going into the first member's
+base, resolved by the same rules. The number is any member's or the
+stack's own; a pull request in no stack is refused, naming `--pr`. The
+window is connected to the latest member, and carries nothing else of
+the stack yet.
 `diffie --prompt [<review>]` opens no window: it prints the open review
 comments the way "Copy all as prompt" does (no name works only for a sole
 review, several are listed and refused; `--all` includes resolved ones,
@@ -397,9 +405,38 @@ below took a review fix and this one has not rebased" state) and
 `off_chain` (a member whose base branch does not name the member below,
 which makes the order ownership relies on unfounded).
 
-Still missing for the feature: `Forge::stack` and `Forge::stacks`,
-`pr::open_stack` with its single batched fetch, the `--stack` argument,
-and everything in the UI.
+`Forge::stack` and `Forge::stacks` read GitHub's native stack through the
+`graphql()` helper, so detection costs no new dependency. One query
+(`STACK`) carries every field a `PullRequest` needs for every member, so
+a stack resolves in one call however long it is; it pages on the entry
+connection's `pageInfo`. `stack` answers `Ok(None)` for a pull request
+whose `stack` field is null - the jq filter then prints nothing - and an
+`Err` for a number that names no pull request, which is how GitHub
+answers it. `stacks` groups one `PR_PAGE` of open pull requests by their
+stack object; the cap stays, and a stack whose members all sit past the
+page is not reported. GraphQL names the repository, which `pr view` and
+`pr list` find themselves, so a bare number costs one `gh repo view` -
+a URL answers for host, owner and repository on its own.
+
+`pr::open_stack` mirrors `pr::open`: it resolves the number (a member's
+number first; only a number GitHub refuses as a pull request is read as a
+stack's own, through `stacks`), then pins the latest member's head as the
+source and resolves the first member's base by exactly the single pull
+request's rule - the remote-tracking ref while that member is open, the
+recorded base commit once merged. `endpoints` is that shared rule, and
+`fetch_missing` now takes every pull request whose head must be here, so
+a stack's fetch is one `git fetch` carrying every member's
+`refs/pull/<n>/head` plus the first member's base branch.
+
+`--stack <number>` takes either reading of the number, refuses to combine
+with `--pr`, revisions, `--prompt` or `--reply`, and never fetches: it
+prints the fetch to run, as `--pr` does. It hands the window the latest
+member as its `Pull`, so the pull-request button, its status and its menu
+keep working; `app.rs` is untouched and `PerReview` carries no stack yet.
+
+Still missing for the feature: everything in the UI - the stack button,
+the picker's member groups, the palette's stack list and per-member
+publishing.
 
 ### Pull requests and the forge
 

@@ -3,7 +3,10 @@
 use std::path::Path;
 use std::process::Command;
 
-use diffie_core::pr::{Ownership, PrState, PullRequest, Stack, ownership};
+use diffie_core::pr::{
+    FetchMode, Ownership, PrArgument, PrState, PrSummary, PullRequest, Stack, StackSummary,
+    open_stack, ownership,
+};
 use diffie_core::review::{ReviewInput, ReviewedFile};
 use diffie_core::{
     BackendError, Commit, CompareMode, Comparison, FileState, FileStatus, GitCli, NewSide, Oid,
@@ -1337,6 +1340,14 @@ impl diffie_core::forge::Forge for PullForge {
     ) -> Result<(), diffie_core::forge::ForgeError> {
         unreachable!("opening never reacts")
     }
+
+    fn stack(&self, _: &PrArgument) -> Result<Option<Stack>, diffie_core::forge::ForgeError> {
+        unreachable!("opening one pull request never reads a stack")
+    }
+
+    fn stacks(&self) -> Result<Vec<StackSummary>, diffie_core::forge::ForgeError> {
+        unreachable!("opening never lists")
+    }
 }
 
 fn pull_request(head: &Oid, base: &Oid) -> diffie_core::pr::PullRequest {
@@ -1404,6 +1415,408 @@ fn opening_without_fetching_names_the_fetch_to_run() {
          `git fetch origin topic` and retry - diffie never fetches."
     );
     assert!(!backend.revision_exists(head.as_str()).unwrap());
+}
+
+/// One member of a stack fixture. Unlike the ownership helper's, its
+/// recorded base commit matters: that is what a merged member pins the
+/// comparison's target to.
+fn stack_member(number: u64, head: &Oid, source: &str, target: &str, base: &Oid) -> PullRequest {
+    PullRequest {
+        number,
+        id: format!("PR_{number}"),
+        url: format!("https://github.com/o/r/pull/{number}"),
+        state: PrState::Open,
+        source_branch: source.into(),
+        source_commit: head.to_string(),
+        target_branch: target.into(),
+        target_commit: base.to_string(),
+        cross_repository: false,
+        head_owner: "o".into(),
+    }
+}
+
+/// A forge that knows one stack. `stack` answers it for any member's
+/// number, `Ok(None)` for `unstacked`, and refuses every other number the
+/// way GitHub refuses one that names no pull request - including the
+/// stack's own, which only the list maps back to a member.
+#[derive(Default)]
+struct StackForge {
+    /// Latest first, as the forge reads a stack's entries in.
+    members: Vec<PullRequest>,
+    number: Option<u64>,
+    unstacked: Option<u64>,
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl StackForge {
+    fn new(members: Vec<PullRequest>) -> Self {
+        Self {
+            members,
+            number: Some(42),
+            ..Default::default()
+        }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl diffie_core::forge::Forge for StackForge {
+    fn name(&self) -> &'static str {
+        "Fake"
+    }
+
+    fn pull_request(&self, _: &PrArgument) -> Result<PullRequest, diffie_core::forge::ForgeError> {
+        unreachable!("a stack never opens one pull request")
+    }
+
+    fn pull_requests(
+        &self,
+        _: diffie_core::pr::PrList,
+    ) -> Result<Vec<PrSummary>, diffie_core::forge::ForgeError> {
+        unreachable!("a stack is listed through stacks()")
+    }
+
+    fn status(
+        &self,
+        _: &PullRequest,
+    ) -> Result<diffie_core::pr::PullStatus, diffie_core::forge::ForgeError> {
+        unreachable!("opening never asks for status")
+    }
+
+    fn submit_review(
+        &self,
+        _: &PullRequest,
+        _: &diffie_core::forge::ReviewDraft,
+    ) -> Result<Vec<diffie_core::forge::Posting>, diffie_core::forge::ForgeError> {
+        unreachable!("opening never publishes")
+    }
+
+    fn update_comment(
+        &self,
+        _: &PullRequest,
+        _: &str,
+        _: &str,
+    ) -> Result<(), diffie_core::forge::ForgeError> {
+        unreachable!("opening never edits")
+    }
+
+    fn react(
+        &self,
+        _: &PullRequest,
+        _: &str,
+        _: diffie_core::review::ReactionKind,
+    ) -> Result<(), diffie_core::forge::ForgeError> {
+        unreachable!("opening never reacts")
+    }
+
+    fn stack(
+        &self,
+        argument: &PrArgument,
+    ) -> Result<Option<Stack>, diffie_core::forge::ForgeError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("stack {}", argument.number));
+        if self.unstacked == Some(argument.number) {
+            return Ok(None);
+        }
+        if !self
+            .members
+            .iter()
+            .any(|member| member.number == argument.number)
+        {
+            return Err(diffie_core::forge::ForgeError::Refused(format!(
+                "Could not resolve to a PullRequest with the number of {}.",
+                argument.number
+            )));
+        }
+        Ok(Some(Stack {
+            number: self.number,
+            pulls: self.members.clone(),
+        }))
+    }
+
+    fn stacks(&self) -> Result<Vec<StackSummary>, diffie_core::forge::ForgeError> {
+        self.calls.lock().unwrap().push("stacks".to_string());
+        Ok(vec![StackSummary {
+            number: self.number,
+            base: self
+                .members
+                .last()
+                .map(|first| first.target_branch.clone())
+                .unwrap_or_default(),
+            members: self
+                .members
+                .iter()
+                .map(|member| PrSummary {
+                    number: member.number,
+                    title: format!("#{}", member.number),
+                    author: "Ada".into(),
+                    updated: 0,
+                    state: member.state,
+                    draft: false,
+                    checks: None,
+                    head: member.source_branch.clone(),
+                    base: member.target_branch.clone(),
+                })
+                .collect(),
+        }])
+    }
+}
+
+/// A stack of three members over one throwaway repository: `feat/c` going
+/// into `feat/b` into `feat/a` into `main`. `main` has moved on since the
+/// stack was branched and `o/main` carries that newer tip, so a test can
+/// tell the remote-tracking ref apart from a member's recorded base.
+struct StackFixture {
+    directory: tempfile::TempDir,
+    /// Latest first, like the members.
+    heads: Vec<Oid>,
+    /// The commit `feat/a` branched from and records as its base.
+    base: Oid,
+}
+
+impl StackFixture {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        let commit = |name: &str| {
+            std::fs::write(root.join(name), format!("{name}\n")).unwrap();
+            git(root, &["add", "."]);
+            git(root, &["commit", "-q", "-m", name]);
+            Oid::new(git(root, &["rev-parse", "HEAD"]))
+        };
+        let base = commit("base");
+        let mut heads = Vec::new();
+        for (branch, file) in [("feat/a", "a"), ("feat/b", "b"), ("feat/c", "c")] {
+            git(root, &["checkout", "-q", "-b", branch]);
+            heads.push(commit(file));
+        }
+        heads.reverse();
+        git(root, &["checkout", "-q", "main"]);
+        commit("moved on");
+        git(root, &["remote", "add", "o", "."]);
+        git(root, &["update-ref", "refs/remotes/o/main", "main"]);
+        Self {
+            directory,
+            heads,
+            base,
+        }
+    }
+
+    fn backend(&self) -> GitCli {
+        GitCli::open(self.directory.path()).unwrap()
+    }
+
+    /// Latest first, as the forge reads a stack's entries in.
+    fn members(&self) -> Vec<PullRequest> {
+        vec![
+            stack_member(3, &self.heads[0], "feat/c", "feat/b", &self.heads[1]),
+            stack_member(2, &self.heads[1], "feat/b", "feat/a", &self.heads[2]),
+            stack_member(1, &self.heads[2], "feat/a", "main", &self.base),
+        ]
+    }
+}
+
+fn numbered(number: u64) -> PrArgument {
+    PrArgument { number, url: None }
+}
+
+#[test]
+fn a_stack_reviews_the_latest_member_into_the_first_members_base() {
+    let fixture = StackFixture::new();
+    let forge = StackForge::new(fixture.members());
+    let (stack, comparison) = open_stack(
+        &fixture.backend(),
+        &forge,
+        &numbered(2),
+        CompareMode::BranchAdds,
+        FetchMode::Never,
+    )
+    .unwrap();
+
+    assert_eq!(stack.number, Some(42));
+    assert_eq!(stack.pulls.first().unwrap().number, 3);
+    assert_eq!(comparison.source, "feat/c");
+    assert_eq!(
+        comparison.source_rev.as_deref(),
+        Some(fixture.heads[0].as_str())
+    );
+    // The first member is open, so its base follows the remote-tracking
+    // ref, which has moved past the commit the stack branched from.
+    assert_eq!(comparison.target, "main");
+    assert_eq!(comparison.target_rev.as_deref(), Some("o/main"));
+    // A member's number is a pull request, so the list is never asked.
+    assert_eq!(forge.calls(), ["stack 2"]);
+}
+
+#[test]
+fn a_merged_first_member_pins_the_base_commit_it_recorded() {
+    let fixture = StackFixture::new();
+    let mut members = fixture.members();
+    members[2].state = PrState::Merged;
+    let forge = StackForge::new(members);
+    let (_, comparison) = open_stack(
+        &fixture.backend(),
+        &forge,
+        &numbered(3),
+        CompareMode::BranchAdds,
+        FetchMode::Never,
+    )
+    .unwrap();
+
+    // Not `o/main`, which already carries what the member merged.
+    assert_eq!(comparison.target, "main");
+    assert_eq!(
+        comparison.target_rev.as_deref(),
+        Some(fixture.base.as_str())
+    );
+}
+
+#[test]
+fn a_stack_number_resolves_through_the_stack_list() {
+    let fixture = StackFixture::new();
+    let forge = StackForge::new(fixture.members());
+    let (stack, _) = open_stack(
+        &fixture.backend(),
+        &forge,
+        &numbered(42),
+        CompareMode::BranchAdds,
+        FetchMode::Never,
+    )
+    .unwrap();
+
+    assert_eq!(stack.number, Some(42));
+    // 42 is the stack's own number and so no pull request; the list maps
+    // it back to a member, which the second read resolves.
+    assert_eq!(forge.calls(), ["stack 42", "stacks", "stack 3"]);
+}
+
+#[test]
+fn a_pull_request_in_no_stack_names_the_pr_flag() {
+    let fixture = StackFixture::new();
+    let forge = StackForge {
+        unstacked: Some(9),
+        ..StackForge::new(fixture.members())
+    };
+    let error = open_stack(
+        &fixture.backend(),
+        &forge,
+        &numbered(9),
+        CompareMode::BranchAdds,
+        FetchMode::Never,
+    )
+    .unwrap_err();
+
+    assert!(error.contains("not in a stack"), "{error}");
+    assert!(error.contains("--pr 9"), "{error}");
+    // A pull request's answer is final: no stack carries its number.
+    assert_eq!(forge.calls(), ["stack 9"]);
+}
+
+#[test]
+fn a_number_that_names_neither_names_the_pr_flag() {
+    let fixture = StackFixture::new();
+    let forge = StackForge::new(fixture.members());
+    let error = open_stack(
+        &fixture.backend(),
+        &forge,
+        &numbered(77),
+        CompareMode::BranchAdds,
+        FetchMode::Never,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("neither a pull request nor a stack"),
+        "{error}"
+    );
+    assert!(error.contains("`--pr`"), "{error}");
+    assert_eq!(forge.calls(), ["stack 77", "stacks"]);
+}
+
+/// Upstream with a three-member stack, each head also reachable as
+/// `refs/pull/<n>/head` like on GitHub, and a clone made before any of
+/// the stack's commits existed.
+fn clone_behind_stack() -> (tempfile::TempDir, std::path::PathBuf, Vec<PullRequest>) {
+    let directory = tempfile::tempdir().unwrap();
+    let upstream = directory.path().join("upstream");
+    std::fs::create_dir(&upstream).unwrap();
+    git(&upstream, &["init", "-q", "-b", "main"]);
+    std::fs::write(upstream.join("a.txt"), "base\n").unwrap();
+    git(&upstream, &["add", "."]);
+    git(&upstream, &["commit", "-q", "-m", "base"]);
+    let base = Oid::new(git(&upstream, &["rev-parse", "HEAD"]));
+    let local = directory.path().join("local");
+    git(
+        directory.path(),
+        &["clone", "-q", "upstream", local.to_str().unwrap()],
+    );
+    // The stack lands upstream only after the clone.
+    let mut members = Vec::new();
+    let mut target = "main".to_string();
+    for (number, branch) in [(1, "feat/a"), (2, "feat/b"), (3, "feat/c")] {
+        git(&upstream, &["checkout", "-q", "-b", branch, &target]);
+        std::fs::write(upstream.join(format!("{number}.txt")), "x\n").unwrap();
+        git(&upstream, &["add", "."]);
+        git(&upstream, &["commit", "-q", "-m", branch]);
+        let head = Oid::new(git(&upstream, &["rev-parse", "HEAD"]));
+        git(
+            &upstream,
+            &[
+                "update-ref",
+                &format!("refs/pull/{number}/head"),
+                head.as_str(),
+            ],
+        );
+        members.push(stack_member(number, &head, branch, &target, &base));
+        target = branch.to_string();
+    }
+    git(&upstream, &["checkout", "-q", "main"]);
+    members.reverse();
+    (directory, local, members)
+}
+
+#[test]
+fn opening_a_stack_fetches_every_member_in_one_call() {
+    let (_directory, local, members) = clone_behind_stack();
+    let backend = GitCli::open(&local).unwrap();
+    let forge = StackForge::new(members.clone());
+    for member in &members {
+        assert!(!backend.revision_exists(&member.source_commit).unwrap());
+    }
+
+    let (_, comparison) = open_stack(
+        &backend,
+        &forge,
+        &numbered(3),
+        CompareMode::BranchAdds,
+        FetchMode::OnDemand,
+    )
+    .unwrap();
+
+    assert_eq!(comparison.target_rev.as_deref(), Some("origin/main"));
+    // `git fetch` rewrites FETCH_HEAD, so every member standing in it at
+    // once is what proves the fetch was batched into one call.
+    let fetched = std::fs::read_to_string(local.join(".git/FETCH_HEAD")).unwrap();
+    assert_eq!(fetched.lines().count(), members.len() + 1, "{fetched}");
+    for member in &members {
+        assert!(
+            backend.revision_exists(&member.source_commit).unwrap(),
+            "#{} was not fetched",
+            member.number
+        );
+        assert!(fetched.contains(member.source_commit.as_str()), "{fetched}");
+    }
+    // Only objects and remote-tracking refs.
+    assert_eq!(
+        git(&local, &["branch", "--format=%(refname:short)"]),
+        "main"
+    );
+    assert_eq!(git(&local, &["status", "--porcelain"]), "");
 }
 
 /// Like [`git`], but for a merge or rebase that is expected to stop on a

@@ -6,7 +6,8 @@
 //!
 //! `--stack` reviews a whole stack of pull requests as one comparison.
 //! [`Stack`] is the resolved stack, [`StackSummary`] the row a list shows,
-//! and [`ownership`] says which member each commit belongs to.
+//! [`open_stack`] turns a named stack into that one comparison, and
+//! [`ownership`] says which member each commit belongs to.
 
 use std::collections::{HashMap, HashSet};
 
@@ -218,8 +219,105 @@ pub fn open(
         .pull_request(argument)
         .map_err(|error| error.to_string())?;
     if let FetchMode::OnDemand = fetch {
-        fetch_missing(backend, &pull)?;
+        fetch_missing(backend, std::slice::from_ref(&pull), &pull)?;
     }
+    let target_rev = endpoints(backend, &pull, &pull, fetch)?;
+    let comparison = Comparison {
+        source: pull.source_branch.clone(),
+        target: pull.target_branch.clone(),
+        source_rev: Some(pull.source_commit.clone()),
+        target_rev: Some(target_rev),
+        mode,
+        uncommitted: false,
+    };
+    Ok((pull, comparison))
+}
+
+/// Resolves a named stack into the one comparison the whole stack is
+/// reviewed as: the latest member's head going into the first member's
+/// base. The error is the message to show, word for word.
+pub fn open_stack(
+    backend: &dyn ReviewBackend,
+    forge: &dyn Forge,
+    argument: &PrArgument,
+    mode: CompareMode,
+    fetch: FetchMode,
+) -> Result<(Stack, Comparison), String> {
+    let stack = resolve_stack(forge, argument)?;
+    let (Some(latest), Some(first)) = (stack.pulls.first(), stack.pulls.last()) else {
+        return Err("the stack has no pull requests to review.".to_string());
+    };
+    if let FetchMode::OnDemand = fetch {
+        fetch_missing(backend, &stack.pulls, first)?;
+    }
+    let target_rev = endpoints(backend, latest, first, fetch)?;
+    let comparison = Comparison {
+        source: latest.source_branch.clone(),
+        target: first.target_branch.clone(),
+        source_rev: Some(latest.source_commit.clone()),
+        target_rev: Some(target_rev),
+        mode,
+        uncommitted: false,
+    };
+    Ok((stack, comparison))
+}
+
+/// The stack `--stack`'s number names. A pull request's answer is final:
+/// pull requests and stacks share one number sequence, with each number
+/// claimed by exactly one object, so a number that is a pull request in no
+/// stack is in no stack at all. Only when the forge says that number is no
+/// pull request does the number's other reading - a stack's own - apply.
+fn resolve_stack(forge: &dyn Forge, argument: &PrArgument) -> Result<Stack, String> {
+    let number = argument.number;
+    let refused = match forge.stack(argument) {
+        Ok(Some(stack)) => return Ok(stack),
+        Ok(None) => {
+            return Err(format!(
+                "pull request #{number} is not in a stack; review it on its own with \
+                 `--pr {number}`."
+            ));
+        }
+        Err(error) => error.to_string(),
+    };
+    let neither = || {
+        format!(
+            "{number} is neither a pull request nor a stack here ({refused}); \
+             name a pull request with `--pr`."
+        )
+    };
+    // A URL names a pull request by construction, so its number has no
+    // second reading - and the stack list is this checkout's repository's,
+    // not the URL's.
+    if argument.url.is_some() {
+        return Err(refused);
+    }
+    let stacks = forge.stacks().map_err(|_| neither())?;
+    let member = stacks
+        .iter()
+        .find(|stack| stack.number == Some(number))
+        .and_then(|stack| stack.members.first())
+        .ok_or_else(neither)?;
+    // The list carries no oids, so the stack is resolved again from one of
+    // its members - the same single query, now reaching a pull request.
+    forge
+        .stack(&PrArgument {
+            number: member.number,
+            url: None,
+        })
+        .map_err(|error| error.to_string())?
+        .ok_or_else(neither)
+}
+
+/// The revision the comparison's target end is pinned to. `head` is the
+/// pull request the source comes from, `base` the one the target comes
+/// from; a single pull request is both. Both ends are checked here, so a
+/// stack resolves its ends by exactly the rules one pull request does.
+fn endpoints(
+    backend: &dyn ReviewBackend,
+    head: &PullRequest,
+    base: &PullRequest,
+    fetch: FetchMode,
+) -> Result<String, String> {
     let exists = |revision: &str| {
         backend
             .revision_exists(revision)
@@ -240,19 +338,19 @@ pub fn open(
     };
     // The PR's exact head commit, never a branch lookup: a stale
     // same-named branch must not silently show other content.
-    if !exists(&pull.source_commit)? {
-        return Err(match pull.state {
-            PrState::Open if pull.cross_repository => format!(
+    if !exists(&head.source_commit)? {
+        return Err(match head.state {
+            PrState::Open if head.cross_repository => format!(
                 "the pull request's head commit is not here: it comes from {owner}'s \
                  fork. Add that fork as a remote, run `git fetch <fork> {branch}`, \
                  then retry{tail}.",
-                owner = pull.head_owner,
-                branch = pull.source_branch,
+                owner = head.head_owner,
+                branch = head.source_branch,
             ),
             PrState::Open => format!(
                 "the pull request's head commit is not here; run \
                  `git fetch {remote_hint} {branch}` and retry{tail}.",
-                branch = pull.source_branch,
+                branch = head.source_branch,
             ),
             // Merged or closed, the head branch is usually deleted, but
             // GitHub keeps the commit reachable under refs/pull - also
@@ -261,47 +359,38 @@ pub fn open(
             PrState::Merged | PrState::Closed => format!(
                 "the pull request's head commit is not here; run \
                  `git fetch {remote_hint} refs/pull/{number}/head` and retry{tail}.",
-                number = pull.number,
+                number = head.number,
             ),
         });
     }
-    let target_rev = match pull.state {
+    match base.state {
         // The base as the PR was compared against it: the live base
         // already contains a merged PR, which would collapse the diff
         // to nothing. gh's baseRefOid, not the merge commit's first
         // parent - a base rebuilt under the PR moves that parent off
         // the PR's own comparison and drags foreign commits in.
         PrState::Merged => {
-            if !exists(&pull.target_commit)? {
+            if !exists(&base.target_commit)? {
                 return Err(format!(
                     "the pull request's base commit is not here; run \
                      `git fetch {remote_hint}` and retry{tail}."
                 ));
             }
-            pull.target_commit.clone()
+            Ok(base.target_commit.clone())
         }
         // Open (or closed unmerged), the base moves on, so follow its
         // remote-tracking ref - never a same-named local branch, which
         // can lag.
         PrState::Open | PrState::Closed => {
-            let branch = &pull.target_branch;
+            let branch = &base.target_branch;
             remote_ref(backend, branch, || {
                 format!(
                     "`{branch}` is not fetched here; run \
                      `git fetch {remote_hint} {branch}` and retry{tail}."
                 )
-            })?
+            })
         }
-    };
-    let comparison = Comparison {
-        source: pull.source_branch.clone(),
-        target: pull.target_branch.clone(),
-        source_rev: Some(pull.source_commit.clone()),
-        target_rev: Some(target_rev),
-        mode,
-        uncommitted: false,
-    };
-    Ok((pull, comparison))
+    }
 }
 
 /// A branch only the remotes know resolves when exactly one remote has it;
@@ -328,20 +417,32 @@ pub fn remote_ref(
     }
 }
 
-/// The picker's fetch: one explicit `git fetch` when the pull request's
-/// commits are not here yet. `refs/pull/<n>/head` reaches the head commit
+/// The picker's fetch: one explicit `git fetch` when the commits under
+/// review are not here yet. `refs/pull/<n>/head` reaches a head commit
 /// uniformly - forks and merged pull requests included - and the base
-/// branch rides along so its remote-tracking ref is fresh.
-fn fetch_missing(backend: &dyn ReviewBackend, pull: &PullRequest) -> Result<(), String> {
-    let head_missing = !backend
-        .revision_exists(&pull.source_commit)
-        .map_err(|error| error.to_string())?;
-    let target_missing = match pull.state {
+/// branch of `base`, the pull request the comparison's target comes from,
+/// rides along so its remote-tracking ref is fresh.
+///
+/// One call however many pull requests `pulls` holds: the sanctioned
+/// exception to never writing to the repository is one fetch per explicit
+/// action, not one per stack member.
+fn fetch_missing(
+    backend: &dyn ReviewBackend,
+    pulls: &[PullRequest],
+    base: &PullRequest,
+) -> Result<(), String> {
+    let mut head_missing = false;
+    for pull in pulls {
+        head_missing |= !backend
+            .revision_exists(&pull.source_commit)
+            .map_err(|error| error.to_string())?;
+    }
+    let target_missing = match base.state {
         PrState::Merged => !backend
-            .revision_exists(&pull.target_commit)
+            .revision_exists(&base.target_commit)
             .map_err(|error| error.to_string())?,
         PrState::Open | PrState::Closed => backend
-            .remotes_with_branch(&pull.target_branch)
+            .remotes_with_branch(&base.target_branch)
             .map_err(|error| error.to_string())?
             .is_empty(),
     };
@@ -360,7 +461,7 @@ fn fetch_missing(backend: &dyn ReviewBackend, pull: &PullRequest) -> Result<(), 
             // Several remotes: only the one already carrying the base
             // branch is safe to assume; anything else is a guess.
             let carrying = backend
-                .remotes_with_branch(&pull.target_branch)
+                .remotes_with_branch(&base.target_branch)
                 .map_err(|error| error.to_string())?;
             match carrying.as_slice() {
                 [only] => only.clone(),
@@ -370,16 +471,19 @@ fn fetch_missing(backend: &dyn ReviewBackend, pull: &PullRequest) -> Result<(), 
                          yourself, e.g. `git fetch {} refs/pull/{}/head`, and retry.",
                         remotes.join(", "),
                         remotes[0],
-                        pull.number,
+                        base.number,
                     ));
                 }
             }
         }
     };
-    let refspecs = vec![
-        pull.target_branch.clone(),
-        format!("refs/pull/{}/head", pull.number),
-    ];
+    let refspecs: Vec<String> = std::iter::once(base.target_branch.clone())
+        .chain(
+            pulls
+                .iter()
+                .map(|pull| format!("refs/pull/{}/head", pull.number)),
+        )
+        .collect();
     backend
         .fetch(&remote, &refspecs)
         .map_err(|error| error.to_string())
