@@ -23,7 +23,7 @@ macOS, Windows and Linux.
 A GitHub PR needs the code pushed first, costs your agent tokens fetching
 comments through the API, and its replies would land under your own account.
 diffie reviews earlier, while changes are still cheap to rework, and your
-agent reads and answers a local file directly - under its own name.
+agent reads and answers a local file directly.
 
 <p align="center">
   <img src="docs/screenshots/comment-resolve.gif" alt="diffie reviewing a pull request: a comment on a line, the agent's answer appearing in the thread under a robot badge, and the thread folding away once resolved">
