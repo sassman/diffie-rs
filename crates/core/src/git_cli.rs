@@ -17,8 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backend::{BackendError, Result, ReviewBackend};
 use crate::model::{
-    BlameLine, ChangedRegion, Commit, CompareMode, Comparison, FileState, FileStatus, FileSummary,
-    LineOrigin, NewSide, Oid, Resolved, Scope, ScopedPatch,
+    BlameLine, ChangedRegion, Commit, CompareMode, Comparison, ConflictFile, ConflictLabels,
+    FileState, FileStatus, FileSummary, LineOrigin, NewSide, Oid, PredictedConflict, RepoState,
+    ResolutionPush, Resolved, Scope, ScopedPatch,
 };
 use crate::review::{ReviewInput, ReviewedFile};
 
@@ -57,6 +58,38 @@ impl GitCli {
             .try_read(&["symbolic-ref", "--quiet", "--short", "HEAD"])?
             .map(|output| output.trim().to_string())
             .filter(|name| !name.is_empty()))
+    }
+
+    /// The revision a forecast merges, picked so git's marker labels read
+    /// well: the name itself, unless a pin exists and the name no longer
+    /// points at it - a stale local branch must not change what the
+    /// forecast merges, and a name that resolves to nothing falls back to
+    /// the pin outright.
+    fn labelled_rev(&self, name: &str, pin: Option<&str>) -> Result<String> {
+        let Some(pin) = pin else {
+            return Ok(name.to_string());
+        };
+        let commit = |rev: &str| format!("{rev}^{{commit}}");
+        let pinned = self.read(&["rev-parse", "--verify", "--end-of-options", &commit(pin)])?;
+        let named = self.try_read(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &commit(name),
+        ])?;
+        Ok(match named {
+            Some(named) if named.trim() == pinned.trim() => name.to_string(),
+            _ => pin.to_string(),
+        })
+    }
+
+    /// The mode `tree` records for `path`, or `None` when the tree does
+    /// not hold it.
+    fn tree_mode(&self, tree: &str, path: &str) -> Result<Option<String>> {
+        Ok(self
+            .try_read(&["ls-tree", "--end-of-options", tree, "--", &literal(path)])?
+            .and_then(|line| line.split_whitespace().next().map(|mode| mode.to_string())))
     }
 
     /// Whether a working tree exists. A bare repository has no uncommitted
@@ -530,6 +563,243 @@ impl GitCli {
         }
     }
 
+    /// The absolute path of `name` inside the git dir. `--git-path` answers
+    /// per worktree, so MERGE_HEAD and the rebase state directories are the
+    /// ones of the checkout the backend was opened in.
+    fn git_path(&self, name: &str) -> Result<PathBuf> {
+        Ok(self.absolute(self.read(&["rev-parse", "--git-path", name])?.trim()))
+    }
+
+    /// The working tree's top directory; an error on a bare repository.
+    fn worktree_root(&self) -> Result<PathBuf> {
+        self.try_read(&["rev-parse", "--show-toplevel"])?
+            .map(|output| PathBuf::from(output.trim()))
+            .ok_or_else(|| BackendError::NotARepository(self.repository.display().to_string()))
+    }
+
+    /// `(path, [stage 1, stage 2, stage 3])` for every unmerged index entry,
+    /// in git's path order, optionally narrowed to one path.
+    fn unmerged_entries(&self, path: Option<&str>) -> Result<Vec<(String, [Option<Oid>; 3])>> {
+        let literal = path.map(literal);
+        let mut args = vec!["ls-files", "-u", "-z", "--"];
+        args.extend(literal.as_deref());
+        let output = self.read(&args)?;
+        let mut entries: Vec<(String, [Option<Oid>; 3])> = Vec::new();
+        // `<mode> <oid> <stage>\t<path>` per entry; -z keeps paths raw, and
+        // the entries of one path are adjacent.
+        for record in output.split('\0').filter(|record| !record.is_empty()) {
+            let Some((meta, path)) = record.split_once('\t') else {
+                continue;
+            };
+            let mut fields = meta.split(' ');
+            let (Some(_mode), Some(oid), Some(stage)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let Some(stage) = stage
+                .parse::<usize>()
+                .ok()
+                .filter(|stage| (1..=3).contains(stage))
+            else {
+                continue;
+            };
+            if entries.last().map(|(existing, _)| existing.as_str()) != Some(path) {
+                entries.push((path.to_string(), [None, None, None]));
+            }
+            if let Some((_, stages)) = entries.last_mut() {
+                stages[stage - 1] = Some(Oid::new(oid));
+            }
+        }
+        Ok(entries)
+    }
+
+    /// The pane labels for the interrupted operation. Together with the
+    /// stage swap in [`ReviewBackend::conflicts`] this is the one place that
+    /// maps git's ours/theirs to yours/upstream; the git terms leave neither.
+    fn conflict_labels(&self, rebase: bool) -> Result<ConflictLabels> {
+        let (yours, upstream, yours_rev, upstream_rev) = if rebase {
+            (
+                self.replayed_title()?,
+                self.onto_name()?,
+                "REBASE_HEAD".to_string(),
+                self.onto_oid().unwrap_or_default(),
+            )
+        } else {
+            let merged = std::fs::read_to_string(self.git_path("MERGE_HEAD")?)
+                .unwrap_or_default()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            (
+                self.current_branch()?.unwrap_or_else(|| "HEAD".to_string()),
+                self.merged_name()?,
+                "HEAD".to_string(),
+                merged,
+            )
+        };
+        let (yours_time, yours_date) = self.commit_clock(&yours_rev).unwrap_or_default();
+        let (upstream_time, _) = self.commit_clock(&upstream_rev).unwrap_or_default();
+        Ok(ConflictLabels {
+            yours,
+            upstream,
+            yours_date,
+            yours_time,
+            upstream_time,
+        })
+    }
+
+    /// A tip's clock: unix seconds for the newer/older phrasing, and the
+    /// committer's own wall-clock date for display - the reviewer thinks
+    /// in that clock, not in UTC.
+    fn commit_clock(&self, rev: &str) -> Option<(i64, String)> {
+        if rev.is_empty() {
+            return None;
+        }
+        let line = self
+            .try_read(&[
+                "log",
+                "-1",
+                "--format=%ct%x09%cd",
+                "--date=format:%Y-%m-%d %H:%M",
+                "--end-of-options",
+                rev,
+                "--",
+            ])
+            .ok()
+            .flatten()?;
+        let (seconds, date) = line.trim().split_once('\t')?;
+        Some((seconds.parse().ok()?, date.to_string()))
+    }
+
+    /// The name of what a merge is bringing in: the quoted ref of the
+    /// prepared MERGE_MSG ("Merge branch 'x' ..."), or the merged commit's
+    /// short id when the message names none.
+    fn merged_name(&self) -> Result<String> {
+        if let Ok(message) = std::fs::read_to_string(self.git_path("MERGE_MSG")?)
+            && let Some(first) = message.lines().next()
+            && let Some((_, rest)) = first.split_once('\'')
+            && let Some((name, _)) = rest.split_once('\'')
+            && !name.is_empty()
+        {
+            return Ok(name.to_string());
+        }
+        let head = std::fs::read_to_string(self.git_path("MERGE_HEAD")?).unwrap_or_default();
+        Ok(Oid::new(head.trim()).short().to_string())
+    }
+
+    /// The name of the upstream a rebase replays onto: the name the user
+    /// typed, recovered from the reflog's rebase start entry; failing that,
+    /// a ref pointing at the recorded onto commit - refs/heads sort before
+    /// refs/remotes, so a local branch wins - or that commit's short id.
+    fn onto_name(&self) -> Result<String> {
+        let Some(onto) = self.onto_oid() else {
+            return Ok("upstream".to_string());
+        };
+        // Several refs can sit on the onto commit; only the start entry
+        // `git rebase <upstream>` wrote knows which one the user meant.
+        if let Some(reflog) = self.try_read(&[
+            "log",
+            "-g",
+            "--format=%gs",
+            "--end-of-options",
+            "HEAD",
+            "--",
+        ])? && let Some(name) = reflog
+            .lines()
+            .find_map(|subject| subject.strip_prefix("rebase (start): checkout "))
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            return Ok(name.to_string());
+        }
+        let points_at = format!("--points-at={onto}");
+        Ok(self
+            .try_read(&[
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname:short)",
+                &points_at,
+                "refs/heads",
+                "refs/remotes",
+            ])?
+            .map(|output| output.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| Oid::new(onto).short().to_string()))
+    }
+
+    /// The oid a rebase replays onto, from either backend's state
+    /// directory.
+    fn onto_oid(&self) -> Option<String> {
+        ["rebase-merge", "rebase-apply"]
+            .iter()
+            .find_map(|dir| {
+                let state = self.git_path(dir).ok()?;
+                std::fs::read_to_string(state.join("onto")).ok()
+            })
+            .map(|text| text.trim().to_string())
+            .filter(|oid| !oid.is_empty())
+    }
+
+    /// The replayed commit's title: rebase-merge/message, or the subject of
+    /// REBASE_HEAD where the apply backend keeps no message file.
+    fn replayed_title(&self) -> Result<String> {
+        if let Ok(state) = self.git_path("rebase-merge")
+            && let Ok(message) = std::fs::read_to_string(state.join("message"))
+            && let Some(first) = message.lines().next().map(str::trim)
+            && !first.is_empty()
+        {
+            return Ok(first.to_string());
+        }
+        Ok(self
+            .try_read(&[
+                "log",
+                "-1",
+                "--format=%s",
+                "--end-of-options",
+                "REBASE_HEAD",
+                "--",
+            ])?
+            .map(|output| output.trim().to_string())
+            .filter(|subject| !subject.is_empty())
+            .unwrap_or_else(|| "replayed commit".to_string()))
+    }
+
+    /// `git merge <action>` or `git rebase <action>`, editors stubbed out so
+    /// git can never block waiting for a message or a todo list.
+    ///
+    /// A rebase continue exits non-zero when the replay stops at the next
+    /// conflicted commit. That stop is progress, not failure; it is told
+    /// apart from a genuine refusal by the operation state having moved
+    /// and new paths being unmerged.
+    fn operate(&self, action: &str) -> Result<()> {
+        let before = self.repo_state()?;
+        let subcommand = match before {
+            RepoState::Merge => "merge",
+            RepoState::Rebase { .. } => "rebase",
+            RepoState::Idle => return Err(BackendError::NoOperation),
+        };
+        let mut command = self.command();
+        command
+            .env("GIT_EDITOR", "true")
+            .env("GIT_SEQUENCE_EDITOR", "true");
+        match run(&mut command, &[subcommand, action], None) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let now = self.repo_state()?;
+                let stopped_again = now != RepoState::Idle
+                    && now != before
+                    && self
+                        .read(&["ls-files", "-u"])
+                        .map(|list| !list.trim().is_empty())
+                        .unwrap_or(false);
+                if stopped_again { Ok(()) } else { Err(error) }
+            }
+        }
+    }
+
     fn blame_with(
         &self,
         rev: &Oid,
@@ -922,10 +1192,7 @@ impl ReviewBackend for GitCli {
     }
 
     fn worktree_blob_ids(&self, paths: &[String]) -> Result<HashMap<String, Oid>> {
-        let top = self
-            .try_read(&["rev-parse", "--show-toplevel"])?
-            .map(|output| PathBuf::from(output.trim()))
-            .ok_or_else(|| BackendError::NotARepository(self.repository.display().to_string()))?;
+        let top = self.worktree_root()?;
         // One `hash-object` call for every path. Absolute paths keep the
         // call independent of where the backend was opened. `--stdin-paths`
         // is newline-separated, so a path containing one cannot be hashed
@@ -984,15 +1251,290 @@ impl ReviewBackend for GitCli {
     }
 
     fn worktree_file(&self, path: &str) -> Result<Option<Vec<u8>>> {
-        let top = self
-            .try_read(&["rev-parse", "--show-toplevel"])?
-            .map(|output| PathBuf::from(output.trim()))
-            .ok_or_else(|| BackendError::NotARepository(self.repository.display().to_string()))?;
-        let file = top.join(path);
+        let file = self.worktree_root()?.join(path);
         if !file.is_file() {
             return Ok(None);
         }
         Ok(Some(std::fs::read(file)?))
+    }
+
+    fn current_branch(&self) -> Result<Option<String>> {
+        GitCli::current_branch(self)
+    }
+
+    fn repo_state(&self) -> Result<RepoState> {
+        // The two rebase backends keep separate state directories; both are
+        // checked before MERGE_HEAD, which a rebase never leaves behind.
+        for (dir, current, last) in [
+            ("rebase-merge", "msgnum", "end"),
+            ("rebase-apply", "next", "last"),
+        ] {
+            let state = self.git_path(dir)?;
+            if state.is_dir() {
+                let number = |file: &str| {
+                    std::fs::read_to_string(state.join(file))
+                        .ok()
+                        .and_then(|text| text.trim().parse().ok())
+                        .unwrap_or(0)
+                };
+                return Ok(RepoState::Rebase {
+                    done: number(current),
+                    total: number(last),
+                });
+            }
+        }
+        if self.git_path("MERGE_HEAD")?.is_file() {
+            return Ok(RepoState::Merge);
+        }
+        Ok(RepoState::Idle)
+    }
+
+    fn conflicts(&self) -> Result<Vec<ConflictFile>> {
+        let rebase = match self.repo_state()? {
+            RepoState::Idle => return Ok(Vec::new()),
+            RepoState::Merge => false,
+            RepoState::Rebase { .. } => true,
+        };
+        let labels = self.conflict_labels(rebase)?;
+        let entries = self.unmerged_entries(None)?;
+        let ids: Vec<Oid> = entries
+            .iter()
+            .flat_map(|(_, stages)| stages.iter().flatten().cloned())
+            .collect();
+        let blobs = self.blobs(&ids)?;
+        let bytes = |id: &Option<Oid>| id.as_ref().and_then(|id| blobs.get(id));
+        let text =
+            |id: &Option<Oid>| bytes(id).map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+        entries
+            .into_iter()
+            .map(|(path, [base, ours, theirs])| {
+                let working_bytes = self.worktree_file(&path)?.unwrap_or_default();
+                // Checked on the raw bytes: the lossy texts read the same
+                // whether the original was valid or already corrupted.
+                let not_text = |bytes: &[u8]| std::str::from_utf8(bytes).is_err();
+                let binary = not_text(&working_bytes)
+                    || [&base, &ours, &theirs]
+                        .into_iter()
+                        .flat_map(&bytes)
+                        .any(|blob| not_text(blob));
+                let working = String::from_utf8_lossy(&working_bytes).into_owned();
+                // In a merge git's stage 2 is the user's own branch; a
+                // rebase replays the user's commits onto the upstream, so
+                // the stages swap sides. This mapping exists only here.
+                let (yours, upstream) = if rebase {
+                    (text(&theirs), text(&ours))
+                } else {
+                    (text(&ours), text(&theirs))
+                };
+                Ok(ConflictFile {
+                    path,
+                    base: text(&base),
+                    yours,
+                    upstream,
+                    working,
+                    binary,
+                    labels: labels.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn predicted_conflicts(
+        &self,
+        source: &str,
+        source_pin: Option<&str>,
+        target: &str,
+        target_pin: Option<&str>,
+    ) -> Result<Vec<PredictedConflict>> {
+        let source = self.labelled_rev(source, source_pin)?;
+        let target = self.labelled_rev(target, target_pin)?;
+        let scratch = self.scratch_git()?;
+        let (conflicted, listing) = scratch.merge_tree(self, &source, &target)?;
+        if !conflicted {
+            return Ok(Vec::new());
+        }
+        // `-z` listing: the result tree's id, then each conflicted path,
+        // every entry NUL-terminated and never C-quoted.
+        let mut entries = listing.split('\0').filter(|entry| !entry.is_empty());
+        let tree = entries.next().unwrap_or_default().trim().to_string();
+        let paths: Vec<String> = entries.map(String::from).collect();
+        let texts = scratch.merged_texts(self, &tree, &paths)?;
+        Ok(paths
+            .into_iter()
+            .zip(texts)
+            .map(|(path, merged)| PredictedConflict { path, merged })
+            .collect())
+    }
+
+    fn forecast_labels(
+        &self,
+        source: &str,
+        source_rev: &str,
+        target: &str,
+        target_rev: &str,
+    ) -> Result<ConflictLabels> {
+        let (yours_time, yours_date) = self.commit_clock(source_rev).unwrap_or_default();
+        let (upstream_time, _) = self.commit_clock(target_rev).unwrap_or_default();
+        Ok(ConflictLabels {
+            yours: source.to_string(),
+            upstream: target.to_string(),
+            yours_date,
+            yours_time,
+            upstream_time,
+        })
+    }
+
+    fn push_resolution(&self, push: &ResolutionPush) -> Result<Oid> {
+        // The merge's own tree first, written into the real object
+        // database this time: the pushed commit must reach every
+        // auto-merged blob. The owner-sanctioned write family starts here.
+        let (conflicted, listing) = run_verdict(
+            &mut self.command(),
+            &[
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "--no-messages",
+                "-z",
+                "--end-of-options",
+                &push.source,
+                &push.target,
+            ],
+        )?;
+        let mut entries = listing.split('\0').filter(|entry| !entry.is_empty());
+        let tree = entries.next().unwrap_or_default().trim().to_string();
+        let conflicted: Vec<&str> = if conflicted {
+            entries.collect()
+        } else {
+            Vec::new()
+        };
+        // A markered blob must never reach the pull request: every path
+        // the merge conflicts on needs its resolution supplied.
+        let unresolved: Vec<&str> = conflicted
+            .iter()
+            .filter(|path| {
+                !push
+                    .resolutions
+                    .iter()
+                    .any(|(resolved, _)| resolved == *path)
+            })
+            .copied()
+            .collect();
+        if !unresolved.is_empty() {
+            return Err(BackendError::UnresolvedPaths(unresolved.join(", ")));
+        }
+        // And the other direction: a resolution for a path this merge did
+        // not conflict on would bury cleanly merged content under an
+        // outdated text - refuse instead of shipping it silently.
+        for (path, _) in &push.resolutions {
+            if !conflicted.contains(&path.as_str()) {
+                return Err(BackendError::NotConflicted(path.clone()));
+            }
+        }
+        // A scratch index keeps the repository's own index untouched while
+        // the resolved blobs replace the markered ones.
+        let scratch = Scratch::new()?;
+        let index = scratch.path.join("index");
+        let indexed = |backend: &GitCli| {
+            let mut command = backend.command();
+            command.env("GIT_INDEX_FILE", &index);
+            command
+        };
+        run(
+            &mut indexed(self),
+            &["read-tree", "--end-of-options", &tree],
+            None,
+        )?;
+        for (path, contents) in &push.resolutions {
+            let blob = run(
+                &mut self.command(),
+                &["hash-object", "-w", "--stdin"],
+                Some(contents.as_bytes()),
+            )?;
+            // The merge's own mode rides onto the resolved blob, so an
+            // executable survives its resolution.
+            let mode = self
+                .tree_mode(&tree, path)?
+                .unwrap_or_else(|| "100644".to_string());
+            run(
+                &mut indexed(self),
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("{mode},{},{path}", blob.trim()),
+                ],
+                None,
+            )?;
+        }
+        let resolved_tree = run(&mut indexed(self), &["write-tree"], None)?;
+        let commit = run(
+            &mut self.command(),
+            &[
+                "commit-tree",
+                resolved_tree.trim(),
+                "-p",
+                &push.source,
+                "-p",
+                &push.target,
+                "-m",
+                &push.message,
+            ],
+            None,
+        )?;
+        let commit = commit.trim().to_string();
+        // A plain push: a head branch that moved since the review was
+        // pinned rejects it, which is the wanted answer, never a force.
+        run(
+            &mut self.command(),
+            &[
+                "push",
+                "--quiet",
+                "--end-of-options",
+                &push.remote,
+                &format!("{commit}:refs/heads/{}", push.branch),
+            ],
+            None,
+        )?;
+        Ok(Oid::new(&commit))
+    }
+
+    fn resolve_file(&self, path: &str, contents: &str) -> Result<()> {
+        // The sanctioned write is narrow: nothing but an unmerged path may
+        // be touched, however the caller got here.
+        if self.unmerged_entries(Some(path))?.is_empty() {
+            return Err(BackendError::NotConflicted(path.to_string()));
+        }
+        let file = self.worktree_root()?.join(path);
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(file, contents)?;
+        // `--end-of-options` would turn the following `--` into a literal
+        // pathspec here; the separator alone keeps the path a path.
+        self.read(&["add", "--", &literal(path)])?;
+        Ok(())
+    }
+
+    fn unresolve_file(&self, path: &str) -> Result<()> {
+        // `-m` rebuilds the markers from the resolve-undo data, even after
+        // the path was staged. Older gits reject `--end-of-options` here;
+        // the `--` separator alone still keeps the path a path.
+        let path = literal(path);
+        match self.read(&["checkout", "-m", "--end-of-options", "--", &path]) {
+            Err(BackendError::Git { stderr, .. }) if stderr.contains("end-of-options") => {
+                self.read(&["checkout", "-m", "--", &path]).map(|_| ())
+            }
+            other => other.map(|_| ()),
+        }
+    }
+
+    fn continue_op(&self) -> Result<()> {
+        self.operate("--continue")
+    }
+
+    fn abort_op(&self) -> Result<()> {
+        self.operate("--abort")
     }
 
     fn author_name(&self) -> Result<String> {
@@ -1012,8 +1554,40 @@ impl ReviewBackend for GitCli {
     }
 }
 
+/// `path` as a pathspec matching only itself. Bare pathspecs glob, so a
+/// path like `a[b].txt` would match `ab.txt` and miss its own file.
+fn literal(path: &str) -> String {
+    format!(":(literal){path}")
+}
+
 fn run(command: &mut Command, args: &[impl AsRef<str>], stdin: Option<&[u8]>) -> Result<String> {
     run_bytes(command, args, stdin).map(|output| String::from_utf8_lossy(&output).into_owned())
+}
+
+/// [`run`] for a command whose exit code 1 is a verdict with stdout worth
+/// reading (`merge-tree --write-tree` saying "would conflict"), not a
+/// failure: `(true, stdout)` for code 1, `(false, stdout)` for success,
+/// the usual error otherwise.
+fn run_verdict(command: &mut Command, args: &[impl AsRef<str>]) -> Result<(bool, String)> {
+    command
+        .args(args.iter().map(|argument| argument.as_ref()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().map_err(BackendError::GitMissing)?;
+    let output = child.wait_with_output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    match output.status.code() {
+        Some(0) => Ok((false, stdout)),
+        Some(1) => Ok((true, stdout)),
+        _ => Err(BackendError::Git {
+            command: args
+                .first()
+                .map(|argument| argument.as_ref().to_string())
+                .unwrap_or_default(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }),
+    }
 }
 
 /// [`run`] without the text conversion, for output whose byte counts matter.
@@ -1256,6 +1830,95 @@ impl ScratchGit {
             .env("GIT_OBJECT_DIRECTORY", &self.objects)
             .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &self.real_objects);
         run(&mut command, args, stdin)
+    }
+
+    /// `merge-tree --write-tree` of merging `target` into `source`, its
+    /// trees and blobs landing in the scratch object directory, never the
+    /// repository's. Returns whether the merge would conflict, and the
+    /// listing: the result tree's id first, then the conflicted paths.
+    /// `source` comes first so each marker labels it as the current side.
+    fn merge_tree(&self, backend: &GitCli, source: &str, target: &str) -> Result<(bool, String)> {
+        let mut command = backend.command();
+        command
+            .env("GIT_INDEX_FILE", &self.index)
+            .env("GIT_OBJECT_DIRECTORY", &self.objects)
+            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &self.real_objects);
+        let args = [
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            // NUL-terminated entries: a C-quoted listing would break the
+            // path round trip for names git quotes under LC_ALL=C.
+            "-z",
+            "--end-of-options",
+            source,
+            target,
+        ];
+        run_verdict(&mut command, &args)
+    }
+
+    /// The auto-merged files of `tree`, markers included, read through one
+    /// `cat-file --batch` like [`ReviewBackend::blobs`] reads commits'
+    /// blobs. `None` for a path whose merged file is gone (a side's
+    /// delete), is not UTF-8 text, or cannot even be requested - a batch
+    /// request is one line, so a newline in the name does not fit; such a
+    /// path keeps its warning without an inline document.
+    fn merged_texts(
+        &self,
+        backend: &GitCli,
+        tree: &str,
+        paths: &[String],
+    ) -> Result<Vec<Option<String>>> {
+        let mut texts: Vec<Option<String>> = vec![None; paths.len()];
+        let mut asked = Vec::new();
+        let mut requests = String::new();
+        for (ix, path) in paths.iter().enumerate() {
+            if !path.contains('\n') {
+                asked.push(ix);
+                requests.push_str(&format!("{tree}:{path}\n"));
+            }
+        }
+        if asked.is_empty() {
+            return Ok(texts);
+        }
+        let mut command = backend.command();
+        command
+            .env("GIT_INDEX_FILE", &self.index)
+            .env("GIT_OBJECT_DIRECTORY", &self.objects)
+            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &self.real_objects);
+        let output = run_bytes(
+            &mut command,
+            &["cat-file", "--batch"],
+            Some(requests.as_bytes()),
+        )?;
+        // `<oid> <type> <size>\n<content>\n` per found object, one header
+        // line per request otherwise; sizes count bytes, hence raw output.
+        let mut rest = output.as_slice();
+        let mut asked = asked.into_iter();
+        while let Some(end) = rest.iter().position(|byte| *byte == b'\n') {
+            let header = String::from_utf8_lossy(&rest[..end]).into_owned();
+            rest = &rest[end + 1..];
+            let Some(ix) = asked.next() else {
+                break;
+            };
+            if header.ends_with(" missing") || header.ends_with(" ambiguous") {
+                continue;
+            }
+            let mut fields = header.split(' ');
+            let (Some(_), Some(kind), Some(size)) = (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let Some(content) = size.parse().ok().and_then(|size: usize| rest.get(..size)) else {
+                break;
+            };
+            if kind == "blob" {
+                texts[ix] = String::from_utf8(content.to_vec()).ok();
+            }
+            rest = rest.get(content.len() + 1..).unwrap_or_default();
+        }
+        Ok(texts)
     }
 }
 

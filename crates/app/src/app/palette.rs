@@ -10,7 +10,6 @@ use std::cell::Cell;
 use super::*;
 use diffie_core::forge::Verdict;
 use gpui_kit::Action;
-use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::command::{Command, CommandItem};
 use gpui_kit::component::kbd::Kbd;
 
@@ -26,6 +25,9 @@ enum PaletteCommand {
     Forward,
     OpenPullRequest,
     Approve { with_comments: bool },
+    ContinueOp,
+    AbortOp,
+    PushResolution,
 }
 
 struct PaletteEntry {
@@ -70,7 +72,7 @@ impl ReviewApp {
     /// Every command the palette offers in the current state. A command
     /// that exists but cannot run now stays in the list, greyed; the pull
     /// request's only exist in a review opened from one.
-    fn palette_entries(&self) -> Vec<PaletteEntry> {
+    fn palette_entries(&self, cx: &App) -> Vec<PaletteEntry> {
         let mut entries = vec![
             PaletteEntry {
                 command: PaletteCommand::Reload,
@@ -115,9 +117,37 @@ impl ReviewApp {
                 enabled: !self.publishing,
                 hint: None,
             },
+            // Greyed while the repository is idle: the pair only acts on an
+            // interrupted merge or rebase, but staying listed teaches that
+            // it exists.
+            PaletteEntry {
+                command: PaletteCommand::ContinueOp,
+                label: format!("Continue {}", self.op_noun()).into(),
+                keywords: &["conflict", "resolve", "merge", "rebase"],
+                enabled: self.can_continue_op(),
+                hint: None,
+            },
+            PaletteEntry {
+                command: PaletteCommand::AbortOp,
+                label: format!("Abort {}", self.op_noun()).into(),
+                keywords: &["conflict", "cancel", "merge", "rebase"],
+                enabled: self.can_abort_op(),
+                hint: None,
+            },
         ];
         if let Some(pull) = &self.review.pull {
             let number = pull.request.number;
+            // Listed with a forecast to resolve; the blockers double as
+            // the reason it stays greyed.
+            if self.forecast_resolving() {
+                entries.push(PaletteEntry {
+                    command: PaletteCommand::PushResolution,
+                    label: format!("Resolve conflicts into #{number}…").into(),
+                    keywords: &["conflict", "push", "pull request", "pr", "merge"],
+                    enabled: self.push_resolution_blockers(cx).is_none(),
+                    hint: None,
+                });
+            }
             for with_comments in [true, false] {
                 entries.push(PaletteEntry {
                     command: PaletteCommand::Approve { with_comments },
@@ -151,6 +181,9 @@ impl ReviewApp {
             PaletteCommand::Approve { with_comments } => {
                 self.publish(Verdict::Approve, with_comments, cx)
             }
+            PaletteCommand::ContinueOp => self.run_op(false, cx),
+            PaletteCommand::AbortOp => self.confirm_abort(window, cx),
+            PaletteCommand::PushResolution => self.confirm_push_resolution(window, cx),
         }
     }
 
@@ -188,7 +221,7 @@ impl ReviewApp {
                     let Some(app) = owner.upgrade() else {
                         return content;
                     };
-                    let entries = app.read(cx).palette_entries();
+                    let entries = app.read(cx).palette_entries(cx);
                     let diff = app.read(cx).diff.read(cx).focus_handle(cx);
                     // Rows and commands come from the one list, so the
                     // confirmed row cannot name another command.

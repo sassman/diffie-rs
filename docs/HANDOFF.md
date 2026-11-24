@@ -40,6 +40,56 @@ first code: a working core and a first UI scaffold wired to it.
   picked one in the current window as `--pr` would, fetching missing
   commits on that click (the one sanctioned repository write besides
   review files; see AGENTS.md constraint 5 and the design document).
+- **Conflict resolver** (PoC on branch `feat/conflict-resolver`), added
+  2026-11-19: an interrupted merge or rebase surfaces a state strip, a
+  Review | Conflicts center switch and, per conflicted file, a JetBrains
+  style three-pane resolver - Your changes left, result middle, Upstream
+  changes right - with per-block take/both/undo, Mark resolved and Reopen
+  on the file header, Continue in the strip and Continue/Abort in the
+  palette. The component is `ConflictResolv`, new on the Kit fork branch
+  `diff-conflict-resolv`; the backend grew `repo_state`, `conflicts`,
+  `resolve_file`, `unresolve_file`, `continue_op` and `abort_op` behind
+  the narrow write exception in AGENTS.md constraint 5. Design document
+  section 20 holds the decisions. **The middle pane is block-editable**
+  (branch `feat/conflict-editing`, Kit fork branch `diff-conflict-edit`):
+  a picked block's result region is an embedded auto-grow editor - typing
+  flips it to hand-edited, Enter at the edges adds lines, context stays
+  read-only, and result_text keeps blank lines and the file's own CRLF
+  or LF endings through edits. Known limitation, recorded as Open in
+  section 20: the block editor's horizontal scroll is not synced with
+  the pane. **An idle repository forecasts the merge** (branch
+  `feat/conflict-prediction`, Kit fork branch `diff-conflict-predict`):
+  the backend's `predicted_conflicts` runs `git merge-tree --write-tree`
+  against a scratch object directory, every colliding path gets the
+  tree's conflict glyph, and the file header offers "Show conflict" - the
+  diff body swaps to git's predicted merge, rendered read-only by the Kit
+  Diff's conflict projection (`with_conflicts_read_only` hides the Accept
+  commands). The forecast is advisory: a backend that cannot compute it
+  loads the review without one. The Cargo patch pulls the fork branch
+  `diff-conflict-resolv2` from GitHub, per the repository rule.
+  **A pull-request review resolves its forecast and pushes it** (branch
+  `feat/conflict-pr-push`): the Conflicts center opens on the predicted
+  merge with the same three-pane resolvers, the Resolved tick stays
+  in-memory, and one confirm-always action in the PR menu and the
+  palette pushes a merge commit of the base into the PR's head branch -
+  built from objects alone (`push_resolution`), plain push, re-pinning
+  the review on the pushed merge. Same-repository PRs only; fork PRs
+  and unresolvable files (binary, deleted side) block the push with the
+  reason spelled out. Constraint 5 carries the two sanctioned
+  exceptions. **The resolver renders virtualized** (branch
+  `feat/conflict-virtualized`, Kit fork branch `diff-conflict-resolv2`):
+  the app draws `ConflictResolvVirtual`, which materializes only the
+  visible rows the way `Diff` does and syntax-highlights all three
+  panes, over the unchanged `ConflictResolvState` - the owner measured
+  it against the retained `ConflictResolv` in the Kit story and picked
+  it. The retained component stays in the Kit as the story's
+  comparison baseline. The conflicts column pins the scrolled-into
+  file's header over its top edge, the same idiom as the Diff's pinned
+  file headers, and every file sits fully expanded, so the column is
+  the only vertical scroll - a viewport cap that let a tall file scroll
+  within its own frame was dropped (owner, 2026-11-21, after feeling
+  the double scroll). The Kit's wheel hand-off stays: it is what makes
+  a nested resolver bubble an unconsumed turn outward at all.
 
 ## Verification status
 
@@ -77,6 +127,21 @@ Be exact about this when you report further work.
 | Bare `diffie` on a clean working tree opens the branch going into the default branch | Verified on macOS on 2026-11-19 by screenshot, in a worktree: with uncommitted edits present the old default held (uncommitted going into the branch, those edits on screen); after committing, the same bare start opened "feat/open-pr-palette going into main" (detected from the remotes' HEAD), 10 of 10 commits, the full branch changeset; in a scratch repository with no remote and only `master`, the fallback chain opened "topic going into master". `has_uncommitted_changes` and `default_branch` are tested against throwaway repositories; the on-default-branch and no-candidate cases were not run on screen |
 | The palette opens over an empty changeset | Verified on macOS on 2026-11-19 by screenshot: `diffie HEAD` on a clean tree shows "Nothing to review in this scope", and Cmd+P now opens the palette there ("Open a pull request…" included); before the placeholders tracked the diff's focus handle, the binding had no dispatch path and the key did nothing. The error and loading placeholders got the same fix but were not driven on screen |
 | Other-revision cards keeping the full actions row, Edit and Delete disabled with explaining tooltips | Compiled, clippy-clean; not seen on screen - the window was not run |
+| Conflict backend: merge and rebase detection per worktree, the yours/upstream swap in a rebase, stage texts and diff3 markers, resolve staging exactly the written path (glob characters taken literally), marker regeneration after staging via resolve-undo, continue and abort round trips, idle refusals, the binary flag, the rebase upstream named from the HEAD reflog | Covered by core tests against throwaway merge and rebase repositories (`crates/core/tests/git_cli.rs`); verified on macOS, 2026-11-19 |
+| `ConflictResolv` model: columns from markers with no marker leakage, row alignment with spacers, picks splicing and shifting later blocks, undo, events including BlockReopened, stale indices ignored, an all-empty block keeping a row | Covered by Kit unit and gpui tests on the fork branch |
+| Conflict center on screen, 2026-11-20, against mid-merge and mid-rebase fixture repositories: strip wording for both operations (rebase shows its commit progress), auto-selected Conflicts center, three panes with dividers and per-pane line numbers, tinted blocks aligned by spacers, pick arrows and the take-both glyph in the middle pane's gutters, pane labels with the absolute date left and "same age" right, unresolved badges, greyed Mark resolved and Continue, conflict glyphs on the tree's conflicted rows, and the light-theme story | Verified by screenshot (`docs/screenshots/conflict-*.png`). The yours label's date truncates in a narrow pane |
+| Conflict interactions: clicking a pick arrow, Mark resolved and Reopen round trips, Continue and the abort confirm dialog, the Review \| Conflicts switch toggling, the palette entries | Compiled, clippy-clean, model-tested; not driven on screen |
+| Block-scoped editing: editor mounts only on picked blocks and drops on undo, hand edits flip the resolution once, blank lines and CRLF endings survive round trips, Enter grows the region and the spacers realign, equal-height edits leave the row table untouched | Covered by Kit model and gpui-window state tests on the fork branch `diff-conflict-edit` (a real Change event is driven through the input handler); painted output verified by screenshot (`docs/screenshots/conflict-edit-story-light.png`: the story's first block picked then hand-edited, the editor's text in the middle pane, line numbers aligned); caret and click-to-focus feel **not driven on screen** |
+| Conflict forecast backend: `predicted_conflicts` sees the collision between two branches before any merge starts, markers with both sides' lines and name labels in the merged text, nothing written into the repository's object store, the repository staying idle, a cleanly merging pair predicting nothing | Covered by core tests against a throwaway repository (`crates/core/tests/git_cli.rs`) |
+| Conflict forecast on screen, 2026-11-20, against a pre-merge fixture: the tree's conflict glyph on both colliding rows, "would conflict with main" and the Show conflict button on both file headers (`docs/screenshots/conflict-forecast.png`), and after a driven click the swap itself - the body became the predicted merge with Current and Incoming parts and **no Accept or Undo commands** (`with_conflicts_read_only`), the button flipped to Show changes, the other file kept its review diff | Verified by screenshot. The marker labels painted as the pinned target OID in that shot; the switch to readable names landed after it and is covered by the core test's label assertions, not reshot |
+| Forecast interactions: the swap back to the review diff, the viewport hold across a swap, forecasts surviving a background reload, a pinned review keeping its forecast when a same-named branch moves on (core-tested), moved-block folds left out of a swapped body, and the sidebar warning for collisions on paths outside the scope's view | Core behaviors tested; the UI side compiled, clippy-clean, not driven on screen |
+| Resolution push backend: the merge commit built from objects alone (two parents, resolved texts in, auto-merged side untouched, modes kept from the merge tree), the remote branch moving to it, nothing local moving, refusal of an uncovered conflicted path, rejection when the head branch moved on | Covered by core tests against a throwaway repository with a local bare remote (`crates/core/tests/git_cli.rs`) |
+| Forecast resolution UI: the Conflicts center on a pull request's predicted merge, in-memory ticks, the PR-menu and palette action with its blockers and the confirm dialog naming remote, branch and number, the re-pin and reload after a push | Compiled, clippy-clean; **not driven on screen** - it needs a real pull request with conflicts to dogfood |
+| The virtualized resolver in the app, 2026-11-20, against the mid-merge fixture: syntax-highlighted lines in all three panes, the fold bands above and below the conflict, the tinted block with its pick arrows and take-both glyph aligned by line numbers, the file's frame sized to its folded content inside the outer scroll | Verified by screenshot on macOS. A first wiring painted an empty body - the virtualized list collapses without a definite height - which is why `ResolverView` now sizes the frame from `display_len` and the published row height. Scroll feel inside a capped frame, picks and typing through the virtualized panes, and the forecast center were not driven on screen |
+| Sticky conflict file headers: the column pins the scrolled-into file's header over its top edge (both the operation and the forecast columns share the header builders), and the next file's header pushes the pinned copy up as it arrives; a resolver that consumed a wheel turn stops it so the outer column does not scroll too, and hands it outward at its edge | Pin verified on macOS on 2026-11-21 by screenshots against a two-file mid-merge fixture with the column's scroll forced through its handle (synthetic wheel events were abandoned - the owner was at the keyboard): the first file's header pinned flush, slid up and clipped at the column's top edge as the next header arrived, and at a deeper offset the second file's header pinned. The first wiring never fired: `bounds_for_item` reports layout bounds a scroll never moves, so the pin now adds the handle's clamped offset. A real wheel drive, the hand-off at a capped file's edge and the forecast column's pin (same helper and builders) were not driven on screen |
+| Conflict files fully expanded (owner, 2026-11-21, after feeling the capped frames' double scroll): every resolver takes its content height, the column is the only vertical scroll | Layout verified by screenshot on macOS, 2026-11-21: the tall fixture file runs from line 1 past the window edge with no inner frame edge; the scroll feel itself was not driven (no wheel input - the owner was at the keyboard) |
+| Review findings (2026-11-21, a Rust review over PR #17 and the Kit branch) fixed: the Kit's root border was missing from the host sizing recipe, leaving every frame 2px short and its list eating the first wheel turn (`frame_height` now carries the whole recipe); `]`/`[` jumps compared unscrolled layout bounds, so after a scroll they kept landing on the same file (they now share the pin's clamped-offset conversion); a block's pane columns shared element ids with same-indexed rows; plus the header-bar/badge chrome deduplication in both centers. Deferred to the drift session: keying the Kit's per-render item derivation on the rows revision. Deferred: sharing `detected_language` with the Diff | Compiled, clippy-clean, Kit tests green; the 2px and jump fixes reuse the offset math the pin screenshots proved, but were not themselves driven on screen (the screen locked) |
+| Found while verifying, unfixed: on some launches a virtualized resolver scrolls down on its own - the gpui list's scroll top climbs a couple of items per frame through the startup render burst while syntax highlighting streams in, and settles wherever the burst ends (seen at items 34 and 93 of 158, roughly one launch in three against the two-file fixture; wheel input plays no part) | Reproduced and logged on macOS, 2026-11-21, with a temporary local-path Kit patch printing `logical_scroll_top` per render. Kit-side, in `ConflictResolvVirtual` with gpui's `list`; the cause is not yet isolated, and the burst itself - hundreds of notifies while one file's highlighting streams in - deserves the same look |
 | Resolved threads folding into gutter-lane markers: the 3 s grace and fade after a verdict, the marker's hover brightening and click toggle, the open-comments-only walk, the context menu's Comment line | Compiled, clippy-clean; not seen on screen - the window was not run. The timers, the animation and the marker lane's layout all need a real window to judge |
 | Back, forward and reload icon buttons leading the scope bar | Compiled, clippy-clean; not seen on screen - the window was not run |
 | Pull-request menu (title-bar icon in a `--pr` review): open in the browser, publish comments, approve with and without comments; the link icon on published cards; the status-bar line after a publish | Core covered by tests: what a publish sends and records (`forge.rs`, against a fake forge) and the exact gh calls, the file-level fallback and the pending-review cleanup (`github.rs`, against a stand-in gh script, Unix only). The GraphQL input and enum names were checked read-only against GitHub's live schema by introspection. The status query (`gh pr view --json state,reviewDecision,statusCheckRollup` with the app's jq) was run read-only against a real merged PR and its lines match what `fold_checks` parses. **Nothing was ever posted to a real pull request**, and the window was not run: the menu, the state icon and its red tint, the busy state, the link icon and whether a pending-review comment's URL still opens after the submit are all unseen |
@@ -210,6 +275,11 @@ docs/
   screenshots/                the scaffold as it actually rendered
 skills/diffie-review/         agent skill: launch a review, read it back
                               (canonical copy; installs to ~/.claude/skills)
+website/                      the product page: static HTML and CSS, no
+                              build step; assets/ holds the brand mark, the
+                              hero capture in two widths, and the focused
+                              demo clips with a poster each (re-encoded from
+                              demo-footage/ to the size they are shown at)
 ```
 
 ## The core in one page
@@ -761,7 +831,25 @@ Not implemented or not possible, against the mockup and the design document:
 
 ## Suggested next steps
 
-In this order, each one small enough to show the owner:
+On the conflict-resolver branch, before anything else: **chase the
+self-scrolling virtualized resolver** (the unfixed row in the verification
+table) - reproduce with a local-path Kit patch logging
+`logical_scroll_top` per render against the two-file fixture, then walk
+gpui's `list` layout for what advances the anchor during the highlight
+burst; quieting the burst itself may be the fix, and the review's
+deferred cleanup - key the per-render item derivation on the rows
+revision instead of rebuilding and comparing it every pass - belongs
+in the same pass. Then iterate - the
+embedded editor in the middle pane (feed it the trusted stage texts, not
+the marker parse), the narrow-window fallback onto the Kit's inline
+conflict UI, and restoring the GitHub Cargo patch before merge. Should a
+hugely conflicted file ever lag: a fully expanded frame makes the list
+lay out every unfolded row, so the folds are what keep it cheap now -
+the cure is the review view's idiom moved into the Kit, one virtualized
+list over all conflict files with the headers as items, which would
+also take over the app-side pinned header.
+
+On main, in this order, each one small enough to show the owner:
 
 1. **Exercise what the restyle has not shown on screen yet**: the commit
    picker internals, theme menu, comment box and Escape focus return,

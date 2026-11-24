@@ -4,6 +4,177 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-23
+
+
+### Documentation
+
+- Add a feature list so the README shows the user's perspective (#10) by @sassman in [#10](https://github.com/sassman/diffie-rs/pull/10)
+
+  The README went from the pitch line straight into developer territory
+  (docs, layout, build). A reviewer landing on the page had to read the
+  handoff to learn what the app actually does for them. A plain bullet
+  list after the screenshot answers that first.
+
+- Update the README screenshot and add the review-loop demo (#8) by @sassman in [#8](https://github.com/sassman/diffie-rs/pull/8)
+
+  - the old screenshot predates the PR picker and v0.3.0; readers deserve
+  the current window
+  - a still image cannot show the review loop - clicking the screenshot
+  opens the comment-answer-resolve clip in GitHub's video player
+
+  ---------
+
+
+### Features
+
+- Resolve a pull request's conflicts in-app and push the merge (#16) by @sassman in [#16](https://github.com/sassman/diffie-rs/pull/16)
+
+  - Your PR conflicts with its base: until now diffie could only warn you
+  (the forecast). Now you fix it without leaving the review - open the
+  Conflicts view, pick sides or hand-edit in the familiar three panes,
+  tick each file, and push.
+  - The push is one action in the PR menu or the palette. It always
+  confirms first, naming exactly what will happen: which remote, which
+  branch, which pull request. What lands is the same thing GitHub's own
+  "Resolve conflicts" button produces - a merge commit of the base into
+  your PR branch, plain push, never forced.
+  - Your checkout stays yours: no branch switch, no index or working-tree
+  change. The merge commit is built from git objects alone, so a dirty
+  worktree or a different checked-out branch never gets in the way.
+  - Guard rails: a PR from a fork, a binary conflict or a deleted-side
+  conflict blocks the push with the reason spelled out, so a half-resolved
+  or markered file can never reach the PR. If the PR branch moved since
+  you opened the review, the push comes back rejected instead of
+  overwriting newer work.
+  - After the push the review re-pins onto the merge commit, so the reload
+  shows the PR as it now is - conflict-free.
+
+  ---------
+
+- Add conflict forecasting so a review warns before the merge (#14) by @sassman in [#14](https://github.com/sassman/diffie-rs/pull/14)
+
+  Reviewing a branch now warns about merge conflicts before the merge,
+  instead of letting the rebase catch you by surprise.
+
+  While a review is idle, diffie asks git for a merge prediction in the
+  background; the repository, index and working tree stay untouched. When
+  a file would collide with the target branch:
+
+  - the file tree marks it with a conflict glyph,
+  - the file header says "would conflict with `target`" and offers **Show
+  conflict**,
+  - clicking that swaps the file's body to git's predicted merge, conflict
+  markers included, read-only - so the collision can be judged without
+  leaving the review.
+
+  A collision in a file outside the current scope warns from the sidebar
+  header, so it cannot stay invisible.
+
+  ---------
+
+- Update the conflict result with block-scoped hand edits (#11) by @sassman in [#11](https://github.com/sassman/diffie-rs/pull/11)
+
+  Conflict resolution learns hand edits: after picking a side (or both),
+  the block's result can now be adjusted in place.
+
+  - The picked block becomes an embedded editor that grows as you type;
+  Enter at its edges adds lines above or below.
+  - A hand-edited block is tinted so it reads differently from a plain
+  pick; undo returns it to its base state and read-only.
+  - Context lines stay read-only - only the conflicted blocks are
+  editable.
+
+  Known limitation: the block editor's horizontal scroll is not yet synced
+  with the pane's.
+
+  ---------
+
+- Resolve merge and rebase conflicts without leaving the review (#9) by @sassman in [#9](https://github.com/sassman/diffie-rs/pull/9)
+
+  An interrupted merge or rebase now surfaces in diffie itself instead of
+  forcing a switch to the terminal: a state strip, a Review | Conflicts
+  center switch, and for each conflicted file a JetBrains-style three-pane
+  resolver - Your changes, Result, Upstream changes.
+
+- Add --version so an installed binary can say what it is (#13) by @sassman in [#13](https://github.com/sassman/diffie-rs/pull/13)
+
+  The CLI had no way to report its version - with prebuilt binaries and a
+  Homebrew tap out there, "which diffie am I running" had no answer short
+  of reinstalling. `--version` / `-V` prints `diffie <version>` and exits
+  before any window or git work; the help text mentions it.
+
+  Verified by running the binary (`-V`, `--version`, `--help`); fmt and
+  workspace clippy with `-D warnings` are clean.
+
+- Add a PR picker so a pull request opens from the palette (#7) by @sassman in [#7](https://github.com/sassman/diffie-rs/pull/7)
+
+  <img width="536" height="299" alt="image"
+  src="https://github.com/user-attachments/assets/a6148c7a-36c9-4132-94e0-0d5e49eb79b9"
+  />
+
+  <img width="561" height="247" alt="image"
+  src="https://github.com/user-attachments/assets/d9821361-dbfb-4a1d-9f5a-603902ae9779"
+  />
+ 
+  - "Open a pull request…" in the palette lists the repo's PRs (open
+  first, drafts marked, merged/closed behind "Show merged and closed…",
+  each row with state, author, age and checks verdict) and opens the pick
+  in the current window, exactly as `--pr` would - no more leaving the app
+  to switch reviews.
+  - The pick may run the one sanctioned `git fetch` when the PR's commits
+  are missing (`refs/pull/<n>/head` + base branch, explicit click only);
+  the CLI still never fetches. Carve-out recorded in AGENTS.md and the
+  design doc.
+  - Bare `diffie` on a clean tree now reviews the branch going into the
+  default branch (remotes' HEAD, else main, else master) instead of an
+  empty window; the palette also stays reachable over empty/error states.
+  - `--pr` resolution moved to core (`pr::open`) so CLI and picker share
+  one flow; CLI error wording is byte-identical.
+  - Per-review state gathered into one `PerReview` struct that `adopt`
+  swaps wholesale - the compiler now enforces a complete reset on review
+  switch (a field leak the code review caught motivated this).
+  - Verified on screen on macOS against this repo's real PRs; core
+  behaviours tested against throwaway repositories and a fake gh.
+
+  ---------
+
+
+### Miscellaneous Tasks
+
+- Render conflicts virtualized so big files scroll smoothly (#17) by @sassman in [#17](https://github.com/sassman/diffie-rs/pull/17)
+
+  Scrolling the conflicts view through a big file was slow, and its code
+  was the one place in the app without syntax highlighting. Both are gone:
+
+  - The three-pane resolver now draws only the rows on screen, so
+  scrolling a large conflicted file feels like scrolling the diff.
+  - All three panes are syntax highlighted, prepared in the background -
+  the view never waits for it.
+  - A file taller than the window scrolls inside its own frame; shorter
+  files take exactly their height, and the view still reads top to bottom
+  through all files.
+  - Picks, hand edits, folds and the resolve-and-push flow are unchanged -
+  the same state drives the new renderer, chosen after a side-by-side
+  against the retained one in the Kit story.
+
+  ---------
+
+- Update url past RUSTSEC-2026-0592 so cargo deny passes (#18) by @sassman in [#18](https://github.com/sassman/diffie-rs/pull/18)
+
+  The dependency gate fails on every branch: RUSTSEC-2026-0592 reports a
+  stack
+  overflow in `Url::origin()` on nested `blob:` URLs, present in `url
+  2.5.8`.
+  The crate arrives transitively under GPUI's http client, so no manifest
+  in
+  this repo asks for it.
+
+  The lockfile now pins `url 2.5.9`, together with the `form_urlencoded
+  1.2.3`
+  that it requires. Manifests are untouched and the minimum supported Rust
+  version is unaffected.
+
 ## [0.3.0] - 2026-11-18
 
 
@@ -15,6 +186,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add symbol navigation so a name leads to its definition (#6) by @sassman in [#6](https://github.com/sassman/diffie-rs/pull/6)
+
+
+### Miscellaneous Tasks
+
+- Release prep v0.3.0
 
 
 ### Ci

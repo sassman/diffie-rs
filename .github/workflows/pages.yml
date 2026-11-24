@@ -1,0 +1,48 @@
+name: Pages
+on:
+  # Every push to main, with no path filter: the page states what the app is
+  # and what it does, so work that never touches website/ can still make it
+  # stale. Deploying is a copy of a folder - cheaper than deciding each time
+  # whether a change counts.
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One site is live at a time, so a running deploy finishes instead of being
+# cancelled: a half-uploaded site must never be what visitors get served.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url || steps.deploy-retry.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/configure-pages@v6
+      # The page is static HTML and CSS: the folder ships as it stands, there
+      # is nothing to build.
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: website
+      # deploy-pages looks up the just-uploaded artifact by name once, with
+      # no retry (actions/deploy-pages#451): the lookup can still return
+      # zero artifacts a moment after upload finishes. One retry after a
+      # short wait clears it.
+      - id: deploy
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+      - if: steps.deploy.outcome == 'failure'
+        run: sleep 30
+      - id: deploy-retry
+        if: steps.deploy.outcome == 'failure'
+        uses: actions/deploy-pages@v5

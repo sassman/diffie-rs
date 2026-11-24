@@ -11,7 +11,6 @@ use std::ops::Range;
 
 use super::*;
 use diffie_symbols::{FileSymbols, Origin, RevisionView, SymbolIndex, Target};
-use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::diff::DiffTextPosition;
 use gpui_kit::{Modifiers, MouseButton, Pixels, Point, anchored, point};
@@ -598,9 +597,9 @@ impl ReviewApp {
 
     /// Hand the Diff its file set again: the comparison's files in tree
     /// order with the orphan snippets when their toggle is on, then the
-    /// definition entries. `set_files` starts the viewport and the folds
-    /// over, so the folds are put back; callers restore or move the
-    /// viewport themselves.
+    /// definition entries. The shared sync puts the folds back, which
+    /// `set_files` starts over; callers restore or move the viewport
+    /// themselves.
     pub(super) fn sync_diff_files(&mut self, cx: &mut Context<Self>) {
         let state = self.diff.read(cx);
         let mut files: Vec<DiffFile> = state
@@ -614,19 +613,7 @@ impl ReviewApp {
         }
         files.sort_by(|a, b| tree_order(a.path().as_ref(), b.path().as_ref()));
         files.extend(self.symbols.entries.iter().map(DefinitionEntry::file));
-        let folds: Vec<(DiffFold, bool)> = state
-            .folds()
-            .iter()
-            .enumerate()
-            .map(|(ix, fold)| (fold.clone(), state.is_fold_revealed(ix)))
-            .collect();
-        self.diff.update(cx, |state, cx| {
-            state.set_files(files, cx);
-            state.set_folds(folds.iter().map(|(fold, _)| fold.clone()), cx);
-            for (ix, _) in folds.iter().enumerate().filter(|(_, fold)| fold.1) {
-                state.set_fold_revealed(ix, true, cx);
-            }
-        });
+        self.sync_files_and_folds(files, cx);
     }
 
     /// The x on a definition entry's header.

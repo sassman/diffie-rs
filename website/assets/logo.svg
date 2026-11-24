@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <title>diffie</title>
+  <!-- Eagle head, Gruvbox Dark palette. Paint order matters: the lid is
+       head-colored and clips the iris top for the hooded glare. -->
+  <path fill="#282828" d="M0 352 L312 96 L568 72 L764 180 L900 350 L796 400 L992 500 L1024 566 L1024 690 L930 900 L856 980 L800 810 L676 648 L624 772 L560 1024 L0 1024 Z"/>
+  <!-- crown facet -->
+  <path fill="#3c3836" d="M0 352 L312 96 L568 72 L500 320 L180 460 L0 520 Z"/>
+  <!-- jaw shadow band -->
+  <path fill="#3c3836" d="M676 648 L624 772 L560 1024 L430 1024 Z"/>
+  <!-- crown rim: keeps the contour on near-black backgrounds -->
+  <path fill="#ebdbb2" d="M0 352 L312 96 L568 72 L764 180 L752 196 L566 94 L316 118 L0 374 Z"/>
+  <!-- beak -->
+  <path fill="#d79921" d="M796 400 L992 500 L1024 566 L1024 690 L930 900 L856 980 L800 810 L676 648 Z"/>
+  <path fill="#fabd2f" d="M796 400 L992 500 L1024 566 L1024 592 L984 524 L804 428 Z"/>
+  <!-- iris with a lower depth wedge -->
+  <circle fill="#fabd2f" cx="590" cy="480" r="170"/>
+  <path fill="#d65d0e" d="M450 580 A170 170 0 0 0 758 510 Z"/>
+  <!-- pupil -->
+  <circle fill="#1d2021" cx="615" cy="478" r="72"/>
+  <!-- upper lid -->
+  <path fill="#282828" d="M380 240 L940 320 L830 470 L420 360 Z"/>
+  <!-- brow slash, heavy at the front -->
+  <path fill="#ebdbb2" d="M380 310 L660 200 L900 350 L820 452 L452 322 Z"/>
+  <path fill="#fbf1c7" d="M660 200 L900 350 L856 376 L668 234 Z"/>
+  <!-- glint -->
+  <circle fill="#fbf1c7" cx="658" cy="446" r="26"/>
+</svg>

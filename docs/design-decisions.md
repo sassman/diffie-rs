@@ -70,14 +70,18 @@ Decided:
 - Diff algorithm: git's `histogram` with the indent heuristic, for hunks that
   stay block-consistent.
 - UI first. The UI was designed and iterated before the core.
+- The app never writes to the reviewed repository's objects, index or
+  working tree; its only writes are review files under `.git/review/`. One
+  narrow exception, owner-decided 2026-11-19: while an interrupted merge or
+  rebase exists, the app may write resolved content to paths that are
+  unmerged in the index, stage exactly those paths, and run continue or
+  abort - each only on the reviewer's explicit click (section 20).
 
 Assumed:
 
 - The hand-over format from core to UI is git-format unified patch text. GPUI
   Kit's `Diff` component parses exactly that, and any backend can produce it.
 - Backend calls block and always run on a background task.
-- The app never writes to the reviewed repository's objects, index or working
-  tree. Its only writes are review files under `.git/review/`.
 
 ## 4. Naming the comparison
 
@@ -837,3 +841,98 @@ Open:
   comment is in terms of section 9.
 - Local variables and parameters, find-references, and the next
   languages.
+
+## 20. Merge and rebase conflicts
+
+Decided (owner, 2026-11-19):
+
+- When the repository has an interrupted merge or rebase, the scope bar
+  shows a state strip ("Resolving merge: `source` going into `target` -
+  2 of 5 files resolved"; a rebase adds its commit progress) and the center
+  becomes an either/or: Review or Conflicts, a segmented icon pair in the
+  style of the split/unified pair. Conflicts is auto-selected when the
+  state is first seen; the manual choice is remembered for the session.
+- The Conflicts view is one continuous scroll of conflicted files, each a
+  three-pane block: Your changes left, the editable result in the middle,
+  Upstream changes right. Conflict blocks stay aligned across the panes via
+  spacer rows; the outer column scrolls vertically and each pane scrolls
+  its long lines horizontally. A file's block is sized to its folded
+  content, fully expanded, so the column is the only vertical scroll -
+  as the review view is. A viewport cap that made a tall file scroll
+  within its own frame was tried and dropped (owner, 2026-11-21: the
+  nested scroll felt wrong). The scrolled-into file's header pins over
+  the column's top edge, the review view's pinned-header idiom.
+  Unchanged context
+  folds behind an
+  "N unchanged lines" disclosure (owner nit, 2026-11-20), keeping three
+  lines around each block like the Diff keeps around a change; a click
+  on the band in any pane opens it.
+- Editing in the middle pane is block-scoped (owner, 2026-11-20,
+  narrowing the earlier free-typing intent): a block's result region
+  becomes editable once it has a pick (take a side, take both), typing
+  there flips the block to hand-edited, and Enter at the region's edges
+  adds lines above and below. Context lines stay read-only; undo returns
+  the block to its base lines, read-only. Raw conflict markers never
+  appear in the pane.
+- The strings "ours" and "theirs" never appear in the UI. The panes are
+  Your changes and Upstream changes, suffixed with the concrete ref. The
+  backend maps git's sides to these labels per operation - a rebase swaps
+  git's ours and theirs - in one place, `git_cli.rs`.
+- The pane labels say which side is fresher: the yours pane carries its
+  tip's absolute date on the committer's clock, the upstream pane the
+  difference as "5 days newer" or "2 hours older" ("same age" within a
+  minute).
+- Resolution writes are click-driven and narrow (section 3). Mark resolved
+  per file writes the result and stages it; Reopen regenerates the markers
+  through git's resolve-undo. Continue and abort run git's own continue and
+  abort; both live in the palette, greyed when not applicable, and abort
+  confirms first.
+- The view is a new Kit-fork component beside `Diff`: the app renders
+  `ConflictResolvVirtual`, which virtualizes its rows the way `Diff`
+  does and syntax-highlights all three panes (owner, 2026-11-20, after
+  measuring it against the retained `ConflictResolv` in the Kit story;
+  the retained one stays there as the comparison baseline). `Diff`
+  itself stays read-only and untouched.
+- While the repository is idle, the review forecasts the merge it feeds
+  (owner, 2026-11-20): the backend runs `git merge-tree --write-tree`
+  against a scratch object directory - the repository, its index and its
+  working tree stay untouched - and every path the merge would collide on
+  gets the tree's conflict marker. The file's header says "would conflict
+  with `target`" and offers a swap: the diff body becomes git's predicted
+  merge of the file, rendered by the Kit Diff's own conflict projection
+  with the two branch names as labels, read-only - the Accept commands
+  hide, because there is nothing a click could write before the real
+  merge. The forecast is advisory: when the backend cannot compute it,
+  the review loads without one rather than failing.
+- A pull-request review resolves its predicted conflicts in-app (owner,
+  2026-11-20): the same three-pane mechanics work on the predicted
+  merge, the Resolved tick is in-memory, and the result leaves the app
+  only as a merge commit of the base into the PR's head branch - what
+  GitHub's own resolve button produces, plain push, no force - built as
+  pure objects (no checkout, no index, no working-tree moves) and sent
+  by one action in the PR menu and the palette that always confirms
+  first, naming the remote, the branch and the pull request number.
+  Same-repository PRs only; a fork's PR shows its conflicts read-only
+  with the fork named as the place to resolve. A file the app cannot
+  resolve (binary, a deleted side) blocks the push, so markered content
+  never reaches the pull request. Constraint 5 carries the two
+  sanctioned exceptions: the object-database writes and the push.
+
+Assumed:
+
+- Windows too narrow for three panes fall back to the Kit's inline conflict
+  UI, relabeled to this section's wording.
+- `git checkout -m` regenerates markers reliably even after staging
+  (resolve-undo); if not, the fallback is `git merge-file` over the three
+  stage texts.
+
+Open:
+
+- A keyboard model for the conflict view beyond the palette and the
+  `]`/`[` file jumps it has (owner nit, 2026-11-20; the view also
+  filters the file tree down to the conflicted files). Jumps between
+  the blocks inside a file need the component to expose block rows.
+- Whether comments can attach to lines inside the conflict view.
+- The block editor scrolls its long lines within its own width instead
+  of following the pane's horizontal scroll, so columns can shear at a
+  resolved block; whether the pane should drive one shared offset.
