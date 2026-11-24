@@ -153,7 +153,7 @@ fn main() {
             }
             "--stack" => {
                 let Some(value) = arguments.next() else {
-                    exit_usage("--stack needs a stack's number; a pull request's goes to --pr.");
+                    exit_usage("--stack needs a stack's number.");
                 };
                 stack = Some(value.to_string_lossy().into_owned());
             }

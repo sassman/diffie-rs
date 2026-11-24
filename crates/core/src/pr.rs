@@ -639,12 +639,8 @@ pub fn parse(value: &str) -> Result<PrArgument, String> {
 /// 2026-11-24), so neither flag takes the other's names - a pull
 /// request, by number or URL, belongs to `--pr`.
 pub fn parse_stack(value: &str) -> Result<u64, String> {
-    let complaint = || {
-        format!(
-            "`{value}` is not a stack number. --stack takes a stack's number; \
-             a pull request's number or URL goes to --pr."
-        )
-    };
+    // Where `--pr` belongs is `--help`'s job, not every refusal's.
+    let complaint = || format!("`{value}` is not a stack number.");
     // `str::parse` alone would take a leading `+`.
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(complaint());
@@ -726,7 +722,7 @@ mod tests {
             "feat/stack-model",
         ] {
             let message = parse_stack(value).unwrap_err();
-            assert!(message.contains("--pr"), "{value}: {message}");
+            assert!(message.contains("not a stack number"), "{value}: {message}");
         }
     }
 
