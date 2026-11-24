@@ -20,9 +20,10 @@ A native desktop app for reviewing git changes across several commits or a
 whole branch, with comments on lines and selections. Rust and GPUI Kit, for
 macOS, Windows and Linux.
 
-GitHub's pull request page and your editor's diff view can both show you a
-change. Neither comments on a line and hands the fix to the agent that wrote
-it, in place, while you keep reading. diffie does.
+A GitHub PR needs the code pushed first, costs your agent tokens fetching
+comments through the API, and its replies would land under your own account.
+diffie reviews earlier, while changes are still cheap to rework, and your
+agent reads and answers a local file directly - under its own name.
 
 <p align="center">
   <img src="docs/screenshots/comment-resolve.gif" alt="diffie reviewing a pull request: a comment on a line, the agent's answer appearing in the thread under a robot badge, and the thread folding away once resolved">
