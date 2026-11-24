@@ -1345,6 +1345,10 @@ impl diffie_core::forge::Forge for PullForge {
         unreachable!("opening one pull request never reads a stack")
     }
 
+    fn stack_numbered(&self, _: u64) -> Result<Option<Stack>, diffie_core::forge::ForgeError> {
+        unreachable!("opening one pull request never reads a stack")
+    }
+
     fn stacks(&self) -> Result<Vec<StackSummary>, diffie_core::forge::ForgeError> {
         unreachable!("opening never lists")
     }
@@ -1437,8 +1441,11 @@ fn stack_member(number: u64, head: &Oid, source: &str, target: &str, base: &Oid)
 
 /// A forge that knows one stack. `stack` answers it for any member's
 /// number, `Ok(None)` for `unstacked`, and refuses every other number the
-/// way GitHub refuses one that names no pull request - including the
-/// stack's own, which only the list maps back to a member.
+/// way GitHub refuses one that names no pull request - the stack's own
+/// included, which only `stack_numbered` answers for.
+///
+/// `stacks` reports nothing: every member sits past the list's page, the
+/// case a lookup by stack number must survive.
 #[derive(Default)]
 struct StackForge {
     /// Latest first, as the forge reads a stack's entries in.
@@ -1538,31 +1545,23 @@ impl diffie_core::forge::Forge for StackForge {
         }))
     }
 
+    fn stack_numbered(&self, number: u64) -> Result<Option<Stack>, diffie_core::forge::ForgeError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("stack_numbered {number}"));
+        if self.number != Some(number) {
+            return Ok(None);
+        }
+        Ok(Some(Stack {
+            number: self.number,
+            pulls: self.members.clone(),
+        }))
+    }
+
     fn stacks(&self) -> Result<Vec<StackSummary>, diffie_core::forge::ForgeError> {
         self.calls.lock().unwrap().push("stacks".to_string());
-        Ok(vec![StackSummary {
-            number: self.number,
-            base: self
-                .members
-                .last()
-                .map(|first| first.target_branch.clone())
-                .unwrap_or_default(),
-            members: self
-                .members
-                .iter()
-                .map(|member| PrSummary {
-                    number: member.number,
-                    title: format!("#{}", member.number),
-                    author: "Ada".into(),
-                    updated: 0,
-                    state: member.state,
-                    draft: false,
-                    checks: None,
-                    head: member.source_branch.clone(),
-                    base: member.target_branch.clone(),
-                })
-                .collect(),
-        }])
+        Ok(Vec::new())
     }
 }
 
@@ -1677,10 +1676,10 @@ fn a_merged_first_member_pins_the_base_commit_it_recorded() {
 }
 
 #[test]
-fn a_stack_number_resolves_through_the_stack_list() {
+fn a_stack_number_resolves_with_its_members_past_the_list() {
     let fixture = StackFixture::new();
     let forge = StackForge::new(fixture.members());
-    let (stack, _) = open_stack(
+    let (stack, comparison) = open_stack(
         &fixture.backend(),
         &forge,
         &numbered(42),
@@ -1690,9 +1689,11 @@ fn a_stack_number_resolves_through_the_stack_list() {
     .unwrap();
 
     assert_eq!(stack.number, Some(42));
-    // 42 is the stack's own number and so no pull request; the list maps
-    // it back to a member, which the second read resolves.
-    assert_eq!(forge.calls(), ["stack 42", "stacks", "stack 3"]);
+    assert_eq!(comparison.source, "feat/c");
+    // 42 is the stack's own number and so no pull request. It is looked
+    // up directly: the list reports nothing here, as it would for a stack
+    // whose members all sit past its page, and that must not lose it.
+    assert_eq!(forge.calls(), ["stack 42", "stack_numbered 42"]);
 }
 
 #[test]
@@ -1735,7 +1736,7 @@ fn a_number_that_names_neither_names_the_pr_flag() {
         "{error}"
     );
     assert!(error.contains("`--pr`"), "{error}");
-    assert_eq!(forge.calls(), ["stack 77", "stacks"]);
+    assert_eq!(forge.calls(), ["stack 77", "stack_numbered 77"]);
 }
 
 /// Upstream with a three-member stack, each head also reachable as

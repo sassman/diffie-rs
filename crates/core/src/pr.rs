@@ -266,7 +266,9 @@ pub fn open_stack(
 /// pull requests and stacks share one number sequence, with each number
 /// claimed by exactly one object, so a number that is a pull request in no
 /// stack is in no stack at all. Only when the forge says that number is no
-/// pull request does the number's other reading - a stack's own - apply.
+/// pull request does the number's other reading - a stack's own - apply,
+/// and [`Forge::stack_numbered`] looks that one up directly: scanning
+/// [`Forge::stacks`] would lose a stack sitting past that list's page.
 fn resolve_stack(forge: &dyn Forge, argument: &PrArgument) -> Result<Stack, String> {
     let number = argument.number;
     let refused = match forge.stack(argument) {
@@ -286,25 +288,14 @@ fn resolve_stack(forge: &dyn Forge, argument: &PrArgument) -> Result<Stack, Stri
         )
     };
     // A URL names a pull request by construction, so its number has no
-    // second reading - and the stack list is this checkout's repository's,
-    // not the URL's.
+    // second reading - and a stack of that number is looked for in this
+    // checkout's repository, not the URL's.
     if argument.url.is_some() {
         return Err(refused);
     }
-    let stacks = forge.stacks().map_err(|_| neither())?;
-    let member = stacks
-        .iter()
-        .find(|stack| stack.number == Some(number))
-        .and_then(|stack| stack.members.first())
-        .ok_or_else(neither)?;
-    // The list carries no oids, so the stack is resolved again from one of
-    // its members - the same single query, now reaching a pull request.
     forge
-        .stack(&PrArgument {
-            number: member.number,
-            url: None,
-        })
-        .map_err(|error| error.to_string())?
+        .stack_numbered(number)
+        .map_err(|_| neither())?
         .ok_or_else(neither)
 }
 

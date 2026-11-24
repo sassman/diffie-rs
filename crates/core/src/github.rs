@@ -203,6 +203,53 @@ impl GitHubCli {
         repo_of(stdout.trim()).ok_or_else(|| ForgeError::Output(stdout.trim().to_string()))
     }
 
+    /// The stack holding pull request `number`, with the repository
+    /// already resolved: [`Forge::stack_numbered`] learns that number
+    /// through REST and must not pay for a second repository lookup.
+    fn stack_of_pull(&self, repo: &Repo, number: u64) -> Result<Option<Stack>, ForgeError> {
+        let mut stack = None;
+        let mut members: Vec<(u64, PullRequest)> = Vec::new();
+        let mut after = String::new();
+        loop {
+            let mut variables = vec![
+                Variable::Text("owner", &repo.owner),
+                Variable::Text("name", &repo.name),
+                Variable::Number("number", number as usize),
+            ];
+            if !after.is_empty() {
+                variables.push(Variable::Text("after", &after));
+            }
+            let stdout = self.graphql_at(Some(&repo.host), STACK, &variables, STACK_ROWS)?;
+            let mut lines = stdout.lines().filter(|line| !line.is_empty());
+            // No answer at all: the pull request carries no stack.
+            let Some(header) = lines.next() else {
+                return Ok(None);
+            };
+            let unexpected = || ForgeError::Output(header.to_string());
+            let mut columns = header.split('\t');
+            let mut column = || columns.next().ok_or_else(unexpected);
+            let more = column()? == "true";
+            let cursor = column()?.to_string();
+            stack.get_or_insert(column()?.parse().map_err(|_| unexpected())?);
+            for line in lines {
+                members.push(parse_member(line)?);
+            }
+            // The cursor, not the stack's `size`: it answers directly
+            // whether another page is waiting.
+            if !more || cursor.is_empty() {
+                break;
+            }
+            after = cursor;
+        }
+        // Latest first; `position` counts from the first member, the one
+        // nearest the base branch.
+        members.sort_by_key(|(position, _)| std::cmp::Reverse(*position));
+        Ok(Some(Stack {
+            number: stack,
+            pulls: members.into_iter().map(|(_, pull)| pull).collect(),
+        }))
+    }
+
     fn add_thread(
         &self,
         pull: &PullRequest,
@@ -371,48 +418,37 @@ impl Forge for GitHubCli {
     }
 
     fn stack(&self, argument: &PrArgument) -> Result<Option<Stack>, ForgeError> {
-        let repo = self.repository(argument)?;
-        let mut number = None;
-        let mut members: Vec<(u64, PullRequest)> = Vec::new();
-        let mut after = String::new();
-        loop {
-            let mut variables = vec![
-                Variable::Text("owner", &repo.owner),
-                Variable::Text("name", &repo.name),
-                Variable::Number("number", argument.number as usize),
-            ];
-            if !after.is_empty() {
-                variables.push(Variable::Text("after", &after));
-            }
-            let stdout = self.graphql_at(Some(&repo.host), STACK, &variables, STACK_ROWS)?;
-            let mut lines = stdout.lines().filter(|line| !line.is_empty());
-            // No answer at all: the pull request carries no stack.
-            let Some(header) = lines.next() else {
-                return Ok(None);
-            };
-            let unexpected = || ForgeError::Output(header.to_string());
-            let mut columns = header.split('\t');
-            let mut column = || columns.next().ok_or_else(unexpected);
-            let more = column()? == "true";
-            let cursor = column()?.to_string();
-            number.get_or_insert(column()?.parse().map_err(|_| unexpected())?);
-            for line in lines {
-                members.push(parse_member(line)?);
-            }
-            // The cursor, not the stack's `size`: it answers directly
-            // whether another page is waiting.
-            if !more || cursor.is_empty() {
-                break;
-            }
-            after = cursor;
+        self.stack_of_pull(&self.repository(argument)?, argument.number)
+    }
+
+    /// REST, where GraphQL has no way in: a stack is reachable there only
+    /// through a member, and `GET /repos/{owner}/{repo}/stacks/{number}`
+    /// is the only lookup by the stack's own number. It answers with its
+    /// members, but not with everything [`PullRequest`] needs - no
+    /// head-repository owner, and a `state` plus `merged_at` instead of
+    /// GitHub's three-way state - so only one member's number is taken
+    /// from it and the GraphQL read does the rest.
+    fn stack_numbered(&self, number: u64) -> Result<Option<Stack>, ForgeError> {
+        let repo = self.local_repository()?;
+        let stdout = self.run(|command| {
+            command
+                .args(["api", "--hostname", &repo.host])
+                // `pull_requests` runs from the first member, the one
+                // nearest the base branch; any of them resolves the stack.
+                .arg(format!(
+                    "repos/{}/{}/stacks/{number}",
+                    repo.owner, repo.name
+                ))
+                .args(["--jq", ".pull_requests[0].number"]);
+        })?;
+        let member = stdout.trim();
+        if member.is_empty() || member == "null" {
+            return Ok(None);
         }
-        // Latest first; `position` counts from the first member, the one
-        // nearest the base branch.
-        members.sort_by_key(|(position, _)| std::cmp::Reverse(*position));
-        Ok(Some(Stack {
-            number,
-            pulls: members.into_iter().map(|(_, pull)| pull).collect(),
-        }))
+        let member = member
+            .parse()
+            .map_err(|_| ForgeError::Output(member.to_string()))?;
+        self.stack_of_pull(&repo, member)
     }
 
     fn stacks(&self) -> Result<Vec<StackSummary>, ForgeError> {
@@ -1171,6 +1207,32 @@ esac
         );
         assert!(calls[0].contains("owner=team"), "{calls:?}");
         assert!(calls[0].contains("name=service"), "{calls:?}");
+    }
+
+    #[test]
+    fn a_stack_number_is_looked_up_through_rest() {
+        let rows = format!("false\\t\\t42\\n{}\\n", entry(1, 1, "feat/a", "main"));
+        let gh = FakeGh::new(&format!(
+            "  *stacks/42*) echo 1 ;;\n  *entries*) printf '{rows}' ;;"
+        ));
+        let stack = gh.forge().stack_numbered(42).unwrap().unwrap();
+        assert_eq!(numbers(&stack.pulls), [1]);
+        // REST names a member, then the member read resolves the stack -
+        // never a scan of the capped pull-request list.
+        let calls = gh.calls();
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        assert!(calls[0].starts_with("repo view"), "{calls:?}");
+        assert_eq!(
+            calls[1],
+            "api --hostname github.com repos/o/r/stacks/42 --jq .pull_requests[0].number"
+        );
+        assert!(calls[2].contains("-f query=query("), "{calls:?}");
+    }
+
+    #[test]
+    fn a_stack_without_members_is_no_stack() {
+        let gh = FakeGh::new("  *stacks/42*) echo null ;;");
+        assert!(gh.forge().stack_numbered(42).unwrap().is_none());
     }
 
     #[test]

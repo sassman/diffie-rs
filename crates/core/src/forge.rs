@@ -48,6 +48,12 @@ pub trait Forge: Send + Sync {
     /// number as a stack's own, which is the other thing it can be.
     fn stack(&self, argument: &PrArgument) -> Result<Option<Stack>, ForgeError>;
 
+    /// The stack of that number, where the number is the stack's own and
+    /// not a member's. A direct lookup, never a scan of
+    /// [`Self::stacks`]: a stack whose members all sit past that list's
+    /// page must still be reachable by its number.
+    fn stack_numbered(&self, number: u64) -> Result<Option<Stack>, ForgeError>;
+
     /// The stacks among the repository's pull requests, the newest
     /// activity first. Grouped from the same single page
     /// [`Self::pull_requests`] lists, so a stack whose members all sit
@@ -729,6 +735,10 @@ mod tests {
         }
 
         fn stack(&self, _: &PrArgument) -> Result<Option<Stack>, ForgeError> {
+            Ok(self.stack.clone())
+        }
+
+        fn stack_numbered(&self, _: u64) -> Result<Option<Stack>, ForgeError> {
             Ok(self.stack.clone())
         }
 

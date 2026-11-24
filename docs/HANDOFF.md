@@ -166,7 +166,7 @@ Be exact about this when you report further work.
 | Kit fork additions (`on_text_hover` including the modifier-at-rest case, `on_text_click` and its claim, `has_line`, `DiffFile::excerpts`) | Kit tests with simulated pointer and modifier events, macOS, 2026-11-18. The pointing-hand cursor and the underline style compile and render in those tests; how they look was not seen |
 | Symbol navigation in the window: Cmd-hover link styling and cursor, Cmd-click landing inside the diff with the focus mark, the origin card for a name from another crate, "Copy symbol" in the context menu, the tie dialog, a definition entry (excerpt rows, header note and x, panel row), Cmd+[ back from each, chained jumps inside an entry | Compiled, clippy-clean. The window was started once against this repository and loaded with the views built; **no gesture was exercised** - synthetic mouse events do not reach the handlers (see the orphan row above) |
 | Moved-code folds surviving the earlier-comments toggle (`sync_diff_files` puts them back after `set_files`; before, the toggle dropped them whenever orphan entries existed) | Compiled; not seen on screen |
-| Stack detection and `--stack`: the GraphQL selection, the entry order, paging, the null-stack answer, the number-resolution order, `open_stack`'s endpoints and the batched fetch | The query and both fallback paths were run read-only against real GitHub on 2026-11-24: `--stack https://github.com/cli/cli/pull/15073` resolved that twelve-member stack and named its latest member's missing head commit; `--stack 1` in this repository reported a pull request in no stack; `--stack 999999` reported neither, after the stack list came back empty. The rest is covered by `FakeGh` and throwaway-repository tests. The window was not run with `--stack`, a stack past one entry page was never seen live (only the fake pages), and `stacks()` has never met a repository that has one |
+| Stack detection and `--stack`: the GraphQL selection, the entry order, paging, the null-stack answer, the number-resolution order, `open_stack`'s endpoints and the batched fetch | Run read-only against real GitHub on 2026-11-24: `--stack https://github.com/cli/cli/pull/15073` resolved that twelve-member stack and named its latest member's missing head commit; `gh api repos/cli/cli/stacks/15082` returns all twelve members base-end first, unpaged, and 404s for an unknown number; `--stack 15082`, the stack's own number, resolved to the same stack through REST and then GraphQL in an empty repository whose only remote is `cli/cli`, naming the same latest member as the member URL did; `--stack 1` in this repository reported a pull request in no stack; `--stack 999999` reported neither. The rest is covered by `FakeGh` and throwaway-repository tests. The window was not run with `--stack`; a second entry page was only ever driven through the fake; `stacks()` has never met a repository that has a stack |
 
 ## Build, run, test
 
@@ -405,8 +405,8 @@ below took a review fix and this one has not rebased" state) and
 `off_chain` (a member whose base branch does not name the member below,
 which makes the order ownership relies on unfounded).
 
-`Forge::stack` and `Forge::stacks` read GitHub's native stack through the
-`graphql()` helper, so detection costs no new dependency. One query
+`Forge::stack`, `Forge::stack_numbered` and `Forge::stacks` read GitHub's
+native stack through gh, so detection costs no new dependency. One query
 (`STACK`) carries every field a `PullRequest` needs for every member, so
 a stack resolves in one call however long it is; it pages on the entry
 connection's `pageInfo`. `stack` answers `Ok(None)` for a pull request
@@ -418,9 +418,22 @@ page is not reported. GraphQL names the repository, which `pr view` and
 `pr list` find themselves, so a bare number costs one `gh repo view` -
 a URL answers for host, owner and repository on its own.
 
+**Resolution is REST, the member read is GraphQL.** GraphQL can reach a
+stack only through a member: `Repository` has no stack field and
+`PullRequestStack` carries no URL, so nothing there takes a stack's own
+number. REST does - `GET /repos/{owner}/{repo}/stacks/{number}` - and
+`Forge::stack_numbered` uses it. It takes only one member's number from
+that answer, because the REST members carry no head-repository owner and
+report state as `state` plus `merged_at` rather than GitHub's three-way
+state: building `PullRequest` from them would mean a second parser for
+the same model with a second state vocabulary. So REST answers "which
+pull request is in stack 42", GraphQL answers "what are that stack's
+members". Resolving a number must never scan `stacks`, whose page cap
+would lose a stack whose members all sit past it.
+
 `pr::open_stack` mirrors `pr::open`: it resolves the number (a member's
 number first; only a number GitHub refuses as a pull request is read as a
-stack's own, through `stacks`), then pins the latest member's head as the
+stack's own, through `stack_numbered`), then pins the latest member's head as the
 source and resolves the first member's base by exactly the single pull
 request's rule - the remote-tracking ref while that member is open, the
 recorded base commit once merged. `endpoints` is that shared rule, and
