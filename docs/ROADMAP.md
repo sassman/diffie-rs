@@ -5,7 +5,12 @@ commitment. Deferred is an archive, maybe revisited later.
 
 ## Committed to deliver
 
-- Nothing right now.
+- Check for a new release and surface it in the UI so an upgrade is hard to
+  miss: an "Install and restart" button that fetches and swaps the binary,
+  then relaunches. Open: where the notice sits (title bar vs. a corner
+  toast), the check cadence and the release source (GitHub releases likely),
+  and whether install is a self-replace or hands off to the OS's package
+  manager where the app came from one.
 
 ## Ideas to explore
 
