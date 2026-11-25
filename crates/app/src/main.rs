@@ -323,9 +323,10 @@ fn main() {
         comparison
     });
     // The whole stack as one comparison: the latest member's head going
-    // into the first member's base. The latest member keeps the
-    // pull-request button, its status and its menu working; nothing here
-    // shows the stack itself yet.
+    // into the first member's base. The latest member is the window's
+    // `Pull`, so publishing and the status refresh keep working; the
+    // resolved stack rides along for the stack button.
+    let mut stacked = None;
     let stack_comparison = stack.map(|value| {
         let number = match diffie_core::pr::parse_stack(&value) {
             Ok(number) => number,
@@ -345,12 +346,13 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        if let Some(latest) = stack.pulls.first() {
+        if let Some(latest) = stack.members.first() {
             connected = Some(app::Pull {
                 forge: forge.clone(),
-                request: latest.clone(),
+                request: latest.pull.clone(),
             });
         }
+        stacked = Some(stack);
         comparison
     });
     let branch = backend.current_branch().ok().flatten();
@@ -593,6 +595,7 @@ fn main() {
                             worktree: worktree.map(Into::into),
                             comparison,
                             pull: connected,
+                            stack: stacked,
                         },
                         settings,
                         window,

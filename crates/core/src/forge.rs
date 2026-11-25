@@ -667,22 +667,6 @@ mod tests {
         }
     }
 
-    /// The row a list shows for a stack member. The double knows no
-    /// titles, authors or checks; what a stack needs is the branches.
-    fn summary(pull: &PullRequest) -> PrSummary {
-        PrSummary {
-            number: pull.number,
-            title: format!("#{}", pull.number),
-            author: "Ada".into(),
-            updated: 0,
-            state: pull.state,
-            draft: false,
-            checks: None,
-            head: pull.source_branch.clone(),
-            base: pull.target_branch.clone(),
-        }
-    }
-
     /// Blame that moved every line of the commit down by `shift`.
     fn shifted(shift: usize) -> impl FnMut(&str) -> Option<Vec<BlameLine>> {
         move |_| {
@@ -751,11 +735,15 @@ mod tests {
                 .map(|stack| StackSummary {
                     number: stack.number,
                     base: stack
-                        .pulls
+                        .members
                         .last()
-                        .map(|first| first.target_branch.clone())
+                        .map(|first| first.pull.target_branch.clone())
                         .unwrap_or_default(),
-                    members: stack.pulls.iter().map(summary).collect(),
+                    members: stack
+                        .members
+                        .iter()
+                        .map(|member| member.summary.clone())
+                        .collect(),
                 })
                 .collect())
         }
