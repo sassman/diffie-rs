@@ -3,10 +3,14 @@
 use std::path::Path;
 use std::process::Command;
 
+use diffie_core::pr::{
+    FetchMode, Ownership, PrArgument, PrState, PrSummary, PullRequest, Stack, StackSummary,
+    open_stack, ownership,
+};
 use diffie_core::review::{ReviewInput, ReviewedFile};
 use diffie_core::{
-    BackendError, CompareMode, Comparison, FileState, FileStatus, GitCli, NewSide, Oid, RepoState,
-    ResolutionPush, ReviewBackend, Scope,
+    BackendError, Commit, CompareMode, Comparison, FileState, FileStatus, GitCli, NewSide, Oid,
+    RepoState, ResolutionPush, ReviewBackend, Scope,
 };
 
 fn git(directory: &Path, args: &[&str]) -> String {
@@ -1336,6 +1340,18 @@ impl diffie_core::forge::Forge for PullForge {
     ) -> Result<(), diffie_core::forge::ForgeError> {
         unreachable!("opening never reacts")
     }
+
+    fn stack(&self, _: &PrArgument) -> Result<Option<Stack>, diffie_core::forge::ForgeError> {
+        unreachable!("opening one pull request never reads a stack")
+    }
+
+    fn stack_numbered(&self, _: u64) -> Result<Option<Stack>, diffie_core::forge::ForgeError> {
+        unreachable!("opening one pull request never reads a stack")
+    }
+
+    fn stacks(&self) -> Result<Vec<StackSummary>, diffie_core::forge::ForgeError> {
+        unreachable!("opening never lists")
+    }
 }
 
 fn pull_request(head: &Oid, base: &Oid) -> diffie_core::pr::PullRequest {
@@ -1403,6 +1419,427 @@ fn opening_without_fetching_names_the_fetch_to_run() {
          `git fetch origin topic` and retry - diffie never fetches."
     );
     assert!(!backend.revision_exists(head.as_str()).unwrap());
+}
+
+/// One member of a stack fixture. Unlike the ownership helper's, its
+/// recorded base commit matters: that is what a merged member pins the
+/// comparison's target to.
+fn stack_member(number: u64, head: &Oid, source: &str, target: &str, base: &Oid) -> PullRequest {
+    PullRequest {
+        number,
+        id: format!("PR_{number}"),
+        url: format!("https://github.com/o/r/pull/{number}"),
+        state: PrState::Open,
+        source_branch: source.into(),
+        source_commit: head.to_string(),
+        target_branch: target.into(),
+        target_commit: base.to_string(),
+        cross_repository: false,
+        head_owner: "o".into(),
+    }
+}
+
+/// A forge that knows one stack. `stack` answers it for any member's
+/// number, `Ok(None)` for `unstacked`, and refuses every other number the
+/// way GitHub refuses one that names no pull request - the stack's own
+/// included, which only `stack_numbered` answers for.
+///
+/// `stacks` reports nothing: every member sits past the list's page, the
+/// case a lookup by stack number must survive.
+#[derive(Default)]
+struct StackForge {
+    /// Latest first, as the forge reads a stack's entries in.
+    members: Vec<PullRequest>,
+    number: Option<u64>,
+    unstacked: Option<u64>,
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl StackForge {
+    fn new(members: Vec<PullRequest>) -> Self {
+        Self {
+            members,
+            number: Some(42),
+            ..Default::default()
+        }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl diffie_core::forge::Forge for StackForge {
+    fn name(&self) -> &'static str {
+        "Fake"
+    }
+
+    fn pull_request(&self, _: &PrArgument) -> Result<PullRequest, diffie_core::forge::ForgeError> {
+        unreachable!("a stack never opens one pull request")
+    }
+
+    fn pull_requests(
+        &self,
+        _: diffie_core::pr::PrList,
+    ) -> Result<Vec<PrSummary>, diffie_core::forge::ForgeError> {
+        unreachable!("a stack is listed through stacks()")
+    }
+
+    fn status(
+        &self,
+        _: &PullRequest,
+    ) -> Result<diffie_core::pr::PullStatus, diffie_core::forge::ForgeError> {
+        unreachable!("opening never asks for status")
+    }
+
+    fn submit_review(
+        &self,
+        _: &PullRequest,
+        _: &diffie_core::forge::ReviewDraft,
+    ) -> Result<Vec<diffie_core::forge::Posting>, diffie_core::forge::ForgeError> {
+        unreachable!("opening never publishes")
+    }
+
+    fn update_comment(
+        &self,
+        _: &PullRequest,
+        _: &str,
+        _: &str,
+    ) -> Result<(), diffie_core::forge::ForgeError> {
+        unreachable!("opening never edits")
+    }
+
+    fn react(
+        &self,
+        _: &PullRequest,
+        _: &str,
+        _: diffie_core::review::ReactionKind,
+    ) -> Result<(), diffie_core::forge::ForgeError> {
+        unreachable!("opening never reacts")
+    }
+
+    fn stack(
+        &self,
+        argument: &PrArgument,
+    ) -> Result<Option<Stack>, diffie_core::forge::ForgeError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("stack {}", argument.number));
+        if self.unstacked == Some(argument.number) {
+            return Ok(None);
+        }
+        if !self
+            .members
+            .iter()
+            .any(|member| member.number == argument.number)
+        {
+            return Err(diffie_core::forge::ForgeError::Refused(format!(
+                "Could not resolve to a PullRequest with the number of {}.",
+                argument.number
+            )));
+        }
+        Ok(Some(Stack {
+            number: self.number,
+            pulls: self.members.clone(),
+        }))
+    }
+
+    fn stack_numbered(&self, number: u64) -> Result<Option<Stack>, diffie_core::forge::ForgeError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("stack_numbered {number}"));
+        if self.number != Some(number) {
+            // What the stack endpoint answers for a number that is none.
+            return Err(diffie_core::forge::ForgeError::Refused(
+                "Not Found (HTTP 404)".into(),
+            ));
+        }
+        Ok(Some(Stack {
+            number: self.number,
+            pulls: self.members.clone(),
+        }))
+    }
+
+    fn stacks(&self) -> Result<Vec<StackSummary>, diffie_core::forge::ForgeError> {
+        self.calls.lock().unwrap().push("stacks".to_string());
+        Ok(Vec::new())
+    }
+}
+
+/// A stack of three members over one throwaway repository: `feat/c` going
+/// into `feat/b` into `feat/a` into `main`. `main` has moved on since the
+/// stack was branched and `o/main` carries that newer tip, so a test can
+/// tell the remote-tracking ref apart from a member's recorded base.
+struct StackFixture {
+    directory: tempfile::TempDir,
+    /// Latest first, like the members.
+    heads: Vec<Oid>,
+    /// The commit `feat/a` branched from and records as its base.
+    base: Oid,
+}
+
+impl StackFixture {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        let commit = |name: &str| {
+            std::fs::write(root.join(name), format!("{name}\n")).unwrap();
+            git(root, &["add", "."]);
+            git(root, &["commit", "-q", "-m", name]);
+            Oid::new(git(root, &["rev-parse", "HEAD"]))
+        };
+        let base = commit("base");
+        let mut heads = Vec::new();
+        for (branch, file) in [("feat/a", "a"), ("feat/b", "b"), ("feat/c", "c")] {
+            git(root, &["checkout", "-q", "-b", branch]);
+            heads.push(commit(file));
+        }
+        heads.reverse();
+        git(root, &["checkout", "-q", "main"]);
+        commit("moved on");
+        git(root, &["remote", "add", "o", "."]);
+        git(root, &["update-ref", "refs/remotes/o/main", "main"]);
+        Self {
+            directory,
+            heads,
+            base,
+        }
+    }
+
+    fn backend(&self) -> GitCli {
+        GitCli::open(self.directory.path()).unwrap()
+    }
+
+    /// Latest first, as the forge reads a stack's entries in.
+    fn members(&self) -> Vec<PullRequest> {
+        vec![
+            stack_member(3, &self.heads[0], "feat/c", "feat/b", &self.heads[1]),
+            stack_member(2, &self.heads[1], "feat/b", "feat/a", &self.heads[2]),
+            stack_member(1, &self.heads[2], "feat/a", "main", &self.base),
+        ]
+    }
+}
+
+#[test]
+fn a_stack_reviews_the_latest_member_into_the_first_members_base() {
+    let fixture = StackFixture::new();
+    let forge = StackForge::new(fixture.members());
+    let (stack, comparison) = open_stack(
+        &fixture.backend(),
+        &forge,
+        42,
+        CompareMode::BranchAdds,
+        FetchMode::Never,
+    )
+    .unwrap();
+
+    assert_eq!(stack.number, Some(42));
+    assert_eq!(stack.pulls.first().unwrap().number, 3);
+    assert_eq!(comparison.source, "feat/c");
+    assert_eq!(
+        comparison.source_rev.as_deref(),
+        Some(fixture.heads[0].as_str())
+    );
+    // The first member is open, so its base follows the remote-tracking
+    // ref, which has moved past the commit the stack branched from.
+    assert_eq!(comparison.target, "main");
+    assert_eq!(comparison.target_rev.as_deref(), Some("o/main"));
+}
+
+#[test]
+fn a_merged_first_member_pins_the_base_commit_it_recorded() {
+    let fixture = StackFixture::new();
+    let mut members = fixture.members();
+    members[2].state = PrState::Merged;
+    let forge = StackForge::new(members);
+    let (_, comparison) = open_stack(
+        &fixture.backend(),
+        &forge,
+        42,
+        CompareMode::BranchAdds,
+        FetchMode::Never,
+    )
+    .unwrap();
+
+    // Not `o/main`, which already carries what the member merged.
+    assert_eq!(comparison.target, "main");
+    assert_eq!(
+        comparison.target_rev.as_deref(),
+        Some(fixture.base.as_str())
+    );
+}
+
+#[test]
+fn a_stack_number_resolves_with_its_members_past_the_list() {
+    let fixture = StackFixture::new();
+    let forge = StackForge::new(fixture.members());
+    let (stack, _) = open_stack(
+        &fixture.backend(),
+        &forge,
+        42,
+        CompareMode::BranchAdds,
+        FetchMode::Never,
+    )
+    .unwrap();
+
+    assert_eq!(stack.number, Some(42));
+    // The stack endpoint and nothing else: no pull request is read first,
+    // and the list reports nothing here, as it would for a stack whose
+    // members all sit past its page. That must not lose it.
+    assert_eq!(forge.calls(), ["stack_numbered 42"]);
+}
+
+#[test]
+fn a_pull_requests_number_hands_over_its_stacks_number() {
+    let fixture = StackFixture::new();
+    let forge = StackForge::new(fixture.members());
+    let error = open_stack(
+        &fixture.backend(),
+        &forge,
+        3,
+        CompareMode::BranchAdds,
+        FetchMode::Never,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        "3 is a pull request, not a stack; it belongs to stack 42 - \
+         try `--stack 42`, or `--pr 3` for that pull request alone."
+    );
+    // The pull-request read only happens on the way out.
+    assert_eq!(forge.calls(), ["stack_numbered 3", "stack 3"]);
+}
+
+#[test]
+fn a_pull_request_in_no_stack_names_the_pr_flag() {
+    let fixture = StackFixture::new();
+    let forge = StackForge {
+        unstacked: Some(9),
+        ..StackForge::new(fixture.members())
+    };
+    let error = open_stack(
+        &fixture.backend(),
+        &forge,
+        9,
+        CompareMode::BranchAdds,
+        FetchMode::Never,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        "9 is a pull request, not a stack, and it is not in one - use `--pr 9`."
+    );
+    assert_eq!(forge.calls(), ["stack_numbered 9", "stack 9"]);
+}
+
+#[test]
+fn a_number_that_names_neither_names_the_pr_flag() {
+    let fixture = StackFixture::new();
+    let forge = StackForge::new(fixture.members());
+    let error = open_stack(
+        &fixture.backend(),
+        &forge,
+        77,
+        CompareMode::BranchAdds,
+        FetchMode::Never,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("neither a pull request nor a stack"),
+        "{error}"
+    );
+    // The stack endpoint's own words, so a refusal that is not a plain
+    // "no such stack" still reaches the reviewer.
+    assert!(error.contains("Not Found (HTTP 404)"), "{error}");
+    assert!(error.contains("`--pr`"), "{error}");
+    assert_eq!(forge.calls(), ["stack_numbered 77", "stack 77"]);
+}
+
+/// Upstream with a three-member stack, each head also reachable as
+/// `refs/pull/<n>/head` like on GitHub, and a clone made before any of
+/// the stack's commits existed.
+fn clone_behind_stack() -> (tempfile::TempDir, std::path::PathBuf, Vec<PullRequest>) {
+    let directory = tempfile::tempdir().unwrap();
+    let upstream = directory.path().join("upstream");
+    std::fs::create_dir(&upstream).unwrap();
+    git(&upstream, &["init", "-q", "-b", "main"]);
+    std::fs::write(upstream.join("a.txt"), "base\n").unwrap();
+    git(&upstream, &["add", "."]);
+    git(&upstream, &["commit", "-q", "-m", "base"]);
+    let base = Oid::new(git(&upstream, &["rev-parse", "HEAD"]));
+    let local = directory.path().join("local");
+    git(
+        directory.path(),
+        &["clone", "-q", "upstream", local.to_str().unwrap()],
+    );
+    // The stack lands upstream only after the clone.
+    let mut members = Vec::new();
+    let mut target = "main".to_string();
+    for (number, branch) in [(1, "feat/a"), (2, "feat/b"), (3, "feat/c")] {
+        git(&upstream, &["checkout", "-q", "-b", branch, &target]);
+        std::fs::write(upstream.join(format!("{number}.txt")), "x\n").unwrap();
+        git(&upstream, &["add", "."]);
+        git(&upstream, &["commit", "-q", "-m", branch]);
+        let head = Oid::new(git(&upstream, &["rev-parse", "HEAD"]));
+        git(
+            &upstream,
+            &[
+                "update-ref",
+                &format!("refs/pull/{number}/head"),
+                head.as_str(),
+            ],
+        );
+        members.push(stack_member(number, &head, branch, &target, &base));
+        target = branch.to_string();
+    }
+    git(&upstream, &["checkout", "-q", "main"]);
+    members.reverse();
+    (directory, local, members)
+}
+
+#[test]
+fn opening_a_stack_fetches_every_member_in_one_call() {
+    let (_directory, local, members) = clone_behind_stack();
+    let backend = GitCli::open(&local).unwrap();
+    let forge = StackForge::new(members.clone());
+    for member in &members {
+        assert!(!backend.revision_exists(&member.source_commit).unwrap());
+    }
+
+    let (_, comparison) = open_stack(
+        &backend,
+        &forge,
+        42,
+        CompareMode::BranchAdds,
+        FetchMode::OnDemand,
+    )
+    .unwrap();
+
+    assert_eq!(comparison.target_rev.as_deref(), Some("origin/main"));
+    // `git fetch` rewrites FETCH_HEAD, so every member standing in it at
+    // once is what proves the fetch was batched into one call.
+    let fetched = std::fs::read_to_string(local.join(".git/FETCH_HEAD")).unwrap();
+    assert_eq!(fetched.lines().count(), members.len() + 1, "{fetched}");
+    for member in &members {
+        assert!(
+            backend.revision_exists(&member.source_commit).unwrap(),
+            "#{} was not fetched",
+            member.number
+        );
+        assert!(fetched.contains(member.source_commit.as_str()), "{fetched}");
+    }
+    // Only objects and remote-tracking refs.
+    assert_eq!(
+        git(&local, &["branch", "--format=%(refname:short)"]),
+        "main"
+    );
+    assert_eq!(git(&local, &["status", "--porcelain"]), "");
 }
 
 /// Like [`git`], but for a merge or rebase that is expected to stop on a
@@ -2125,4 +2562,265 @@ fn continue_reports_the_next_conflicted_commit_as_progress() {
     backend.resolve_file("c.txt", "resolved c\n").unwrap();
     backend.continue_op().unwrap();
     assert_eq!(backend.repo_state().unwrap(), RepoState::Idle);
+}
+
+/// A stack of pull requests over a throwaway repository. Every commit gets
+/// an explicit instant: `commits` is committer-date ordered, and the
+/// orderings below are what ownership has to survive.
+struct StackRepo {
+    directory: tempfile::TempDir,
+}
+
+impl StackRepo {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.name", "Ada"]);
+        git(root, &["config", "user.email", "ada@example.invalid"]);
+        git(root, &["config", "core.autocrlf", "false"]);
+        let repo = Self { directory };
+        repo.commit("09:00", "base");
+        repo
+    }
+
+    fn root(&self) -> &Path {
+        self.directory.path()
+    }
+
+    /// One commit adding `name`, at `time` of a fixed day.
+    fn commit(&self, time: &str, name: &str) -> Oid {
+        std::fs::write(self.root().join(name), format!("{name}\n")).unwrap();
+        let date = format!("2026-01-01T{time}:00Z");
+        git_at(self.root(), &date, &["add", "."]);
+        git_at(self.root(), &date, &["commit", "-q", "-m", name]);
+        Oid::new(git(self.root(), &["rev-parse", "HEAD"]))
+    }
+
+    fn branch(&self, name: &str) {
+        git(self.root(), &["checkout", "-q", "-b", name]);
+    }
+
+    fn checkout(&self, name: &str) {
+        git(self.root(), &["checkout", "-q", name]);
+    }
+
+    /// Merges `name` into the checked-out branch at `time`.
+    fn merge(&self, time: &str, name: &str) -> Oid {
+        let date = format!("2026-01-01T{time}:00Z");
+        let message = format!("merge {name}");
+        git_at(
+            self.root(),
+            &date,
+            &["merge", "-q", "--no-ff", name, "-m", &message],
+        );
+        Oid::new(git(self.root(), &["rev-parse", "HEAD"]))
+    }
+
+    fn backend(&self) -> GitCli {
+        GitCli::open(self.root()).unwrap()
+    }
+
+    /// The comparison a stack review runs on: the latest member's head
+    /// against the first member's base.
+    fn commits(&self, source: &str, target: &str) -> Vec<Commit> {
+        let backend = self.backend();
+        let resolved = backend
+            .resolve(&Comparison {
+                source: source.into(),
+                target: target.into(),
+                mode: CompareMode::BranchAdds,
+                uncommitted: false,
+                ..Default::default()
+            })
+            .unwrap();
+        backend.commits(&resolved).unwrap()
+    }
+}
+
+/// One stack member. `target_commit` stays empty: ownership reads the head
+/// and the branch names, never the base commit.
+fn member(number: u64, branch: &str, head: &Oid, base: &str) -> PullRequest {
+    PullRequest {
+        number,
+        id: format!("PR_{number}"),
+        url: format!("https://github.com/o/r/pull/{number}"),
+        state: PrState::Open,
+        source_branch: branch.into(),
+        source_commit: head.to_string(),
+        target_branch: base.into(),
+        target_commit: String::new(),
+        cross_repository: false,
+        head_owner: "o".into(),
+    }
+}
+
+/// Latest first, as the forge's entries are read in.
+fn stack(pulls: Vec<PullRequest>) -> Stack {
+    Stack {
+        number: Some(99),
+        pulls,
+    }
+}
+
+fn group(ownership: &Ownership, number: u64) -> &[Oid] {
+    let group = ownership
+        .groups
+        .iter()
+        .find(|group| group.number == number)
+        .unwrap_or_else(|| panic!("#{number} has no group"));
+    &group.commits
+}
+
+/// Every commit is owned by exactly one member or explicitly unclaimed.
+fn assert_total(ownership: &Ownership, commits: &[Commit]) {
+    let grouped: usize = ownership
+        .groups
+        .iter()
+        .map(|group| group.commits.len())
+        .sum();
+    assert_eq!(grouped + ownership.unclaimed.len(), commits.len());
+    for commit in commits {
+        let owner = ownership.owner(&commit.id).map(|group| group.number);
+        let unclaimed = ownership.unclaimed.contains(&commit.id);
+        assert!(
+            owner.is_some() != unclaimed,
+            "{} is owned by {owner:?} and unclaimed {unclaimed}",
+            commit.id
+        );
+    }
+}
+
+#[test]
+fn a_rebased_stack_gives_each_member_its_own_commits() {
+    let repo = StackRepo::new();
+    repo.branch("feat/a");
+    let a1 = repo.commit("10:00", "a1");
+    let a2 = repo.commit("11:00", "a2");
+    repo.branch("feat/b");
+    let b1 = repo.commit("12:00", "b1");
+    repo.branch("feat/c");
+    let c1 = repo.commit("13:00", "c1");
+
+    let commits = repo.commits("feat/c", "main");
+    let stack = stack(vec![
+        member(3, "feat/c", &c1, "feat/b"),
+        member(2, "feat/b", &b1, "feat/a"),
+        member(1, "feat/a", &a2, "main"),
+    ]);
+    let owned = ownership(&repo.backend(), &stack, &commits).unwrap();
+
+    assert_eq!(group(&owned, 3), [c1]);
+    assert_eq!(group(&owned, 2), [b1]);
+    assert_eq!(group(&owned, 1), [a2, a1]);
+    assert!(owned.unclaimed.is_empty());
+    assert!(owned.stale.is_empty());
+    assert!(owned.off_chain.is_empty());
+    assert_total(&owned, &commits);
+}
+
+#[test]
+fn a_member_kept_current_by_a_merge_keeps_the_commits_above_it() {
+    let repo = StackRepo::new();
+    repo.branch("feat/a");
+    let a1 = repo.commit("10:00", "a1");
+    repo.branch("feat/b");
+    let b1 = repo.commit("11:00", "b1");
+    // The review fix lands on the member below after the member above
+    // committed, and the member above takes it by merging.
+    repo.checkout("feat/a");
+    let a2 = repo.commit("12:00", "a2");
+    repo.checkout("feat/b");
+    let merge = repo.merge("13:00", "feat/a");
+
+    let commits = repo.commits("feat/b", "main");
+    // The trap an index range falls into: the lower member's head sits
+    // above the upper member's own commit in the list, so a range taken
+    // from it would hand `b1` to #1.
+    assert_eq!(
+        commits.iter().map(|commit| &commit.id).collect::<Vec<_>>(),
+        vec![&merge, &a2, &b1, &a1]
+    );
+
+    let stack = stack(vec![
+        member(2, "feat/b", &merge, "feat/a"),
+        member(1, "feat/a", &a2, "main"),
+    ]);
+    let owned = ownership(&repo.backend(), &stack, &commits).unwrap();
+
+    assert_eq!(group(&owned, 2), [merge, b1]);
+    assert_eq!(group(&owned, 1), [a2, a1]);
+    assert!(owned.stale.is_empty());
+    assert_total(&owned, &commits);
+}
+
+#[test]
+fn a_member_head_outside_the_comparison_is_reported() {
+    let repo = StackRepo::new();
+    repo.branch("feat/a");
+    let a1 = repo.commit("10:00", "a1");
+    repo.branch("feat/b");
+    let b1 = repo.commit("11:00", "b1");
+    // The member below takes a review fix and the one above has not
+    // rebased onto it, so #1's head is nowhere in the comparison.
+    repo.checkout("feat/a");
+    let a2 = repo.commit("12:00", "a2");
+
+    let commits = repo.commits("feat/b", "main");
+    let stack = stack(vec![
+        member(2, "feat/b", &b1, "feat/a"),
+        member(1, "feat/a", &a2, "main"),
+    ]);
+    let owned = ownership(&repo.backend(), &stack, &commits).unwrap();
+
+    assert_eq!(owned.stale, vec![1]);
+    // Reported, not skipped: the commits it does carry are still its own.
+    assert_eq!(group(&owned, 1), [a1]);
+    assert_eq!(group(&owned, 2), [b1]);
+    assert_total(&owned, &commits);
+}
+
+#[test]
+fn commits_no_member_claims_can_sit_anywhere_in_the_list() {
+    let repo = StackRepo::new();
+    repo.branch("feat/a");
+    let a1 = repo.commit("10:00", "a1");
+    repo.branch("feat/b");
+    let b1 = repo.commit("12:00", "b1");
+    // Work that belongs to no pull request, merged into the latest
+    // branch after the stack was resolved on `b1`.
+    repo.checkout("feat/a");
+    repo.branch("side");
+    let u1 = repo.commit("11:00", "u1");
+    repo.checkout("feat/b");
+    let merge = repo.merge("13:00", "side");
+
+    let commits = repo.commits("feat/b", "main");
+    let stack = stack(vec![
+        member(2, "feat/b", &b1, "feat/a"),
+        member(1, "feat/a", &a1, "main"),
+    ]);
+    let owned = ownership(&repo.backend(), &stack, &commits).unwrap();
+
+    assert_eq!(group(&owned, 2), [b1]);
+    assert_eq!(group(&owned, 1), [a1]);
+    // `u1` sits between two owned commits, not at the end of the list.
+    assert_eq!(commits[2].id, u1);
+    assert_eq!(owned.unclaimed, vec![merge, u1]);
+    assert_total(&owned, &commits);
+}
+
+#[test]
+fn a_stack_with_no_members_leaves_every_commit_unclaimed() {
+    let repo = StackRepo::new();
+    repo.branch("feat/a");
+    let a1 = repo.commit("10:00", "a1");
+    let a2 = repo.commit("11:00", "a2");
+
+    let commits = repo.commits("feat/a", "main");
+    let owned = ownership(&repo.backend(), &stack(Vec::new()), &commits).unwrap();
+
+    assert!(owned.groups.is_empty());
+    assert_eq!(owned.unclaimed, vec![a2, a1]);
+    assert_total(&owned, &commits);
 }

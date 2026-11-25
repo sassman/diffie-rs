@@ -48,8 +48,10 @@ Windows and Linux.
    (owner decision, 2026-11-19): picking a pull request in the palette's
    picker may run a single `git fetch` (`ReviewBackend::fetch`) when the
    PR's commits are not here - objects and remote-tracking refs only, on
-   that explicit click, never in the background. The CLI still never
-   fetches.
+   that explicit click, never in the background. Resolving a stack
+   (owner decision, 2026-11-24, design document section 21) extends it to
+   one fetch carrying every member's refspec, on that one explicit
+   action. The CLI still never fetches.
    One sanctioned exception (design document, section 20): while an
    interrupted merge or rebase exists, the app may write resolved content
    to paths that are unmerged in the index, stage exactly those paths, and
@@ -108,7 +110,9 @@ When calling git:
   reacts or approves on its own, and nothing is deleted on the forge.
   The palette's PR picker reads the forge too - the list on opening the
   picker, the resolve and one fetch on picking - each on that explicit
-  action, never in the background.
+  action, never in the background. A stack is read the same way: the
+  stack behind a number, and the list of the repository's stacks, on the
+  `--stack` resolve or the reviewer's pick.
 - **Density.** Controls are 22 to 26 px high, list rows 22 px, file headers
   28 px, text 12 px. Prefer `xsmall` Kit controls. Do not add padding to make
   things "breathe".

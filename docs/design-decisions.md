@@ -936,3 +936,133 @@ Open:
 - The block editor scrolls its long lines within its own width instead
   of following the pane's horizontal scroll, so columns can shear at a
   resolved block; whether the pane should drive one shared offset.
+
+## 21. Stacked pull requests
+
+Decided (owner, 2026-11-24):
+
+- **Wording.** A stack's ends are "latest" (the tip, listed first) and
+  "first" (nearest the target branch, merged first). The latest end reads
+  "latest PRs on the stack". "Top", "bottom", "parent" and "child" stay
+  out of the UI, as "merge-base" already does.
+- **A stack is one comparison.** `--stack <no>` pins `source` to the
+  latest member's head, and resolves `target` from the first member the
+  way section 4 already decides it for a single pull request: the base
+  branch's remote-tracking ref while that member is open, its recorded
+  base commit once merged. The window keeps exactly one `PerReview`. A
+  stack is a labelling of that comparison's commits, never several
+  concurrent reviews, so `adopt` keeps replacing the review wholesale
+  and the single-slot tasks stay single-slot. `PerReview` carries
+  `stack`; `pull` holds the latest member so the pull-request button and
+  its status keep working.
+- **Detection reads GitHub's native stack.** A pull request carries a
+  `stack` object, `null` when it is not in one, and a single query
+  returns every member with its position, its refs and its oids.
+  Membership survives a member merging or closing. It is reached through
+  the `graphql()` helper the forge already has, so detection costs no new
+  dependency. A stack's own number, though, is answered only by REST
+  (`GET /repos/{owner}/{repo}/stacks/{number}`): GraphQL can reach a
+  stack through a member alone. That lookup is direct, never a scan of
+  the stack list, whose page cap would hide a stack behind it.
+- **`--stack` takes a stack's number, `--pr` a pull request's**
+  (owner, 2026-11-24). Stacks and pull requests number themselves
+  separately, so the two flags can never mean the same thing and neither
+  reaches into the other's schema. A URL is refused: a URL names a pull
+  request. Refusal still hands over what would have worked, by looking
+  the pull request of that number up on the error path only: a pull
+  request in a stack names both, and offers `--stack <that stack>` or
+  `--pr <the number>` for the pull request alone; one in no stack names
+  `--pr`; a number in neither schema says so and carries the stack
+  endpoint's own words.
+- **Which member owns a commit is decided by ancestry, not by position.**
+  The commit list is committer-date ordered over the whole reachable set,
+  merge commits included, so a member kept current by a merge rather than
+  a rebase, or a member whose head the one above has not rebased onto,
+  breaks any attempt to partition the list by index. Ownership is total:
+  every commit is owned by exactly one member or explicitly unclaimed,
+  because an unclaimed commit would otherwise be selected by
+  `enter_custom`, feed the diff, and be unreachable from any checkbox. A
+  member whose head is absent from the list is reported, not skipped.
+- **The picker groups by member**, latest first, replacing the
+  review-state split while a stack is in view; without one it renders as
+  before. A header carries the member's state icon, its number and
+  branch, and the `{checked} of {len}` counter that already stands in for
+  a tristate checkbox. Already-reviewed commits keep their muted
+  treatment as row styling. "Commits since last review" stays reachable
+  as a row above the groups: section 5 decides that range definition must
+  exist, and the two-group arrangement that provides it today is only an
+  assumed default.
+- **Unchecking a lower member gives a partial diff, and says so.**
+  Unchecking a group switches to the Custom scope, which replays the
+  picked commits onto the parent of the first and gives up per file when
+  a skipped commit touched the same lines. Unchecking the latest members
+  truncates and always works; unchecking a lower one often cannot, since
+  later members routinely touch what earlier ones wrote. The group header
+  says where a skipped member caused it, so a partial result reads as
+  partial. Commits of other members must not read as an error state
+  merely for being unchecked.
+- **One batched fetch for a stack.** Resolving a stack issues a single
+  `git fetch` carrying every member's refspec, on that explicit action,
+  never in the background, objects and remote-tracking refs only. This
+  extends constraint 5's exception, which words it for picking one pull
+  request. The CLI still never fetches.
+- **A comment publishes to the member that owns its commit**, by the
+  ownership above. Every published card carries a link to its forge copy,
+  so a comment landing on another member is visible rather than
+  mysterious. One publish becomes one review per member that has comments
+  - one notification each, none for a member with nothing to say. Each
+  member's draft carries that member's head, or the forge refuses it. A
+  comment owned by no member is withheld locally and counted, which is a
+  new outcome: today's refusals come back from the forge.
+- **Verdicts work in the stack view, per member**, offered from the stack
+  button's menu. They cannot be reached by navigating to the member:
+  that loads the member's own review file, which does not hold the
+  comments written in the stack view.
+- **GitHub is reached through `octocrab` eventually, as its own epic**,
+  not as part of this one. It buys distribution, since a shipped app
+  cannot assume `gh` on `PATH`, and forge test coverage on Windows, where
+  there is none. It buys stacks nothing. Its cost is recorded with the
+  spec: the owner/repo/host resolution `gh` does from the working
+  directory's remotes, an error mapper for a client whose errors display
+  as the bare word "GitHub" or carry a backtrace, two clients per host
+  because REST and GraphQL sit at different Enterprise paths, and new
+  GraphQL for `reviewDecision` and `statusCheckRollup`.
+
+Assumed (working defaults):
+
+- The member groups cover the commit list exhaustively, and no "Not in a
+  pull request" group is built: the comparison's source is the latest
+  member's head, so every commit in it is reachable from that head and
+  the latest member claims whatever no lower member took. The core still
+  reports unclaimed commits, so the invariant stays checkable and the
+  group can arrive if the staleness question changes the pin.
+- The latest member's group owns the "Uncommitted changes" row, which is
+  reachable from the first group only.
+- The stack button sits beside the pull-request button at the same
+  metrics, labelled with the stack's number and size, or the member count
+  alone when there is no stack number. Its menu lists the members in the
+  pull-request picker's row style, each opening that member as a plain
+  `--pr` review, with a row back to the whole stack so navigating in is
+  not a one-way door.
+- The fifty-pull-request cap stays. It is a product decision, and the
+  stack list groups one page rather than paging the archive.
+
+Open:
+
+- Ref chaining, for Enterprise Server, forks and third-party tools, where
+  the native stack is unavailable. Deferred, with its edge cases
+  recorded. The tool body markers `ghstack`, `spr`, Sapling and `av`
+  write are the weaker signal again, and Graphite writes none.
+- What the title bar reads for a stack, whose source and target are no
+  member's comparison, and whether swapping stays offered.
+- Whether a reload re-resolves the stack, or the button only reports that
+  member states may be stale.
+- What a stack of one does: hide the button, show one group, or fall back
+  to a `--pr` review.
+- Whether a verdict should ever apply across a whole stack.
+- Whether a stack's comments belong in one review file or one per
+  member. They land in the latest branch's file today, because a review
+  file is keyed by the comparison's source branch, and so sit apart from
+  the files the same commits get when reviewed one at a time.
+- Keyboard: moving between members, and reaching the stack menu.
+- Whether the palette should list stacks whose every member is closed.

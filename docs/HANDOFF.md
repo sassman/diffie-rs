@@ -90,6 +90,17 @@ first code: a working core and a first UI scaffold wired to it.
   within its own frame was dropped (owner, 2026-11-21, after feeling
   the double scroll). The Kit's wheel hand-off stays: it is what makes
   a nested resolver bubble an unconsumed turn outward at all.
+- **Stacked pull requests** (branch `feat/stack-model`), started
+  2026-11-24: the spec is
+  `docs/superpowers/specs/2026-11-24-stacked-pull-requests-design.md` and
+  the decisions are design document section 21. The core half is in:
+  `Stack`, `StackSummary`, `PrSummary.head`/`base`, `ownership`, which
+  labels each commit with the member that owns it by ancestry,
+  `Forge::stack`/`stack_numbered`/`stacks` against GitHub's native stack,
+  `pr::open_stack` and the `--stack <stack-number>` argument. See
+  "Stacked pull requests, the core half".
+  The only visible effect is an ordinary comparison spanning the stack -
+  the epic ships as four pull requests and the UI starts with the second.
 
 ## Verification status
 
@@ -156,6 +167,7 @@ Be exact about this when you report further work.
 | Kit fork additions (`on_text_hover` including the modifier-at-rest case, `on_text_click` and its claim, `has_line`, `DiffFile::excerpts`) | Kit tests with simulated pointer and modifier events, macOS, 2026-11-18. The pointing-hand cursor and the underline style compile and render in those tests; how they look was not seen |
 | Symbol navigation in the window: Cmd-hover link styling and cursor, Cmd-click landing inside the diff with the focus mark, the origin card for a name from another crate, "Copy symbol" in the context menu, the tie dialog, a definition entry (excerpt rows, header note and x, panel row), Cmd+[ back from each, chained jumps inside an entry | Compiled, clippy-clean. The window was started once against this repository and loaded with the views built; **no gesture was exercised** - synthetic mouse events do not reach the handlers (see the orphan row above) |
 | Moved-code folds surviving the earlier-comments toggle (`sync_diff_files` puts them back after `set_files`; before, the toggle dropped them whenever orphan entries existed) | Compiled; not seen on screen |
+| Stack detection and `--stack`: the GraphQL selection, the entry order, paging, the null-stack answer, the stack-number lookup, the three refusals, `open_stack`'s endpoints and the batched fetch | Run read-only against real GitHub on 2026-11-24: `gh api repos/cli/cli/stacks/15082` returns all twelve members base-end first, unpaged, and 404s for an unknown number; `--stack 15082` resolved that stack through REST and then GraphQL in an empty repository whose only remote is `cli/cli`, and named its latest member's missing head commit; `--stack 15073`, a member's number, was refused there with "it belongs to stack 15082 - try `--stack 15082`"; `--stack 1` in this repository reported a pull request in no stack; `--stack 999999` reported neither. The rest is covered by `FakeGh` and throwaway-repository tests. The window was not run with `--stack`; a second entry page was only ever driven through the fake; `stacks()` has never met a repository that has a stack |
 
 ## Build, run, test
 
@@ -188,6 +200,14 @@ A `--pr` review is connected to its pull request: the title bar gains a
 pull-request icon whose menu opens it in the browser, publishes the
 reviewer's comments to it, and approves it (see "Pull requests and the
 forge" below).
+`diffie --stack <stack-number>` reviews a whole stack of pull requests as
+that one comparison: the latest member's head going into the first
+member's base, resolved by the same rules. The number is the stack's own
+and nothing else - a pull request's number or URL goes to `--pr` - and a
+number that is a pull request is refused with the number of the stack it
+belongs to, so the refusal names what would have worked. The window is
+connected to the latest member, and carries nothing else of the stack
+yet.
 `diffie --prompt [<review>]` opens no window: it prints the open review
 comments the way "Copy all as prompt" does (no name works only for a sole
 review, several are listed and refused; `--all` includes resolved ones,
@@ -301,6 +321,11 @@ website/                      the product page: static HTML and CSS, no
   files costs one subprocess per file otherwise, which read as a stalled
   "Reading the repository". The file panel is a virtualized `uniform_list`
   for the same reason: an element per row each frame froze large reviews.
+- `contains_commits(rev, candidates)`: which of `candidates` are reachable
+  from `rev`, in the order given. One call for any number of candidates, so
+  labelling a stack's commits by ancestry costs one per member. `GitCli`
+  asks `rev-list --no-walk=unsorted --stdin` with `^rev` - which can only
+  name the candidates `rev` does *not* reach - and takes the complement.
 - `author_name`, `review_dir`.
 
 How `GitCli` produces each scope:
@@ -356,6 +381,91 @@ branch names, exact commits, its page and its forge id. `main.rs` turns that
 into a comparison whose `source_rev`/`target_rev` pin the PR's commits while
 `source`/`target` keep the branch names for the title and the review file;
 `GitCli::resolve` resolves the pinned revision when one is set.
+
+### Stacked pull requests, the core half
+
+`pr.rs` carries the stack model from the spec
+(`docs/superpowers/specs/2026-11-24-stacked-pull-requests-design.md`,
+sections 5 and 5.1; design document section 21). `StackSummary` is a row a
+list shows - a stack number, the first member's base branch and its
+members as `PrSummary`, so the stack menu and the palette reuse
+`pr_picker`'s row renderer. `Stack` is the resolved thing: the members as
+`PullRequest`, latest first. `PrSummary` grew `head` and `base`, the
+branch names that tell the members apart.
+
+`ownership(backend, stack, commits)` says which member owns each commit:
+the lowest member - nearest the target branch - that contains it, by
+ancestry. Position cannot decide it, because `commits` is committer-date
+ordered over the whole reachable set with merges interleaved: a member
+kept current by merging the one below rather than rebasing onto it puts
+that member's head mid-list, and an index range from there hands the
+lower member the commits of the one above. The returned `Ownership` is
+total - every commit is in exactly one group or in `unclaimed`, because
+`enter_custom` seeds its selection from all of them and a commit in no
+group would be unreachable from any checkbox. It also reports `stale`
+(members whose head is not in the comparison, the routine "the member
+below took a review fix and this one has not rebased" state) and
+`off_chain` (a member whose base branch does not name the member below,
+which makes the order ownership relies on unfounded).
+
+`Forge::stack`, `Forge::stack_numbered` and `Forge::stacks` read GitHub's
+native stack through gh, so detection costs no new dependency. One query
+(`STACK`) carries every field a `PullRequest` needs for every member, so
+a stack resolves in one call however long it is; it pages on the entry
+connection's `pageInfo`. `stack` answers `Ok(None)` for a pull request
+whose `stack` field is null - the jq filter then prints nothing - and an
+`Err` for a number that names no pull request, which is how GitHub
+answers it. `stacks` groups one `PR_PAGE` of open pull requests by their
+stack object; the cap stays, and a stack whose members all sit past the
+page is not reported. GraphQL names the repository, which `pr view` and
+`pr list` find themselves, so a bare number costs one `gh repo view` -
+a URL answers for host, owner and repository on its own.
+
+**Resolution is REST, the member read is GraphQL.** GraphQL can reach a
+stack only through a member: `Repository` has no stack field and
+`PullRequestStack` carries no URL, so nothing there takes a stack's own
+number. REST does - `GET /repos/{owner}/{repo}/stacks/{number}` - and
+`Forge::stack_numbered` uses it. It takes only one member's number from
+that answer, because the REST members carry no head-repository owner and
+report state as `state` plus `merged_at` rather than GitHub's three-way
+state: building `PullRequest` from them would mean a second parser for
+the same model with a second state vocabulary. So REST answers "which
+pull request is in stack 42", GraphQL answers "what are that stack's
+members". Resolving a number must never scan `stacks`, whose page cap
+would lose a stack whose members all sit past it.
+
+`pr::open_stack` mirrors `pr::open`. It takes a stack's number, not a
+`PrArgument`: `--stack` names a stack and `--pr` a pull request, the two
+number themselves separately, and neither flag reaches into the other's
+schema (owner, 2026-11-24; design document section 21). `parse_stack`
+enforces it on the command line - digits only, so a URL is refused with
+the usage message. `resolve_stack` is then one `stack_numbered` call;
+nothing is read as a pull request on the way in. It pins the latest
+member's head as the source and resolves the first member's base by
+exactly the single pull request's rule - the remote-tracking ref while
+that member is open, the recorded base commit once merged. `endpoints`
+is that shared rule, and `fetch_missing` takes every pull request whose
+head must be here, so a stack's fetch is one `git fetch` carrying every
+member's `refs/pull/<n>/head` plus the first member's base branch.
+
+`not_a_stack` keeps a refusal from being a dead end: it runs only when
+the lookup failed, reads the pull request of that number, and words one
+of three answers - a pull request in a stack names both and offers
+`--stack <that stack>`, one in no stack names `--pr <the number>`, and a
+number in neither schema says so and carries the stack endpoint's own
+words. This is the one place `Forge::stack`, the member-to-stack read,
+is used on the command-line path; PR 2 needs it to navigate from a
+member to its stack.
+
+`--stack <stack-number>` refuses to combine with `--pr`, revisions,
+`--prompt` or `--reply`, and never fetches: it prints the fetch to run,
+as `--pr` does. It hands the window the latest member as its `Pull`, so
+the pull-request button, its status and its menu keep working; `app.rs`
+is untouched and `PerReview` carries no stack yet.
+
+Still missing for the feature: everything in the UI - the stack button,
+the picker's member groups, the palette's stack list and per-member
+publishing.
 
 ### Pull requests and the forge
 

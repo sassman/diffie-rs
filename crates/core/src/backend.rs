@@ -61,6 +61,11 @@ pub trait ReviewBackend: Send + Sync {
         resolved: &Resolved,
     ) -> Result<std::collections::HashMap<String, Vec<Oid>>>;
 
+    /// Which of `candidates` are reachable from `rev`, in the order given.
+    /// One call however long the list, so labelling a stack's commits by
+    /// ancestry costs one call per member rather than one per commit.
+    fn contains_commits(&self, rev: &str, candidates: &[Oid]) -> Result<Vec<Oid>>;
+
     /// The diff for one scope. `review` is only read for [`Scope::NewForMe`]:
     /// its ticks are what each file diffs against, and a ticked-unchanged
     /// file among its commented paths keeps its diff instead of collapsing,

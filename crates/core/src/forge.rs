@@ -8,7 +8,7 @@
 //! forge it talks to; [`crate::github`] is the one implementation.
 
 use crate::model::{BlameLine, Oid};
-use crate::pr::{PrArgument, PrList, PrSummary, PullRequest, PullStatus};
+use crate::pr::{PrArgument, PrList, PrSummary, PullRequest, PullStatus, Stack, StackSummary};
 use crate::review::{
     Comment, Published, Reaction, ReactionKind, ReviewFile, ReviewSet, Side, Thread,
 };
@@ -40,6 +40,27 @@ pub trait Forge: Send + Sync {
     /// The repository's pull requests, newest activity first: enough per
     /// row for the picker to show and choose, never the full description.
     fn pull_requests(&self, which: PrList) -> Result<Vec<PrSummary>, ForgeError>;
+
+    /// The stack the named pull request belongs to, every member resolved
+    /// to its oids, latest first. `Ok(None)` is a pull request in no
+    /// stack, and a number that names no pull request at all is an `Err`
+    /// in the forge's own words. This is the member-to-stack direction:
+    /// navigating from a pull request, and telling a reviewer who gave
+    /// `--stack` a pull request's number which stack to ask for instead.
+    fn stack(&self, argument: &PrArgument) -> Result<Option<Stack>, ForgeError>;
+
+    /// The stack of that number - a stack's own number, never a
+    /// member's; the two are separate schemas. What `--stack` resolves
+    /// through. A direct lookup, never a scan of [`Self::stacks`]: a
+    /// stack whose members all sit past that list's page must still be
+    /// reachable by its number.
+    fn stack_numbered(&self, number: u64) -> Result<Option<Stack>, ForgeError>;
+
+    /// The stacks among the repository's pull requests, the newest
+    /// activity first. Grouped from the same single page
+    /// [`Self::pull_requests`] lists, so a stack whose members all sit
+    /// past that page is not reported.
+    fn stacks(&self) -> Result<Vec<StackSummary>, ForgeError>;
 
     /// Where the pull request stands now: merged or not, the review
     /// decision, and the head commit's checks when it has any.
@@ -646,6 +667,22 @@ mod tests {
         }
     }
 
+    /// The row a list shows for a stack member. The double knows no
+    /// titles, authors or checks; what a stack needs is the branches.
+    fn summary(pull: &PullRequest) -> PrSummary {
+        PrSummary {
+            number: pull.number,
+            title: format!("#{}", pull.number),
+            author: "Ada".into(),
+            updated: 0,
+            state: pull.state,
+            draft: false,
+            checks: None,
+            head: pull.source_branch.clone(),
+            base: pull.target_branch.clone(),
+        }
+    }
+
     /// Blame that moved every line of the commit down by `shift`.
     fn shifted(shift: usize) -> impl FnMut(&str) -> Option<Vec<BlameLine>> {
         move |_| {
@@ -676,6 +713,8 @@ mod tests {
         short_answer: bool,
         /// Post unanchored comments' siblings, refuse these paths.
         refuse_path: Option<&'static str>,
+        /// The stack `pull()` belongs to; `None` is a pull request in none.
+        stack: Option<Stack>,
     }
 
     impl FakeForge {
@@ -695,6 +734,30 @@ mod tests {
 
         fn pull_requests(&self, _: PrList) -> Result<Vec<PrSummary>, ForgeError> {
             Ok(Vec::new())
+        }
+
+        fn stack(&self, _: &PrArgument) -> Result<Option<Stack>, ForgeError> {
+            Ok(self.stack.clone())
+        }
+
+        fn stack_numbered(&self, _: u64) -> Result<Option<Stack>, ForgeError> {
+            Ok(self.stack.clone())
+        }
+
+        fn stacks(&self) -> Result<Vec<StackSummary>, ForgeError> {
+            Ok(self
+                .stack
+                .iter()
+                .map(|stack| StackSummary {
+                    number: stack.number,
+                    base: stack
+                        .pulls
+                        .last()
+                        .map(|first| first.target_branch.clone())
+                        .unwrap_or_default(),
+                    members: stack.pulls.iter().map(summary).collect(),
+                })
+                .collect())
         }
 
         fn status(&self, _: &PullRequest) -> Result<PullStatus, ForgeError> {

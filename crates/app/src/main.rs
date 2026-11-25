@@ -14,6 +14,7 @@ use gpui_kit::{
 const USAGE: &str = "\
 Usage: diffie [-C <path>] [<revision> [<revision>]] [--every-difference]
        diffie [-C <path>] --pr <pull-request> [--every-difference]
+       diffie [-C <path>] --stack <stack-number> [--every-difference]
        diffie [-C <path>] --prompt [<review>] [--all]
        diffie [-C <path>] --reply <id> <answer> [--session <id>]
 
@@ -35,6 +36,14 @@ the branch names. A commit that is not fetched here is refused with the
 `git fetch` to run - diffie never fetches. The window then carries a
 pull-request menu: open it in the browser, publish the review's comments
 to it, approve it. Requires gh on PATH.
+
+--stack reviews a whole stack of pull requests as one comparison: the
+latest member's branch going into the branch the first member merges
+into. Give the stack's own number - stacks and pull requests number
+themselves separately, so a pull request's number belongs to --pr, and
+--stack says which stack it is in if you give one by mistake. GitHub's
+native stacks are the source. The window carries no stack controls; it
+shows that one comparison. Requires gh on PATH.
 
 --prompt opens no window: it prints the open review comments the way the
 app's \"Copy all as prompt\" button does, and exits. Without a review name
@@ -106,6 +115,7 @@ fn main() {
     let mut reply: Option<(String, String)> = None;
     let mut session: Option<String> = None;
     let mut pr: Option<String> = None;
+    let mut stack: Option<String> = None;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         let text = argument.to_string_lossy().into_owned();
@@ -140,6 +150,12 @@ fn main() {
                     exit_usage("--pr needs a pull-request number or URL.");
                 };
                 pr = Some(value.to_string_lossy().into_owned());
+            }
+            "--stack" => {
+                let Some(value) = arguments.next() else {
+                    exit_usage("--stack needs a stack's number.");
+                };
+                stack = Some(value.to_string_lossy().into_owned());
             }
             "-C" => {
                 let Some(value) = arguments.next() else {
@@ -201,6 +217,18 @@ fn main() {
     }
     if pr.is_some() && reply.is_some() {
         exit_usage("--pr opens a review; it does not combine with --reply.");
+    }
+    if stack.is_some() && pr.is_some() {
+        exit_usage("--stack reviews the whole stack; it does not combine with --pr.");
+    }
+    if stack.is_some() && !revisions.is_empty() {
+        exit_usage("--stack names the branches itself; drop the revisions.");
+    }
+    if stack.is_some() && prompt_mode {
+        exit_usage("--stack opens a review; it does not combine with --prompt.");
+    }
+    if stack.is_some() && reply.is_some() {
+        exit_usage("--stack opens a review; it does not combine with --reply.");
     }
 
     let path = repository.unwrap_or_else(|| PathBuf::from("."));
@@ -294,9 +322,42 @@ fn main() {
         });
         comparison
     });
+    // The whole stack as one comparison: the latest member's head going
+    // into the first member's base. The latest member keeps the
+    // pull-request button, its status and its menu working; nothing here
+    // shows the stack itself yet.
+    let stack_comparison = stack.map(|value| {
+        let number = match diffie_core::pr::parse_stack(&value) {
+            Ok(number) => number,
+            Err(message) => exit_usage(&message),
+        };
+        let opened = diffie_core::pr::open_stack(
+            &*backend,
+            &*forge,
+            number,
+            mode,
+            diffie_core::pr::FetchMode::Never,
+        );
+        let (stack, comparison) = match opened {
+            Ok(opened) => opened,
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        };
+        if let Some(latest) = stack.pulls.first() {
+            connected = Some(app::Pull {
+                forge: forge.clone(),
+                request: latest.clone(),
+            });
+        }
+        comparison
+    });
     let branch = backend.current_branch().ok().flatten();
     let working_tree = backend.has_working_tree().unwrap_or(false);
-    let comparison = pr_comparison.unwrap_or_else(|| match revisions.as_slice() {
+    // Both flags pin the comparison, and they are mutually exclusive.
+    let pinned = pr_comparison.or(stack_comparison);
+    let comparison = pinned.unwrap_or_else(|| match revisions.as_slice() {
         // `diffie A B` and `diffie A..B` read in the merge direction: A's
         // changes going into B. (`git diff` spells it the other way round;
         // that reading kept surprising the owner.)

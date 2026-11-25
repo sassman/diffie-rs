@@ -9,7 +9,7 @@
 //! Combining non-contiguous commits needs scratch objects, and those go to
 //! a temporary object directory that borrows the real one as an alternate.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1047,6 +1047,37 @@ impl ReviewBackend for GitCli {
             }
         }
         Ok(touched)
+    }
+
+    fn contains_commits(&self, rev: &str, candidates: &[Oid]) -> Result<Vec<Oid>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        // rev-list can only name the candidates `rev` does *not* reach:
+        // `^rev` marks its history uninteresting and the rest is printed.
+        // So ask that and take the complement. `--no-walk` keeps the
+        // candidates' own ancestors out of the answer, and the revisions
+        // go in on stdin, where nothing can read them as options.
+        let mut input = format!("^{rev}\n");
+        for candidate in candidates {
+            input.push_str(candidate.as_str());
+            input.push('\n');
+        }
+        let output = run(
+            &mut self.command(),
+            &["rev-list", "--no-walk=unsorted", "--stdin"],
+            Some(input.as_bytes()),
+        )?;
+        let beyond: HashSet<&str> = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        Ok(candidates
+            .iter()
+            .filter(|candidate| !beyond.contains(candidate.as_str()))
+            .cloned()
+            .collect())
     }
 
     fn patch(
