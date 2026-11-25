@@ -9,6 +9,7 @@
 use std::cell::Cell;
 
 use super::pull::{Tone, state_icon};
+use super::stack::Stacked;
 use super::*;
 use diffie_core::pr::{self, CheckState, FetchMode, PrArgument, PrList, PrState, PrSummary};
 use gpui_kit::component::command::{Command, CommandItem};
@@ -226,7 +227,11 @@ impl ReviewApp {
                                         let number = *number;
                                         window.close_dialog(cx);
                                         let _ = owner.update(cx, |this, cx| {
-                                            this.open_pull(number, window, cx);
+                                            // The palette's pick is a
+                                            // pull request and nothing
+                                            // more, also in a stack
+                                            // review.
+                                            this.open_pull(number, None, window, cx);
                                         });
                                     }
                                     // The dialog stays up; the rows grow in
@@ -275,7 +280,17 @@ impl ReviewApp {
     /// Opens the picked pull request in this window, as `--pr` would have:
     /// resolve, fetch what is missing, then swap the review over. On
     /// failure the current review stays and the status line says why.
-    pub(super) fn open_pull(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+    ///
+    /// `stack` is the stack the pull request is being opened as a member
+    /// of, and only then: a pull request picked from the palette belongs
+    /// to no stack, whichever review it was picked from.
+    pub(super) fn open_pull(
+        &mut self,
+        number: u64,
+        stack: Option<Stacked>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.publishing {
             // The palette entry is greyed while publishing, but the picker
             // may already be up when a publish starts; the pick must not
@@ -311,9 +326,10 @@ impl ReviewApp {
                         forge: this.forge.clone(),
                         request,
                     };
-                    // A member opens as the plain `--pr` review it is;
-                    // the stack menu's own row is the way back.
-                    this.adopt(comparison, Some(pull), None, cx);
+                    // The member's own review, with the stack it came
+                    // from when it came from one: its menu is the way
+                    // back out.
+                    this.adopt(comparison, Some(pull), stack, cx);
                 }
                 Err(message) => {
                     this.loading = false;
@@ -334,7 +350,7 @@ impl ReviewApp {
         &mut self,
         comparison: Comparison,
         pull: Option<Pull>,
-        stack: Option<Stack>,
+        stack: Option<Stacked>,
         cx: &mut Context<Self>,
     ) {
         // A pending save still writes the old review file before the

@@ -1,6 +1,6 @@
-//! The stack a `--stack` review spans: the title-bar button that stands
-//! in the pull-request button's place, the menu that lists the members,
-//! and the refresh that keeps their states current.
+//! The stack a review belongs to: the title-bar button, the menu that
+//! lists the members and leads into and back out of them, and the refresh
+//! that keeps their states current.
 //!
 //! A child of `app` so it can reach `ReviewApp`'s state.
 
@@ -9,6 +9,68 @@ use super::pull::Tone;
 use super::*;
 use diffie_core::pr::{self, FetchMode, PrSummary, Stack};
 use gpui_kit::component::menu::DropdownMenu as _;
+
+/// The stack a review belongs to, with the part of it in view. One
+/// value, so the two can never disagree, and swapped whole by `adopt`.
+pub(super) struct Stacked {
+    pub(super) stack: Stack,
+    /// The member under review, `None` while the whole stack is. Nothing
+    /// infers it: a stack review's `pull` is the latest member, so
+    /// opening that very member would look like the stack itself.
+    member: Option<u64>,
+}
+
+impl Stacked {
+    /// The whole stack as one comparison, as `--stack` opens it.
+    pub(super) fn whole(stack: Stack) -> Self {
+        Self {
+            stack,
+            member: None,
+        }
+    }
+
+    /// One member's own review, the stack kept so its menu leads back
+    /// out.
+    fn of_member(&self, number: u64) -> Self {
+        Self {
+            stack: self.stack.clone(),
+            member: Some(number),
+        }
+    }
+}
+
+/// Which buttons the title bar's right-hand cluster carries. The whole
+/// stack shows one, so `#N` can only mean the stack; one member of it
+/// shows both, because there the two name different things and both are
+/// right (owner, 2026-11-25).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TitleButtons {
+    Neither,
+    Pull,
+    Stack,
+    Both,
+}
+
+impl TitleButtons {
+    pub(super) fn pull(self) -> bool {
+        matches!(self, TitleButtons::Pull | TitleButtons::Both)
+    }
+
+    pub(super) fn stack(self) -> bool {
+        matches!(self, TitleButtons::Stack | TitleButtons::Both)
+    }
+}
+
+/// What the review on screen is: the whole stack, one member of it, one
+/// pull request reached any other way, or none.
+pub(super) fn title_buttons(stacked: Option<&Stacked>, pull: bool) -> TitleButtons {
+    match (stacked, pull) {
+        (Some(stacked), true) if stacked.member.is_some() => TitleButtons::Both,
+        (Some(_), _) => TitleButtons::Stack,
+        (None, true) => TitleButtons::Pull,
+        (None, false) => TitleButtons::Neither,
+    }
+}
 
 /// What the last refresh learned about the members. The resolved
 /// membership and the comparison's ends are not in here on purpose: a
@@ -59,13 +121,14 @@ impl ReviewApp {
     /// what is displayed comes out of it. A stack with no number cannot
     /// be asked again: the read goes through one.
     pub(super) fn refresh_stack_status(&mut self, cx: &mut Context<Self>) {
-        let Some(stack) = &self.review.stack else {
+        let Some(stacked) = &self.review.stack else {
             return;
         };
-        let Some(number) = stack.number else {
+        let Some(number) = stacked.stack.number else {
             return;
         };
-        let pinned: Vec<u64> = stack
+        let pinned: Vec<u64> = stacked
+            .stack
             .members
             .iter()
             .map(|member| member.pull.number)
@@ -139,7 +202,7 @@ impl ReviewApp {
                         forge: this.forge.clone(),
                         request: latest.pull.clone(),
                     });
-                    this.adopt(comparison, pull, Some(stack), cx);
+                    this.adopt(comparison, pull, Some(Stacked::whole(stack)), cx);
                 }
                 Err(message) => {
                     this.loading = false;
@@ -150,16 +213,30 @@ impl ReviewApp {
         });
     }
 
+    /// Opens one member of the stack in view as its own `--pr` review,
+    /// carrying the stack so the menu's way back stays one click away.
+    fn open_stack_member(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let stacked = self
+            .review
+            .stack
+            .as_ref()
+            .map(|stacked| stacked.of_member(number));
+        self.open_pull(number, stacked, window, cx);
+    }
+
     /// The stack's menu behind its title-bar button. It reads top down
     /// the way the reviewer moves: what the stack is, what a refresh has
     /// to report, the whole stack again, then the members - latest
-    /// first, each row the one the pull-request picker draws.
+    /// first, each row the one the pull-request picker draws, the one in
+    /// view ticked.
     pub(super) fn render_stack_menu(
         &self,
-        stack: &Stack,
+        stacked: &Stacked,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let owner = cx.weak_entity();
+        let stack = &stacked.stack;
+        let in_view = stacked.member;
         let number = stack.number;
         let size = stack.members.len();
         let base = stack
@@ -264,13 +341,15 @@ impl ReviewApp {
                     let member = row.number;
                     let open = owner.clone();
                     menu = menu.item(
-                        PopupMenuItem::element(move |_, cx| pull_row(&row, now, cx)).on_click(
-                            move |_: &gpui_kit::ClickEvent, window, cx| {
+                        PopupMenuItem::element(move |_, cx| pull_row(&row, now, cx))
+                            // The member whose own review is on screen,
+                            // so the menu says where the reviewer is.
+                            .checked(in_view == Some(member))
+                            .on_click(move |_: &gpui_kit::ClickEvent, window, cx| {
                                 let _ = open.update(cx, |this, cx| {
-                                    this.open_pull(member, window, cx);
+                                    this.open_stack_member(member, window, cx);
                                 });
-                            },
-                        ),
+                            }),
                     );
                 }
                 menu
@@ -315,6 +394,31 @@ mod tests {
             number: Some(42),
             members: vec![member(2, PrState::Open), member(1, PrState::Open)],
         }
+    }
+
+    #[test]
+    fn the_whole_stack_shows_one_button_and_a_member_both() {
+        let whole = Stacked::whole(stack());
+        // The stack as one comparison: `#N` must mean the stack alone.
+        assert_eq!(title_buttons(Some(&whole), true), TitleButtons::Stack);
+        // One member of it: its own pull request, and the stack as the
+        // way back out.
+        let member = whole.of_member(2);
+        assert_eq!(title_buttons(Some(&member), true), TitleButtons::Both);
+        // A pull request reached any other way knows no stack, so
+        // nothing asks the forge for one.
+        assert_eq!(title_buttons(None, true), TitleButtons::Pull);
+        assert_eq!(title_buttons(None, false), TitleButtons::Neither);
+    }
+
+    #[test]
+    fn opening_the_latest_member_is_still_a_member_review() {
+        // The stack review's own `pull` is the latest member, so which
+        // part is in view cannot be read off the pull request.
+        let whole = Stacked::whole(stack());
+        let latest = whole.stack.members.first().unwrap().pull.number;
+        let member = whole.of_member(latest);
+        assert_eq!(title_buttons(Some(&member), true), TitleButtons::Both);
     }
 
     #[test]

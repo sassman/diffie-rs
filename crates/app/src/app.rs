@@ -967,11 +967,12 @@ impl Default for FileView {
 struct PerReview {
     comparison: Comparison,
     pull: Option<Pull>,
-    /// The stack this comparison spans, as it was resolved when the
-    /// review opened. Its membership and the comparison's pinned ends
+    /// The stack this review belongs to - the whole stack as one
+    /// comparison, or the member of it in view - as it was resolved when
+    /// the review opened. Its membership and the comparison's pinned ends
     /// never move afterwards: re-resolving mid-review would change which
     /// commits are under the reviewer's eye and void a Custom selection.
-    stack: Option<Stack>,
+    stack: Option<stack::Stacked>,
     /// What a refresh last learned about the members: their states, and
     /// whether the stack's membership has moved on. Display only, for
     /// the same reason.
@@ -1097,7 +1098,7 @@ struct PerReview {
 
 impl PerReview {
     /// The state every review starts from, before its first load.
-    fn fresh(comparison: Comparison, pull: Option<Pull>, stack: Option<Stack>) -> Self {
+    fn fresh(comparison: Comparison, pull: Option<Pull>, stack: Option<stack::Stacked>) -> Self {
         Self {
             comparison,
             pull,
@@ -1355,7 +1356,8 @@ impl ReviewApp {
             backend,
             repository,
             worktree,
-            review: PerReview::fresh(comparison, pull, stack),
+            // The command line only ever opens the whole stack.
+            review: PerReview::fresh(comparison, pull, stack.map(stack::Stacked::whole)),
             forge,
             publishing: false,
             repo_state: RepoState::Idle,
@@ -4025,16 +4027,28 @@ impl ReviewApp {
                         // stay out, so the native double click still works
                         // there.
                         .on_click(|_, _, cx| cx.stop_propagation())
-                        // One button, never two: a stack review's button
-                        // is the stack's, so `#N` can only mean one
-                        // thing and member identity lives in its menu
-                        // (owner, 2026-11-25).
-                        .map(|controls| match self.review.stack.as_ref() {
-                            Some(stack) => controls.child(self.render_stack_menu(stack, cx)),
-                            None => controls
-                                .when_some(self.review.pull.as_ref(), |controls, pull| {
-                                    controls.child(self.render_pull_menu(pull, cx))
-                                }),
+                        // The whole stack carries one button, so `#N` can
+                        // only mean the stack; one member of it carries
+                        // both, the member's own first (owner,
+                        // 2026-11-25).
+                        .map(|controls| {
+                            let buttons = stack::title_buttons(
+                                self.review.stack.as_ref(),
+                                self.review.pull.is_some(),
+                            );
+                            controls
+                                .when_some(
+                                    self.review.pull.as_ref().filter(|_| buttons.pull()),
+                                    |controls, pull| {
+                                        controls.child(self.render_pull_menu(pull, cx))
+                                    },
+                                )
+                                .when_some(
+                                    self.review.stack.as_ref().filter(|_| buttons.stack()),
+                                    |controls, stacked| {
+                                        controls.child(self.render_stack_menu(stacked, cx))
+                                    },
+                                )
                         })
                         // Review or Conflicts, while an operation is
                         // interrupted or a pull-request forecast is there

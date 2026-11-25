@@ -1018,17 +1018,28 @@ Decided (owner, 2026-11-24):
   button's menu. They cannot be reached by navigating to the member:
   that loads the member's own review file, which does not hold the
   comments written in the stack view.
-- **The stack button replaces the pull-request button** (owner,
-  2026-11-25), at the same metrics and in the same place, labelled with
-  the stack's number and size, or the member count alone when there is no
-  stack number. One button, so `#N` can never be ambiguous between a
-  member and the stack; member identity lives inside the menu. A non-stack
-  review is untouched: the pull-request button renders as before. The
-  menu heads with the stack and the branch it lands on, then lists the
-  members in the pull-request picker's row style, each opening that
-  member as a plain `--pr` review, with a row above them that resolves
-  the whole stack by its number again. The title bar is untouched: it
-  keeps showing the branch pair, as it does for every review.
+- **The stack button replaces the pull-request button while the whole
+  stack is in view** (owner, 2026-11-25), at the same metrics and in the
+  same place, labelled with the stack's number and size, or the member
+  count alone when there is no stack number. One button there, because
+  `#N` would otherwise be ambiguous between a member and the stack;
+  member identity lives inside the menu. The title bar itself is
+  untouched: it keeps showing the branch pair, as it does for every
+  review. The menu heads with the stack and the branch it lands on, then
+  lists the members in the pull-request picker's row style, each opening
+  that member as its own `--pr` review, with a row above them that
+  resolves the whole stack by its number again.
+- **A member opened from the stack keeps both buttons** (owner,
+  2026-11-25): its own pull-request button, which publishes and approves
+  as in any `--pr` review, and the stack button, whose menu is the way
+  back out and ticks the member in view. The ambiguity that makes the
+  stack view one button does not arise here - the two name different
+  things and both are right. A pull request reached any other way, from
+  the command line or the palette's picker, carries no stack and keeps
+  one button; nothing goes looking for a stack behind it. Which part of
+  a stack is in view is recorded, not inferred: a stack review's own
+  pull request is the latest member, so opening that member would
+  otherwise read as the stack itself.
 - **A stack of one shows the button, reading 1**, with its single group
   (owner, 2026-11-25). A one-member stack is how a stack starts, and
   hiding the button would make `--stack` look like it did nothing.
@@ -1073,9 +1084,6 @@ Open:
   write are the weaker signal again, and Graphite writes none.
 - Whether swapping a stack's direction stays offered, now that the title
   bar reads the branch pair for a stack as for any other review.
-- How a member review finds its way back to the stack. The stack button
-  is gone there, by the one-button rule, and the pull-request button
-  behaves as in any `--pr` review.
 - Whether a verdict should ever apply across a whole stack.
 - Whether a stack's comments belong in one review file or one per
   member. They land in the latest branch's file today, because a review

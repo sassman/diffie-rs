@@ -103,7 +103,9 @@ first code: a working core and a first UI scaffold wired to it.
   the window: `PerReview` carries the resolved `Stack`, and a stack
   review's title bar shows the stack button in the pull-request button's
   place - `#<stack> · <size>`, its menu listing the members latest first
-  in the pull-request picker's row look. See "The stack button".
+  in the pull-request picker's row look - and a member opened from that
+  menu keeps both buttons, the member's own and the stack's. See "The
+  stack button".
   Still to come: the commit picker's member groups, per-member
   publishing and the palette's stack list.
 
@@ -173,7 +175,7 @@ Be exact about this when you report further work.
 | Symbol navigation in the window: Cmd-hover link styling and cursor, Cmd-click landing inside the diff with the focus mark, the origin card for a name from another crate, "Copy symbol" in the context menu, the tie dialog, a definition entry (excerpt rows, header note and x, panel row), Cmd+[ back from each, chained jumps inside an entry | Compiled, clippy-clean. The window was started once against this repository and loaded with the views built; **no gesture was exercised** - synthetic mouse events do not reach the handlers (see the orphan row above) |
 | Moved-code folds surviving the earlier-comments toggle (`sync_diff_files` puts them back after `set_files`; before, the toggle dropped them whenever orphan entries existed) | Compiled; not seen on screen |
 | Stack detection and `--stack`: the GraphQL selection, the entry order, paging, the null-stack answer, the stack-number lookup, the three refusals, `open_stack`'s endpoints and the batched fetch | Run read-only against real GitHub on 2026-11-24: `gh api repos/cli/cli/stacks/15082` returns all twelve members base-end first, unpaged, and 404s for an unknown number; `--stack 15082` resolved that stack through REST and then GraphQL in an empty repository whose only remote is `cli/cli`, and named its latest member's missing head commit; `--stack 15073`, a member's number, was refused there with "it belongs to stack 15082 - try `--stack 15082`"; `--stack 1` in this repository reported a pull request in no stack; `--stack 999999` reported neither. The rest is covered by `FakeGh` and throwaway-repository tests. The window was not run with `--stack`; a second entry page was only ever driven through the fake; `stacks()` has never met a repository that has a stack |
-| The stack button and its menu: the button in the pull-request button's place, the `#<stack> · <size>` label, the heading, the reopen row, the member rows in the picker's look, and the reload's member refresh | Compiled, clippy-clean; the row-picking and the refresh's "repaint, never re-resolve" rule are unit-tested in `app/stack.rs`. **Not seen on screen**: no repository here has a stack, so the window was never run against one, and no click, menu or staleness word was exercised |
+| The stack button and its menu: the button in the pull-request button's place, the `#<stack> · <size>` label, the heading, the reopen row, the member rows in the picker's look, the two buttons of a member review, and the reload's member refresh | Compiled, clippy-clean; the three button states, the row-picking and the refresh's "repaint, never re-resolve" rule are unit-tested in `app/stack.rs`. **Not seen on screen**: no repository here has a stack, so the window was never run against one, and no click, menu, tick or staleness word was exercised. The title bar's right-hand cluster was never measured with two buttons in it at the 900 px minimum width; the cluster is not `flex_none`, so what gives way under pressure is unverified |
 
 ## Build, run, test
 
@@ -485,24 +487,33 @@ stack list and per-member publishing.
 and the member refresh; `PerReview` carries `stack: Option<Stack>`, the
 stack as it was resolved when the review opened.
 
-The button stands **in the pull-request button's place and replaces it**
-(owner, 2026-11-25; design document section 21): one button, so `#N` can
-never be ambiguous between a member and the stack, and member identity
-lives inside the menu. A non-stack review renders exactly as before. The
-label is `#<stack> · <size>`, the member count alone without a stack
-number, and a stack of one shows it reading 1 - hiding it would make
-`--stack` look like it did nothing. The title bar is untouched and reads
-the branch pair as for any review.
+While the whole stack is in view the button stands **in the pull-request
+button's place and replaces it** (owner, 2026-11-25; design document
+section 21): one button there, so `#N` cannot be ambiguous between a
+member and the stack. The label is `#<stack> · <size>`, the member count
+alone without a stack number, and a stack of one shows it reading 1 -
+hiding it would make `--stack` look like it did nothing. The title bar is
+untouched and reads the branch pair as for any review.
+
+A member opened from the stack carries **both** buttons: its own
+pull-request button, publishing and approving as in any `--pr` review,
+then the stack button as the way back. `Stacked { stack, member }` is
+what the window keeps, so which part of the stack is in view is recorded
+rather than inferred - the stack review's `pull` is the latest member, so
+opening that very member would otherwise read as the stack itself.
+`stack::title_buttons` turns that into the three states (stack alone,
+both, pull request alone) and is unit-tested. A pull request picked from
+the palette carries no stack, also from inside a stack review:
+`open_pull` takes the stack to carry as an argument, and only the menu's
+member rows pass one.
 
 The menu heads with the stack and the branch it lands on, then the row
-that resolves the whole stack by its number again, then the members,
-latest first. A member row opens that member as a plain `--pr` review
-through `open_pull`, which means the stack button is gone there - the
-reopen row is reachable from the stack view only, recorded as an open
-question. The rows come from `pr_picker::pull_row`, extracted so the
-picker and the menu draw the same row; `pull_item` itself could not be
-reused, because it builds the `Command`'s `CommandItem` while a menu
-takes a `PopupMenuItem`.
+that resolves the whole stack by its number again - also the way a
+changed membership is taken on - then the members, latest first, with the
+one in view ticked. The rows come from `pr_picker::pull_row`, extracted
+so the picker and the menu draw the same row; `pull_item` itself could
+not be reused, because it builds the `Command`'s `CommandItem` while a
+menu takes a `PopupMenuItem`.
 
 `refresh_stack_status` runs with every reload beside
 `refresh_pull_status`, in the same single-slot task, and asks
