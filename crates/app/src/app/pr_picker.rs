@@ -11,8 +11,35 @@ use std::cell::Cell;
 use super::pull::{Tone, state_icon};
 use super::stack::Stacked;
 use super::*;
-use diffie_core::pr::{self, CheckState, FetchMode, PrArgument, PrList, PrState, PrSummary};
+use diffie_core::pr::{
+    self, CheckState, FetchMode, PrArgument, PrList, PrState, PrSummary, PullRequest,
+};
 use gpui_kit::component::command::{Command, CommandItem};
+
+/// What an open starts from: the pull request's number, the stack it is
+/// being opened as a member of, and the pull request itself when the
+/// caller already holds it. Held, the open costs no forge call; without
+/// it the forge is asked, which is all the palette's picker can do.
+pub(super) struct Opening {
+    pub(super) number: u64,
+    /// The stack the pull request is a member of, and only then: a pull
+    /// request picked from the palette belongs to no stack, whichever
+    /// review it was picked from.
+    pub(super) stack: Option<Stacked>,
+    /// The pull request as a stack read answered it.
+    pub(super) held: Option<PullRequest>,
+}
+
+impl Opening {
+    /// A number and nothing else, as the palette's picker hands one over.
+    pub(super) fn numbered(number: u64) -> Self {
+        Self {
+            number,
+            stack: None,
+            held: None,
+        }
+    }
+}
 
 /// What the picker shows. Both lists refetch on every open: the point of
 /// the picker is the repository's present, not a cache of its past.
@@ -231,7 +258,7 @@ impl ReviewApp {
                                             // pull request and nothing
                                             // more, also in a stack
                                             // review.
-                                            this.open_pull(number, None, window, cx);
+                                            this.open_pull(Opening::numbered(number), window, cx);
                                         });
                                     }
                                     // The dialog stays up; the rows grow in
@@ -278,19 +305,21 @@ impl ReviewApp {
     }
 
     /// Opens the picked pull request in this window, as `--pr` would have:
-    /// resolve, fetch what is missing, then swap the review over. On
-    /// failure the current review stays and the status line says why.
-    ///
-    /// `stack` is the stack the pull request is being opened as a member
-    /// of, and only then: a pull request picked from the palette belongs
-    /// to no stack, whichever review it was picked from.
+    /// resolve, fetch what is missing, then swap the review over. A
+    /// member of the stack in view skips the resolve, which would only
+    /// answer what [`Opening::held`] already carries. On failure the
+    /// current review stays and the status line says why.
     pub(super) fn open_pull(
         &mut self,
-        number: u64,
-        stack: Option<Stacked>,
+        opening: Opening,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Opening {
+            number,
+            stack,
+            held,
+        } = opening;
         if self.publishing {
             // The palette entry is greyed while publishing, but the picker
             // may already be up when a publish starts; the pick must not
@@ -316,8 +345,13 @@ impl ReviewApp {
         self._open_pull = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let argument = PrArgument { number, url: None };
-                    pr::open(&*backend, &*forge, &argument, mode, FetchMode::OnDemand)
+                    match held {
+                        Some(pull) => pr::open_member(&*backend, &*forge, &pull, mode),
+                        None => {
+                            let argument = PrArgument { number, url: None };
+                            pr::open(&*backend, &*forge, &argument, mode, FetchMode::OnDemand)
+                        }
+                    }
                 })
                 .await;
             let _ = this.update(cx, |this, cx| match result {

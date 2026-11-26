@@ -1053,6 +1053,22 @@ Decided (owner, 2026-11-24):
   in one word and nothing more; taking the new shape needs an explicit
   reopen. A failed refresh keeps the older answer and adds a line saying
   so, as the pull request's status does.
+- **Hopping between members asks the forge for nothing** (owner,
+  2026-11-25, after feeling the hop drag on a real stack). The stack read
+  already answered every member's oids, branches, state and checks, so
+  opening one of them resolves from that answer: no pull-request lookup,
+  no second stack read, and no fetch, since that read's one fetch already
+  carried every member's refspec. What is left is the local git the new
+  comparison genuinely needs. The member's state and checks are seeded
+  from the same answer so its rows say something true at once, while its
+  review decision - which the stack read does not carry - stays unread
+  until the background refresh answers it, rather than being guessed. The
+  held answer is not trusted blindly: a member whose commits are not in
+  the repository falls back to the resolving open and its fetch, because
+  a stack resolved by the command line never fetched. A pull request
+  reached from the palette holds nothing and still resolves through the
+  forge. Nothing is cached: an answer in hand is used once instead of
+  being thrown away and asked for again.
 - **GitHub is reached through `octocrab` eventually, as its own epic**,
   not as part of this one. It buys distribution, since a shipped app
   cannot assume `gh` on `PATH`, and forge test coverage on Windows, where

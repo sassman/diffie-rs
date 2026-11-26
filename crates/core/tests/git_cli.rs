@@ -5,7 +5,7 @@ use std::process::Command;
 
 use diffie_core::pr::{
     FetchMode, Ownership, PrArgument, PrState, PrSummary, PullRequest, Stack, StackMember,
-    StackSummary, open_stack, ownership,
+    StackSummary, open, open_member, open_stack, ownership,
 };
 use diffie_core::review::{ReviewInput, ReviewedFile};
 use diffie_core::{
@@ -1462,7 +1462,9 @@ fn with_row(pull: PullRequest) -> StackMember {
 /// A forge that knows one stack. `stack` answers it for any member's
 /// number, `Ok(None)` for `unstacked`, and refuses every other number the
 /// way GitHub refuses one that names no pull request - the stack's own
-/// included, which only `stack_numbered` answers for.
+/// included, which only `stack_numbered` answers for. `pull_request`
+/// answers a member too, so a test can tell an open that asked the forge
+/// from one that opened on what it already held.
 ///
 /// `stacks` reports nothing: every member sits past the list's page, the
 /// case a lookup by stack number must survive.
@@ -1494,8 +1496,24 @@ impl diffie_core::forge::Forge for StackForge {
         "Fake"
     }
 
-    fn pull_request(&self, _: &PrArgument) -> Result<PullRequest, diffie_core::forge::ForgeError> {
-        unreachable!("a stack never opens one pull request")
+    fn pull_request(
+        &self,
+        argument: &PrArgument,
+    ) -> Result<PullRequest, diffie_core::forge::ForgeError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("pull_request {}", argument.number));
+        self.members
+            .iter()
+            .find(|member| member.pull.number == argument.number)
+            .map(|member| member.pull.clone())
+            .ok_or_else(|| {
+                diffie_core::forge::ForgeError::Refused(format!(
+                    "Could not resolve to a PullRequest with the number of {}.",
+                    argument.number
+                ))
+            })
     }
 
     fn pull_requests(
@@ -1622,6 +1640,14 @@ impl StackFixture {
         commit("moved on");
         git(root, &["remote", "add", "o", "."]);
         git(root, &["update-ref", "refs/remotes/o/main", "main"]);
+        // A stack's branches are pushed, so each has a remote-tracking
+        // ref; that is what a member's own base end resolves through.
+        for branch in ["feat/a", "feat/b", "feat/c"] {
+            git(
+                root,
+                &["update-ref", &format!("refs/remotes/o/{branch}"), branch],
+            );
+        }
         Self {
             directory,
             heads,
@@ -1864,6 +1890,87 @@ fn opening_a_stack_fetches_every_member_in_one_call() {
         "main"
     );
     assert_eq!(git(&local, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn hopping_to_a_member_opens_on_the_held_pull_request_alone() {
+    let fixture = StackFixture::new();
+    let backend = fixture.backend();
+    let members = fixture.members();
+    let forge = StackForge::new(members.clone());
+    // The middle member, whose base end is the branch below it: a hop
+    // there resolves both ends the way any real one does.
+    let held = &members[1].pull;
+
+    let (pull, comparison) = open_member(&backend, &forge, held, CompareMode::BranchAdds).unwrap();
+
+    assert_eq!(pull.number, 2);
+    assert_eq!(comparison.source, "feat/b");
+    assert_eq!(
+        comparison.source_rev.as_deref(),
+        Some(fixture.heads[1].as_str())
+    );
+    assert_eq!(comparison.target, "feat/a");
+    assert_eq!(comparison.target_rev.as_deref(), Some("o/feat/a"));
+    // The whole point of the hop: the stack read already answered every
+    // one of those, so nothing is asked again.
+    assert_eq!(forge.calls(), Vec::<String>::new());
+}
+
+#[test]
+fn a_member_picked_by_number_still_resolves_through_the_forge() {
+    let fixture = StackFixture::new();
+    let backend = fixture.backend();
+    let members = fixture.members();
+    let forge = StackForge::new(members.clone());
+    let argument = PrArgument {
+        number: 2,
+        url: None,
+    };
+
+    let (_, by_number) = open(
+        &backend,
+        &forge,
+        &argument,
+        CompareMode::BranchAdds,
+        FetchMode::OnDemand,
+    )
+    .unwrap();
+
+    // The palette's picker holds nothing but a number, so the lookup is
+    // the only way in.
+    assert_eq!(forge.calls(), ["pull_request 2"]);
+    // And it answers what the hop already had: same comparison, one
+    // call more.
+    let (_, held) =
+        open_member(&backend, &forge, &members[1].pull, CompareMode::BranchAdds).unwrap();
+    assert_eq!(held.source_rev, by_number.source_rev);
+    assert_eq!(held.target_rev, by_number.target_rev);
+    assert_eq!(forge.calls(), ["pull_request 2"]);
+}
+
+#[test]
+fn a_member_whose_commits_are_missing_falls_back_to_the_fetching_open() {
+    let (_directory, local, members) = clone_behind_stack();
+    let backend = GitCli::open(&local).unwrap();
+    let forge = StackForge::new(members.clone());
+    let held = &members[0].pull;
+    assert!(!backend.revision_exists(&held.source_commit).unwrap());
+
+    let (pull, comparison) = open_member(&backend, &forge, held, CompareMode::BranchAdds).unwrap();
+
+    // The held pull request is right and still not enough: a stack the
+    // command line resolved never fetched, so the open falls through to
+    // the lookup and its fetch instead of pinning commits that are not
+    // here.
+    assert_eq!(forge.calls(), ["pull_request 3"]);
+    assert_eq!(pull.number, 3);
+    assert_eq!(
+        comparison.source_rev.as_deref(),
+        Some(held.source_commit.as_str())
+    );
+    assert_eq!(comparison.target_rev.as_deref(), Some("origin/feat/b"));
+    assert!(backend.revision_exists(&held.source_commit).unwrap());
 }
 
 /// Like [`git`], but for a merge or rebase that is expected to stop on a

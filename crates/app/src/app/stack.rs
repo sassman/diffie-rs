@@ -4,10 +4,10 @@
 //!
 //! A child of `app` so it can reach `ReviewApp`'s state.
 
-use super::pr_picker::{now_unix, pull_row};
-use super::pull::Tone;
+use super::pr_picker::{Opening, now_unix, pull_row};
+use super::pull::{Standing, Tone};
 use super::*;
-use diffie_core::pr::{self, FetchMode, PrSummary, Stack};
+use diffie_core::pr::{self, FetchMode, PrSummary, Stack, StackMember};
 use gpui_kit::component::menu::DropdownMenu as _;
 
 /// The stack a review belongs to, with the part of it in view. One
@@ -36,6 +36,21 @@ impl Stacked {
             stack: self.stack.clone(),
             member: Some(number),
         }
+    }
+
+    /// The member of that number, as the stack read answered it.
+    fn listed(&self, number: u64) -> Option<&StackMember> {
+        self.stack
+            .members
+            .iter()
+            .find(|member| member.pull.number == number)
+    }
+
+    /// Where the member in view stands, out of that same read: enough
+    /// for the status rows to say something true before the forge is
+    /// asked again.
+    pub(super) fn member_standing(&self) -> Option<Standing> {
+        Some(Standing::seeded(&self.listed(self.member?)?.summary))
     }
 }
 
@@ -215,13 +230,20 @@ impl ReviewApp {
 
     /// Opens one member of the stack in view as its own `--pr` review,
     /// carrying the stack so the menu's way back stays one click away.
+    /// The member's pull request comes out of the stack read, so the hop
+    /// reaches the forge for nothing; a number the stack does not list -
+    /// which the menu cannot produce, it draws the members - still
+    /// resolves the long way rather than being refused.
     fn open_stack_member(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let stacked = self
-            .review
-            .stack
-            .as_ref()
-            .map(|stacked| stacked.of_member(number));
-        self.open_pull(number, stacked, window, cx);
+        let opening = match &self.review.stack {
+            Some(stacked) => Opening {
+                number,
+                stack: Some(stacked.of_member(number)),
+                held: stacked.listed(number).map(|member| member.pull.clone()),
+            },
+            None => Opening::numbered(number),
+        };
+        self.open_pull(opening, window, cx);
     }
 
     /// The stack's menu behind its title-bar button. It reads top down
@@ -419,6 +441,27 @@ mod tests {
         let latest = whole.stack.members.first().unwrap().pull.number;
         let member = whole.of_member(latest);
         assert_eq!(title_buttons(Some(&member), true), TitleButtons::Both);
+    }
+
+    #[test]
+    fn a_member_hop_opens_on_what_the_stack_read_answered() {
+        let mut stack = stack();
+        stack.members[0].summary.checks = Some(CheckState::Failing);
+        let whole = Stacked::whole(stack);
+        // Nothing is in view while the whole stack is, so there is
+        // nothing to seed a member's standing from.
+        assert!(whole.member_standing().is_none());
+        let member = whole.of_member(2);
+        // Both halves of the hop come out of that one read: the pull
+        // request the comparison pins, and the standing its rows show.
+        assert_eq!(member.listed(2).unwrap().pull.number, 2);
+        assert!(matches!(
+            member.member_standing(),
+            Some(Standing::Seeded(status)) if status.checks.is_some()
+        ));
+        // A number the stack does not list holds nothing, so that open
+        // falls back to the forge instead of being refused.
+        assert!(member.listed(99).is_none());
     }
 
     #[test]

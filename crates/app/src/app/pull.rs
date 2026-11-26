@@ -6,7 +6,9 @@
 
 use super::*;
 use diffie_core::forge::{Forge, Outcome, Pending, Verdict};
-use diffie_core::pr::{CheckState, PrState, PullRequest, PullStatus, ReviewDecision};
+use diffie_core::pr::{
+    CheckState, Checks, PrState, PrSummary, PullRequest, PullStatus, ReviewDecision,
+};
 use gpui_kit::component::menu::DropdownMenu as _;
 
 /// The pull request the review was opened from (`--pr`), with the forge
@@ -14,6 +16,40 @@ use gpui_kit::component::menu::DropdownMenu as _;
 pub struct Pull {
     pub forge: Arc<dyn Forge>,
     pub request: PullRequest,
+}
+
+/// Where the pull request stands, and how much of that was actually
+/// asked. Two cases rather than one value, because a stack read answers
+/// a member's state and its checks but never its review decision: a
+/// seeded standing must not pass "nothing was read" off as "no review
+/// yet".
+#[derive(Clone)]
+pub(super) enum Standing {
+    /// What the read that opened the review already said, standing in
+    /// until the forge's own answer lands.
+    Seeded(PullStatus),
+    Answered(PullStatus),
+}
+
+impl Standing {
+    /// The standing a stack read hands over for one of its members.
+    pub(super) fn seeded(summary: &PrSummary) -> Self {
+        Standing::Seeded(PullStatus {
+            state: summary.state,
+            review: None,
+            checks: summary.checks.map(|state| Checks {
+                state,
+                // The stack read names no run; the refresh will.
+                latest_run: None,
+            }),
+        })
+    }
+
+    fn status(&self) -> &PullStatus {
+        match self {
+            Standing::Seeded(status) | Standing::Answered(status) => status,
+        }
+    }
 }
 
 /// "open · approved · checks failing": where the pull request stands, as
@@ -91,7 +127,7 @@ pub(super) fn state_icon(state: PrState) -> Lucide {
 /// The standing as three rows, always the same three so the menu keeps
 /// its shape: a part the forge has not answered yet, or has nothing for,
 /// says so quietly instead of leaving a gap.
-fn status_rows(state: PrState, status: Option<&PullStatus>) -> [StatusRow; 3] {
+fn status_rows(state: PrState, standing: Option<&Standing>) -> [StatusRow; 3] {
     let (value, tone) = match state {
         PrState::Open => ("Open", Tone::Good),
         PrState::Merged => ("Merged", Tone::Settled),
@@ -109,24 +145,33 @@ fn status_rows(state: PrState, status: Option<&PullStatus>) -> [StatusRow; 3] {
         value: "…",
         tone: Tone::Quiet,
     };
-    let Some(status) = status else {
+    let Some(standing) = standing else {
         return [state_row, unread("Review"), unread("Checks")];
     };
-    let (icon, value, tone) = match status.review {
-        Some(ReviewDecision::Approved) => (Lucide::CircleCheck, "Approved", Tone::Good),
-        Some(ReviewDecision::ChangesRequested) => {
-            (Lucide::MessageSquareWarning, "Changes requested", Tone::Bad)
+    // A seeded standing came out of a read that never asked for the
+    // decision, so this row has nothing to report yet.
+    let review = match standing {
+        Standing::Seeded(_) => unread("Review"),
+        Standing::Answered(status) => {
+            let (icon, value, tone) = match status.review {
+                Some(ReviewDecision::Approved) => (Lucide::CircleCheck, "Approved", Tone::Good),
+                Some(ReviewDecision::ChangesRequested) => {
+                    (Lucide::MessageSquareWarning, "Changes requested", Tone::Bad)
+                }
+                Some(ReviewDecision::Required) => (Lucide::Eye, "Review required", Tone::Waiting),
+                None => (Lucide::CircleDashed, "No review yet", Tone::Quiet),
+            };
+            StatusRow {
+                icon,
+                label: "Review",
+                value,
+                tone,
+            }
         }
-        Some(ReviewDecision::Required) => (Lucide::Eye, "Review required", Tone::Waiting),
-        None => (Lucide::CircleDashed, "No review yet", Tone::Quiet),
     };
-    let review = StatusRow {
-        icon,
-        label: "Review",
-        value,
-        tone,
-    };
-    let (icon, value, tone) = match status.checks.as_ref().map(|checks| checks.state) {
+    // The checks come out of either standing: a stack read answers them.
+    let rollup = standing.status().checks.as_ref().map(|checks| checks.state);
+    let (icon, value, tone) = match rollup {
         Some(CheckState::Passing) => (Lucide::CircleCheck, "Passing", Tone::Good),
         Some(CheckState::Running) => (Lucide::Clock, "Running", Tone::Waiting),
         Some(CheckState::Failing) => (Lucide::CircleX, "Failing", Tone::Bad),
@@ -144,8 +189,8 @@ fn status_rows(state: PrState, status: Option<&PullStatus>) -> [StatusRow; 3] {
 /// The one tone the title-bar icon's dot carries: the loudest thing the
 /// review decision and the checks have to say. `None` leaves the icon bare
 /// - nothing read yet, or nothing to report.
-fn trigger_tone(status: Option<&PullStatus>) -> Option<Tone> {
-    let [_, review, checks] = status_rows(PrState::Open, Some(status?));
+fn trigger_tone(standing: Option<&Standing>) -> Option<Tone> {
+    let [_, review, checks] = status_rows(PrState::Open, Some(standing?));
     [Tone::Bad, Tone::Waiting, Tone::Good]
         .into_iter()
         // A required review is the normal state of an open pull request;
@@ -233,7 +278,7 @@ impl ReviewApp {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(status) => {
-                        this.review.pull_status = Some(status);
+                        this.review.pull_status = Some(Standing::Answered(status));
                         this.review.pull_status_error = None;
                     }
                     Err(error) => this.review.pull_status_error = Some(error.into()),
@@ -260,7 +305,7 @@ impl ReviewApp {
         self.review
             .pull_status
             .as_ref()
-            .map_or(pull.request.state, |status| status.state)
+            .map_or(pull.request.state, |standing| standing.status().state)
     }
 
     /// Whether an approval can go out, and whether it has comments to
@@ -374,26 +419,26 @@ impl ReviewApp {
         let in_view = self.pull_in_view();
         let busy = self.publishing;
         let pending = self.pull_pending();
-        let status = self.review.pull_status.clone();
+        let standing = self.review.pull_status.clone();
         let state = self.pull_state(pull);
         let open = state == PrState::Open;
         let can_approve_with = self.can_approve(pull, true);
         let can_approve_without = self.can_approve(pull, false);
-        let rows = status_rows(state, status.as_ref());
+        let rows = status_rows(state, standing.as_ref());
         let error = self.review.pull_status_error.clone();
-        let tooltip = match (&status, &error) {
-            (Some(status), _) => {
+        let tooltip = match (&standing, &error) {
+            (Some(standing), _) => {
                 format!(
                     "Pull request #{number} on {forge} - {}",
-                    status_words(status)
+                    status_words(standing.status())
                 )
             }
             (None, Some(_)) => format!("Pull request #{number} on {forge} - state unknown"),
             (None, None) => format!("Pull request #{number} on {forge}"),
         };
-        let latest_run = status
+        let latest_run = standing
             .as_ref()
-            .and_then(|status| status.checks.as_ref())
+            .and_then(|standing| standing.status().checks.as_ref())
             .and_then(|checks| checks.latest_run.clone());
         let heading = format!(
             "#{number} · {} going into {}",
@@ -407,7 +452,7 @@ impl ReviewApp {
         } else {
             None
         };
-        let dot = trigger_tone(status.as_ref()).map(|tone| tone.color(cx));
+        let dot = trigger_tone(standing.as_ref()).map(|tone| tone.color(cx));
         let resolving = self.forecast_resolving();
         let push_blocker = self.push_resolution_blockers(cx);
         Button::new("pull")
@@ -556,7 +601,6 @@ impl ReviewApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diffie_core::pr::Checks;
 
     fn status(
         state: PrState,
@@ -571,6 +615,15 @@ mod tests {
                 latest_run: None,
             }),
         }
+    }
+
+    /// The forge's own answer, as a refresh records it.
+    fn answered(
+        state: PrState,
+        review: Option<ReviewDecision>,
+        checks: Option<CheckState>,
+    ) -> Standing {
+        Standing::Answered(status(state, review, checks))
     }
 
     #[test]
@@ -608,22 +661,22 @@ mod tests {
 
     #[test]
     fn each_row_carries_the_tone_of_what_it_reports() {
-        let merged = status(PrState::Merged, Some(ReviewDecision::Approved), None);
+        let merged = answered(PrState::Merged, Some(ReviewDecision::Approved), None);
         assert_eq!(
-            tones(&status_rows(merged.state, Some(&merged))),
+            tones(&status_rows(PrState::Merged, Some(&merged))),
             [
                 ("Merged", Tone::Settled),
                 ("Approved", Tone::Good),
                 ("No checks", Tone::Quiet)
             ]
         );
-        let red = status(
+        let red = answered(
             PrState::Open,
             Some(ReviewDecision::ChangesRequested),
             Some(CheckState::Failing),
         );
         assert_eq!(
-            tones(&status_rows(red.state, Some(&red))),
+            tones(&status_rows(PrState::Open, Some(&red))),
             [
                 ("Open", Tone::Good),
                 ("Changes requested", Tone::Bad),
@@ -633,8 +686,38 @@ mod tests {
     }
 
     #[test]
+    fn a_seeded_standing_reports_the_checks_and_waits_on_the_review() {
+        let mut summary = PrSummary {
+            number: 7,
+            title: "Member".into(),
+            author: "ada".into(),
+            updated: 0,
+            state: PrState::Open,
+            draft: false,
+            checks: Some(CheckState::Failing),
+            head: "feat/b".into(),
+            base: "feat/a".into(),
+        };
+        let seeded = Standing::seeded(&summary);
+        // The stack read answered state and checks, so a hop paints both
+        // at once - and never answered the decision, so that row must
+        // not read as "no review yet".
+        assert_eq!(
+            tones(&status_rows(PrState::Open, Some(&seeded))),
+            [
+                ("Open", Tone::Good),
+                ("…", Tone::Quiet),
+                ("Failing", Tone::Bad)
+            ]
+        );
+        assert_eq!(trigger_tone(Some(&seeded)), Some(Tone::Bad));
+        summary.checks = None;
+        assert_eq!(trigger_tone(Some(&Standing::seeded(&summary))), None);
+    }
+
+    #[test]
     fn the_trigger_dot_says_the_loudest_thing() {
-        let tone = |review, checks| trigger_tone(Some(&status(PrState::Open, review, checks)));
+        let tone = |review, checks| trigger_tone(Some(&answered(PrState::Open, review, checks)));
         assert_eq!(trigger_tone(None), None);
         assert_eq!(tone(None, None), None);
         assert_eq!(tone(None, Some(CheckState::Passing)), Some(Tone::Good));

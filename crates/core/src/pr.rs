@@ -8,8 +8,9 @@
 //! [`Stack`] is the resolved stack, its [`StackMember`]s carrying both
 //! halves, [`StackSummary`] the row a list shows,
 //! [`parse_stack`] reads the stack's own number off the command line,
-//! [`open_stack`] turns it into that one comparison, and [`ownership`]
-//! says which member each commit belongs to.
+//! [`open_stack`] turns it into that one comparison, [`open_member`]
+//! opens one member alone from what that read already answered, and
+//! [`ownership`] says which member each commit belongs to.
 
 use std::collections::{HashMap, HashSet};
 
@@ -231,19 +232,58 @@ pub fn open(
     let pull = forge
         .pull_request(argument)
         .map_err(|error| error.to_string())?;
-    if let FetchMode::OnDemand = fetch {
-        fetch_missing(backend, &[&pull], &pull)?;
+    let comparison = held(backend, &pull, mode, fetch)?;
+    Ok((pull, comparison))
+}
+
+/// Opens one member of a stack from the pull request the stack read
+/// already answered, which costs no forge call at all: that read carries
+/// every member's oids, branches and state, so asking for them again
+/// would buy back what is in hand.
+///
+/// The forge is still there for the one case the held answer cannot
+/// cover: the member's commits are not in the repository. A stack
+/// resolved by the command line never fetched, so that is reachable, and
+/// a broken review would be the alternative.
+pub fn open_member(
+    backend: &dyn ReviewBackend,
+    forge: &dyn Forge,
+    pull: &PullRequest,
+    mode: CompareMode,
+) -> Result<(PullRequest, Comparison), String> {
+    if let Ok(comparison) = held(backend, pull, mode, FetchMode::Never) {
+        return Ok((pull.clone(), comparison));
     }
-    let target_rev = endpoints(backend, &pull, &pull, fetch)?;
-    let comparison = Comparison {
+    let argument = PrArgument {
+        number: pull.number,
+        // The stack read's own URL, which pins host and repository the
+        // way the review was resolved; a bare number would leave that to
+        // the working directory's remotes.
+        url: Some(pull.url.clone()),
+    };
+    open(backend, forge, &argument, mode, FetchMode::OnDemand)
+}
+
+/// The comparison a pull request in hand is reviewed as: [`open`] without
+/// the lookup, so both ways in pin their ends by the one rule.
+fn held(
+    backend: &dyn ReviewBackend,
+    pull: &PullRequest,
+    mode: CompareMode,
+    fetch: FetchMode,
+) -> Result<Comparison, String> {
+    if let FetchMode::OnDemand = fetch {
+        fetch_missing(backend, &[pull], pull)?;
+    }
+    let target_rev = endpoints(backend, pull, pull, fetch)?;
+    Ok(Comparison {
         source: pull.source_branch.clone(),
         target: pull.target_branch.clone(),
         source_rev: Some(pull.source_commit.clone()),
         target_rev: Some(target_rev),
         mode,
         uncommitted: false,
-    };
-    Ok((pull, comparison))
+    })
 }
 
 /// Resolves a named stack into the one comparison the whole stack is

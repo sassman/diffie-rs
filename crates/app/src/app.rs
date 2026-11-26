@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use diffie_core::forge::Forge;
-use diffie_core::pr::{PullStatus, Stack};
+use diffie_core::pr::Stack;
 use diffie_core::review::{
     ArchiveFile, NewComment, Placement, ReactionKind, ReviewFile, ReviewInput, ReviewSet,
     ReviewState, Side, as_prompt, map_line, orphan_patches, place,
@@ -982,13 +982,18 @@ struct PerReview {
     /// Replacing it drops the refresh in flight, so answers never land
     /// out of order.
     _stack_status: Task<()>,
+    /// The stack's standing came out of the read this review opened on,
+    /// so its first load has nothing to ask the forge for. That load
+    /// clears it: every reload after it wants the present.
+    stack_read_fresh: bool,
     /// How the last publish went, and whether that was a failure. Its own
     /// line beside `notice`, which the next review save clears - and every
     /// publish ends in one.
     publish_status: Option<(SharedString, bool)>,
-    /// Where the pull request stands, as last answered by the forge. Kept
+    /// Where the pull request stands: seeded from the stack read a
+    /// member hop came out of, then as last answered by the forge. Kept
     /// through a failed refresh: an older answer beats none.
-    pull_status: Option<PullStatus>,
+    pull_status: Option<pull::Standing>,
     /// Why the last refresh failed, in the forge's words.
     pull_status_error: Option<SharedString>,
     /// Replacing it drops the refresh in flight, so answers never land
@@ -1100,6 +1105,10 @@ impl PerReview {
     /// The state every review starts from, before its first load.
     fn fresh(comparison: Comparison, pull: Option<Pull>, stack: Option<stack::Stacked>) -> Self {
         Self {
+            // A member hop opens on what the stack read answered about
+            // that member, so its rows say something true at once.
+            pull_status: stack.as_ref().and_then(stack::Stacked::member_standing),
+            stack_read_fresh: stack.is_some(),
             comparison,
             pull,
             stack,
@@ -1107,7 +1116,6 @@ impl PerReview {
             stack_status_error: None,
             _stack_status: Task::ready(()),
             publish_status: None,
-            pull_status: None,
             pull_status_error: None,
             _pull_status: Task::ready(()),
             scope: ScopeKind::NewForMe,
@@ -1444,7 +1452,11 @@ impl ReviewApp {
         // Whoever reloads wants the present: the pull request may have been
         // merged, approved or turned red since the last look.
         self.refresh_pull_status(cx);
-        self.refresh_stack_status(cx);
+        // Except the stack read this review opened on: that one is the
+        // present, and asking for it again is what made a member hop drag.
+        if !std::mem::take(&mut self.review.stack_read_fresh) {
+            self.refresh_stack_status(cx);
+        }
         let extend_picks = self.review.scope == ScopeKind::Custom
             && self
                 .review
