@@ -1018,6 +1018,57 @@ Decided (owner, 2026-11-24):
   button's menu. They cannot be reached by navigating to the member:
   that loads the member's own review file, which does not hold the
   comments written in the stack view.
+- **The stack button replaces the pull-request button while the whole
+  stack is in view** (owner, 2026-11-25), at the same metrics and in the
+  same place, labelled with the stack's number and size, or the member
+  count alone when there is no stack number. One button there, because
+  `#N` would otherwise be ambiguous between a member and the stack;
+  member identity lives inside the menu. The title bar itself is
+  untouched: it keeps showing the branch pair, as it does for every
+  review. The menu heads with the stack and the branch it lands on, then
+  lists the members in the pull-request picker's row style, each opening
+  that member as its own `--pr` review, with a row above them that
+  resolves the whole stack by its number again.
+- **A member opened from the stack keeps both buttons** (owner,
+  2026-11-25): its own pull-request button, which publishes and approves
+  as in any `--pr` review, and the stack button, whose menu is the way
+  back out and ticks the member in view. The ambiguity that makes the
+  stack view one button does not arise here - the two name different
+  things and both are right. A pull request reached any other way, from
+  the command line or the palette's picker, carries no stack and keeps
+  one button; nothing goes looking for a stack behind it. Which part of
+  a stack is in view is recorded, not inferred: a stack review's own
+  pull request is the latest member, so opening that member would
+  otherwise read as the stack itself.
+- **A stack of one shows the button, reading 1**, with its single group
+  (owner, 2026-11-25). A one-member stack is how a stack starts, and
+  hiding the button would make `--stack` look like it did nothing.
+- **A reload refreshes member states and never moves the pins** (owner,
+  2026-11-25). It re-reads the stack from the forge in one query and uses
+  the answer only for what is displayed: each member's state, draft flag
+  and checks. The resolved membership and the comparison's pinned ends
+  stay as the review was opened, because re-resolving mid-review would
+  change which commits are under the reviewer's eye and silently void a
+  Custom selection. A membership that has moved on is said on the button
+  in one word and nothing more; taking the new shape needs an explicit
+  reopen. A failed refresh keeps the older answer and adds a line saying
+  so, as the pull request's status does.
+- **Hopping between members asks the forge for nothing** (owner,
+  2026-11-25, after feeling the hop drag on a real stack). The stack read
+  already answered every member's oids, branches, state and checks, so
+  opening one of them resolves from that answer: no pull-request lookup,
+  no second stack read, and no fetch, since that read's one fetch already
+  carried every member's refspec. What is left is the local git the new
+  comparison genuinely needs. The member's state and checks are seeded
+  from the same answer so its rows say something true at once, while its
+  review decision - which the stack read does not carry - stays unread
+  until the background refresh answers it, rather than being guessed. The
+  held answer is not trusted blindly: a member whose commits are not in
+  the repository falls back to the resolving open and its fetch, because
+  a stack resolved by the command line never fetched. A pull request
+  reached from the palette holds nothing and still resolves through the
+  forge. Nothing is cached: an answer in hand is used once instead of
+  being thrown away and asked for again.
 - **GitHub is reached through `octocrab` eventually, as its own epic**,
   not as part of this one. It buys distribution, since a shipped app
   cannot assume `gh` on `PATH`, and forge test coverage on Windows, where
@@ -1038,12 +1089,6 @@ Assumed (working defaults):
   group can arrive if the staleness question changes the pin.
 - The latest member's group owns the "Uncommitted changes" row, which is
   reachable from the first group only.
-- The stack button sits beside the pull-request button at the same
-  metrics, labelled with the stack's number and size, or the member count
-  alone when there is no stack number. Its menu lists the members in the
-  pull-request picker's row style, each opening that member as a plain
-  `--pr` review, with a row back to the whole stack so navigating in is
-  not a one-way door.
 - The fifty-pull-request cap stays. It is a product decision, and the
   stack list groups one page rather than paging the archive.
 
@@ -1053,12 +1098,8 @@ Open:
   the native stack is unavailable. Deferred, with its edge cases
   recorded. The tool body markers `ghstack`, `spr`, Sapling and `av`
   write are the weaker signal again, and Graphite writes none.
-- What the title bar reads for a stack, whose source and target are no
-  member's comparison, and whether swapping stays offered.
-- Whether a reload re-resolves the stack, or the button only reports that
-  member states may be stale.
-- What a stack of one does: hide the button, show one group, or fall back
-  to a `--pr` review.
+- Whether swapping a stack's direction stays offered, now that the title
+  bar reads the branch pair for a stack as for any other review.
 - Whether a verdict should ever apply across a whole stack.
 - Whether a stack's comments belong in one review file or one per
   member. They land in the latest branch's file today, because a review

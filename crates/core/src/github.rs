@@ -20,7 +20,7 @@ use crate::forge::{
 };
 use crate::pr::{
     CheckState, Checks, PrArgument, PrList, PrState, PrSummary, PullRequest, PullStatus,
-    ReviewDecision, Stack, StackSummary,
+    ReviewDecision, Stack, StackMember, StackSummary,
 };
 use crate::review::{ReactionKind, Side};
 use crate::time::parse_rfc3339;
@@ -65,17 +65,21 @@ const UPDATE_COMMENT: &str = "mutation($comment:ID!,$body:String!){\
 const ADD_REACTION: &str = "mutation($subject:ID!,$content:ReactionContent!){\
     addReaction(input:{subjectId:$subject,content:$content}){reaction{content}}}";
 /// GitHub's native stack, read from any member: one query carries every
-/// field a [`PullRequest`] needs, so resolving a stack costs no second
-/// call per member. A number that names no pull request comes back as a
-/// GraphQL error, which gh fails the call on, so the two answers stay
-/// apart: an `Err` is "no such pull request", empty output "in no stack".
+/// field a [`PullRequest`] needs and every field its row needs, so
+/// resolving a stack costs no second call per member. A number that names
+/// no pull request comes back as a GraphQL error, which gh fails the call
+/// on, so the two answers stay apart: an `Err` is "no such pull request",
+/// empty output "in no stack".
 const STACK: &str = "query($owner:String!,$name:String!,$number:Int!,$after:String){\
     repository(owner:$owner,name:$name){pullRequest(number:$number){stack{number \
     entries(first:50,after:$after){pageInfo{hasNextPage endCursor}nodes{position \
     pullRequest{number id url state headRefName headRefOid baseRefName baseRefOid \
-    isCrossRepository headRepositoryOwner{login}}}}}}}}";
+    isCrossRepository headRepositoryOwner{login} title isDraft updatedAt \
+    author{login}commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}}}}";
 /// Nothing at all for a pull request in no stack. Then the page's cursor
-/// and the stack's number on one line, and one `@tsv` line per member.
+/// and the stack's number on one line, and one `@tsv` line per member:
+/// the pull request's own columns, then the row's - the rollup as one
+/// `;;<state>` triple, since GraphQL folds the checks for us.
 const STACK_ROWS: &str = ".data.repository.pullRequest.stack as $stack | \
     if $stack == null then empty else \
     ([($stack.entries.pageInfo.hasNextPage|tostring), \
@@ -84,7 +88,11 @@ const STACK_ROWS: &str = ".data.repository.pullRequest.stack as $stack | \
     .pullRequest.id, .pullRequest.url, .pullRequest.state, .pullRequest.headRefName, \
     .pullRequest.headRefOid, .pullRequest.baseRefName, .pullRequest.baseRefOid, \
     (.pullRequest.isCrossRepository|tostring), \
-    (.pullRequest.headRepositoryOwner.login // \"\")] | @tsv) end";
+    (.pullRequest.headRepositoryOwner.login // \"\"), \
+    .pullRequest.title, (.pullRequest.author.login // \"\"), .pullRequest.updatedAt, \
+    (.pullRequest.isDraft|tostring), \
+    (.pullRequest.commits.nodes[0].commit.statusCheckRollup.state // \"\" | \
+    if . == \"\" then \"\" else \";;\" + . end)] | @tsv) end";
 /// One page of pull requests, each with the stack it belongs to: the
 /// stack list is that page grouped, not a walk of the archive.
 const STACKS: &str = "query($owner:String!,$name:String!,$first:Int!){\
@@ -94,8 +102,7 @@ const STACKS: &str = "query($owner:String!,$name:String!,$first:Int!){\
     commits(last:1){nodes{commit{statusCheckRollup{state}}}} \
     stackEntry{position}stack{number baseRefName}}}}}";
 /// The stack's number, its base branch and the member's position, then
-/// the columns [`parse_summary`] reads - the rollup as one `;;<state>`
-/// triple, since GraphQL folds the checks for us.
+/// the columns [`parse_summary`] reads.
 const STACK_LIST: &str = ".data.repository.pullRequests.nodes[] | \
     select(.stack != null) | [(.stack.number|tostring), .stack.baseRefName, \
     (.stackEntry.position|tostring), (.number|tostring), .title, \
@@ -208,7 +215,7 @@ impl GitHubCli {
     /// through REST and must not pay for a second repository lookup.
     fn stack_of_pull(&self, repo: &Repo, number: u64) -> Result<Option<Stack>, ForgeError> {
         let mut stack = None;
-        let mut members: Vec<(u64, PullRequest)> = Vec::new();
+        let mut members: Vec<(u64, StackMember)> = Vec::new();
         let mut after = String::new();
         loop {
             let mut variables = vec![
@@ -246,7 +253,7 @@ impl GitHubCli {
         members.sort_by_key(|(position, _)| std::cmp::Reverse(*position));
         Ok(Some(Stack {
             number: stack,
-            pulls: members.into_iter().map(|(_, pull)| pull).collect(),
+            members: members.into_iter().map(|(_, member)| member).collect(),
         }))
     }
 
@@ -669,9 +676,9 @@ fn repo_of(url: &str) -> Option<Repo> {
     })
 }
 
-/// One stack entry's `@tsv` line: the member's position and the pull
-/// request itself.
-fn parse_member(line: &str) -> Result<(u64, PullRequest), ForgeError> {
+/// One stack entry's `@tsv` line: the member's position, the pull request
+/// itself, and the row a list draws for it.
+fn parse_member(line: &str) -> Result<(u64, StackMember), ForgeError> {
     let unexpected = || ForgeError::Output(line.to_string());
     let mut columns = line.split('\t');
     let mut column = || columns.next().ok_or_else(unexpected);
@@ -689,19 +696,41 @@ fn parse_member(line: &str) -> Result<(u64, PullRequest), ForgeError> {
     if id.is_empty() || url.is_empty() || source_commit.is_empty() || target_commit.is_empty() {
         return Err(unexpected());
     }
+    let head_owner = untsv(column()?);
+    let (title, author) = (untsv(column()?), untsv(column()?));
+    let updated = parse_rfc3339(column()?).ok_or_else(unexpected)?;
+    let draft = match column()? {
+        "true" => true,
+        "false" => false,
+        _ => return Err(unexpected()),
+    };
+    let checks = parse_rollup(column()?);
     Ok((
         position,
-        PullRequest {
-            number,
-            id,
-            url,
-            state,
-            source_branch,
-            source_commit,
-            target_branch,
-            target_commit,
-            cross_repository,
-            head_owner: untsv(column().unwrap_or_default()),
+        StackMember {
+            summary: PrSummary {
+                number,
+                title,
+                author,
+                updated,
+                state,
+                draft,
+                checks,
+                head: source_branch.clone(),
+                base: target_branch.clone(),
+            },
+            pull: PullRequest {
+                number,
+                id,
+                url,
+                state,
+                source_branch,
+                source_commit,
+                target_branch,
+                target_commit,
+                cross_repository,
+                head_owner,
+            },
         },
     ))
 }
@@ -733,15 +762,7 @@ fn parse_summary(line: &str) -> Result<PrSummary, ForgeError> {
     };
     let state = parse_state(column()?).ok_or_else(unexpected)?;
     let (head, base) = (untsv(column()?), untsv(column()?));
-    let checks = column()?
-        .split(',')
-        .filter(|check| !check.is_empty())
-        .map(|check| {
-            let mut words = check.split(';');
-            let mut word = || words.next().unwrap_or_default();
-            check_verdict((word(), word(), word()))
-        })
-        .fold(None, |folded, check| Some(fold_verdict(folded, check)));
+    let checks = parse_rollup(column()?);
     Ok(PrSummary {
         number,
         title,
@@ -753,6 +774,21 @@ fn parse_summary(line: &str) -> Result<PrSummary, ForgeError> {
         head,
         base,
     })
+}
+
+/// A row's rollup column - `status;conclusion;state` triples, comma
+/// separated - folded to the one verdict a row shows. `None` is a head
+/// commit with no checks at all, which an empty column says.
+fn parse_rollup(column: &str) -> Option<CheckState> {
+    column
+        .split(',')
+        .filter(|check| !check.is_empty())
+        .map(|check| {
+            let mut words = check.split(';');
+            let mut word = || words.next().unwrap_or_default();
+            check_verdict((word(), word(), word()))
+        })
+        .fold(None, |folded, check| Some(fold_verdict(folded, check)))
 }
 
 /// Undoes `@tsv`'s escaping, so a title shows as typed.
@@ -1148,16 +1184,18 @@ esac
     }
 
     /// One stack entry as the query's jq prints it, for the fake's
-    /// `printf`: the escapes are the shell's to expand.
+    /// `printf`: the escapes are the shell's to expand. The row columns
+    /// trail the pull request's, the checks column empty.
     fn entry(position: u64, number: u64, head: &str, base: &str) -> String {
         format!(
             "{position}\\t{number}\\tPR_{number}\\thttps://github.com/o/r/pull/{number}\\tOPEN\\t\
-             {head}\\th{number}\\t{base}\\tb{number}\\tfalse\\to"
+             {head}\\th{number}\\t{base}\\tb{number}\\tfalse\\to\\t\
+             Member {number}\\tada\\t2026-11-24T10:00:00Z\\tfalse\\t"
         )
     }
 
-    fn numbers(pulls: &[PullRequest]) -> Vec<u64> {
-        pulls.iter().map(|pull| pull.number).collect()
+    fn numbers(members: &[StackMember]) -> Vec<u64> {
+        members.iter().map(|member| member.pull.number).collect()
     }
 
     #[test]
@@ -1172,17 +1210,39 @@ esac
         assert_eq!(stack.number, Some(42));
         // Position 1 is the member nearest the base branch, and our model
         // leads with the latest one.
-        assert_eq!(numbers(&stack.pulls), [2, 1]);
-        assert_eq!(stack.pulls[0].source_branch, "feat/b");
-        assert_eq!(stack.pulls[0].source_commit, "h2");
-        assert_eq!(stack.pulls[1].target_branch, "main");
-        assert_eq!(stack.pulls[1].target_commit, "b1");
+        assert_eq!(numbers(&stack.members), [2, 1]);
+        assert_eq!(stack.members[0].pull.source_branch, "feat/b");
+        assert_eq!(stack.members[0].pull.source_commit, "h2");
+        assert_eq!(stack.members[1].pull.target_branch, "main");
+        assert_eq!(stack.members[1].pull.target_commit, "b1");
+        // The same query answers the row the menu draws, so a member
+        // costs no call of its own.
+        let row = &stack.members[0].summary;
+        assert_eq!(row.title, "Member 2");
+        assert_eq!(row.author, "ada");
+        assert!(row.updated > 0, "{}", row.updated);
+        assert!(!row.draft);
+        assert_eq!(row.checks, None);
+        assert_eq!((row.head.as_str(), row.base.as_str()), ("feat/b", "feat/a"));
         // A bare number names no repository, so gh is asked which one
         // this checkout speaks for before the query can name it.
         let calls = gh.calls();
         assert!(calls[0].starts_with("repo view"), "{calls:?}");
         assert!(calls[1].contains("--hostname github.com"), "{calls:?}");
         assert!(calls[1].contains("owner=o"), "{calls:?}");
+    }
+
+    #[test]
+    fn a_members_check_rollup_reaches_its_row() {
+        // GraphQL folds the rollup, so the column is one bare
+        // `;;<state>` triple rather than a list of checks.
+        let rows = format!(
+            "false\\t\\t42\\n{};;FAILURE\\n",
+            entry(1, 1, "feat/a", "main")
+        );
+        let gh = FakeGh::new(&format!("  *entries*) printf '{rows}' ;;"));
+        let stack = gh.forge().stack(&numbered(1)).unwrap().unwrap();
+        assert_eq!(stack.members[0].summary.checks, Some(CheckState::Failing));
     }
 
     #[test]
@@ -1197,7 +1257,7 @@ esac
             })
             .unwrap()
             .unwrap();
-        assert_eq!(numbers(&stack.pulls), [7]);
+        assert_eq!(numbers(&stack.members), [7]);
         // The URL answers for host, owner and repository, so nothing is
         // asked of the checkout.
         let calls = gh.calls();
@@ -1216,7 +1276,7 @@ esac
             "  *stacks/42*) echo 1 ;;\n  *entries*) printf '{rows}' ;;"
         ));
         let stack = gh.forge().stack_numbered(42).unwrap().unwrap();
-        assert_eq!(numbers(&stack.pulls), [1]);
+        assert_eq!(numbers(&stack.members), [1]);
         // REST names a member, then the member read resolves the stack -
         // never a scan of the capped pull-request list.
         let calls = gh.calls();
@@ -1250,7 +1310,7 @@ esac
             "  *after=CURSOR*) printf '{second}' ;;\n  *entries*) printf '{first}' ;;"
         ));
         let stack = gh.forge().stack(&numbered(1)).unwrap().unwrap();
-        assert_eq!(numbers(&stack.pulls), [2, 1]);
+        assert_eq!(numbers(&stack.members), [2, 1]);
         // The repository lookup, then one call per page.
         let calls = gh.calls();
         assert_eq!(calls.len(), 3, "{calls:?}");

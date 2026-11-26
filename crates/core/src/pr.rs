@@ -5,10 +5,12 @@
 //! picker alike.
 //!
 //! `--stack` reviews a whole stack of pull requests as one comparison.
-//! [`Stack`] is the resolved stack, [`StackSummary`] the row a list shows,
+//! [`Stack`] is the resolved stack, its [`StackMember`]s carrying both
+//! halves, [`StackSummary`] the row a list shows,
 //! [`parse_stack`] reads the stack's own number off the command line,
-//! [`open_stack`] turns it into that one comparison, and [`ownership`]
-//! says which member each commit belongs to.
+//! [`open_stack`] turns it into that one comparison, [`open_member`]
+//! opens one member alone from what that read already answered, and
+//! [`ownership`] says which member each commit belongs to.
 
 use std::collections::{HashMap, HashSet};
 
@@ -138,17 +140,28 @@ pub struct StackSummary {
     pub number: Option<u64>,
     /// The branch the first member merges into.
     pub base: String,
-    /// Latest first, like [`Stack::pulls`].
+    /// Latest first, like [`Stack::members`].
     pub members: Vec<PrSummary>,
 }
 
-/// A resolved stack: every member carries its oids.
+/// A resolved stack: every member carries its oids and its row.
 #[derive(Clone, Debug)]
 pub struct Stack {
     pub number: Option<u64>,
     /// Latest first: the member the comparison's source comes from leads,
     /// the one nearest the target branch is last.
-    pub pulls: Vec<PullRequest>,
+    pub members: Vec<StackMember>,
+}
+
+/// One resolved member: the pull request the review is pinned to, and the
+/// row a list draws for it. Both come out of the one stack read, because
+/// the stack menu shows titles, authors, ages and check verdicts that no
+/// [`PullRequest`] carries, and a field per member would mean a call per
+/// member.
+#[derive(Clone, Debug)]
+pub struct StackMember {
+    pub pull: PullRequest,
+    pub summary: PrSummary,
 }
 
 /// Which member of a stack owns each commit of the comparison.
@@ -160,7 +173,7 @@ pub struct Stack {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ownership {
     /// One group per member, latest first, so a group shares its index
-    /// with [`Stack::pulls`].
+    /// with [`Stack::members`].
     pub groups: Vec<MemberCommits>,
     /// The commits no member contains, in the commit list's order. They
     /// can sit anywhere in it, not only at its end.
@@ -219,19 +232,58 @@ pub fn open(
     let pull = forge
         .pull_request(argument)
         .map_err(|error| error.to_string())?;
-    if let FetchMode::OnDemand = fetch {
-        fetch_missing(backend, std::slice::from_ref(&pull), &pull)?;
+    let comparison = held(backend, &pull, mode, fetch)?;
+    Ok((pull, comparison))
+}
+
+/// Opens one member of a stack from the pull request the stack read
+/// already answered, which costs no forge call at all: that read carries
+/// every member's oids, branches and state, so asking for them again
+/// would buy back what is in hand.
+///
+/// The forge is still there for the one case the held answer cannot
+/// cover: the member's commits are not in the repository. A stack
+/// resolved by the command line never fetched, so that is reachable, and
+/// a broken review would be the alternative.
+pub fn open_member(
+    backend: &dyn ReviewBackend,
+    forge: &dyn Forge,
+    pull: &PullRequest,
+    mode: CompareMode,
+) -> Result<(PullRequest, Comparison), String> {
+    if let Ok(comparison) = held(backend, pull, mode, FetchMode::Never) {
+        return Ok((pull.clone(), comparison));
     }
-    let target_rev = endpoints(backend, &pull, &pull, fetch)?;
-    let comparison = Comparison {
+    let argument = PrArgument {
+        number: pull.number,
+        // The stack read's own URL, which pins host and repository the
+        // way the review was resolved; a bare number would leave that to
+        // the working directory's remotes.
+        url: Some(pull.url.clone()),
+    };
+    open(backend, forge, &argument, mode, FetchMode::OnDemand)
+}
+
+/// The comparison a pull request in hand is reviewed as: [`open`] without
+/// the lookup, so both ways in pin their ends by the one rule.
+fn held(
+    backend: &dyn ReviewBackend,
+    pull: &PullRequest,
+    mode: CompareMode,
+    fetch: FetchMode,
+) -> Result<Comparison, String> {
+    if let FetchMode::OnDemand = fetch {
+        fetch_missing(backend, &[pull], pull)?;
+    }
+    let target_rev = endpoints(backend, pull, pull, fetch)?;
+    Ok(Comparison {
         source: pull.source_branch.clone(),
         target: pull.target_branch.clone(),
         source_rev: Some(pull.source_commit.clone()),
         target_rev: Some(target_rev),
         mode,
         uncommitted: false,
-    };
-    Ok((pull, comparison))
+    })
 }
 
 /// Resolves a named stack into the one comparison the whole stack is
@@ -245,11 +297,13 @@ pub fn open_stack(
     fetch: FetchMode,
 ) -> Result<(Stack, Comparison), String> {
     let stack = resolve_stack(forge, number)?;
-    let (Some(latest), Some(first)) = (stack.pulls.first(), stack.pulls.last()) else {
+    let (Some(latest), Some(first)) = (stack.members.first(), stack.members.last()) else {
         return Err("the stack has no pull requests to review.".to_string());
     };
+    let (latest, first) = (&latest.pull, &first.pull);
     if let FetchMode::OnDemand = fetch {
-        fetch_missing(backend, &stack.pulls, first)?;
+        let heads: Vec<&PullRequest> = stack.members.iter().map(|member| &member.pull).collect();
+        fetch_missing(backend, &heads, first)?;
     }
     let target_rev = endpoints(backend, latest, first, fetch)?;
     let comparison = Comparison {
@@ -276,7 +330,7 @@ fn resolve_stack(forge: &dyn Forge, number: u64) -> Result<Stack, String> {
         Ok(None) => {
             return Ok(Stack {
                 number: Some(number),
-                pulls: Vec::new(),
+                members: Vec::new(),
             });
         }
         Err(error) => error.to_string(),
@@ -436,7 +490,7 @@ pub fn remote_ref(
 /// action, not one per stack member.
 fn fetch_missing(
     backend: &dyn ReviewBackend,
-    pulls: &[PullRequest],
+    pulls: &[&PullRequest],
     base: &PullRequest,
 ) -> Result<(), String> {
     let mut head_missing = false;
@@ -518,12 +572,12 @@ pub fn ownership(
 ) -> Result<Ownership, String> {
     let ids: Vec<Oid> = commits.iter().map(|commit| commit.id.clone()).collect();
     let listed: HashSet<&str> = ids.iter().map(Oid::as_str).collect();
-    let mut groups = Vec::with_capacity(stack.pulls.len());
+    let mut groups = Vec::with_capacity(stack.members.len());
     let mut claimed: HashSet<Oid> = HashSet::new();
     let mut stale = Vec::new();
     // Lowest first, so the member nearest the target branch claims a
     // commit before any member above it sees it.
-    for pull in stack.pulls.iter().rev() {
+    for pull in stack.members.iter().rev().map(|member| &member.pull) {
         let mut group = MemberCommits {
             number: pull.number,
             branch: pull.source_branch.clone(),
@@ -568,17 +622,17 @@ pub fn ownership(
             .collect(),
         groups,
         stale,
-        off_chain: off_chain(&stack.pulls),
+        off_chain: off_chain(&stack.members),
     })
 }
 
 /// The members whose base branch does not name the member below them.
-/// `pulls` is latest first, as [`Stack::pulls`] is.
-fn off_chain(pulls: &[PullRequest]) -> Vec<u64> {
-    pulls
+/// `members` is latest first, as [`Stack::members`] is.
+fn off_chain(members: &[StackMember]) -> Vec<u64> {
+    members
         .windows(2)
-        .filter(|link| link[0].target_branch != link[1].source_branch)
-        .map(|link| link[0].number)
+        .filter(|link| link[0].pull.target_branch != link[1].pull.source_branch)
+        .map(|link| link[0].pull.number)
         .collect()
 }
 
@@ -726,8 +780,10 @@ mod tests {
         }
     }
 
-    fn member(number: u64, head: &str, base: &str) -> PullRequest {
-        PullRequest {
+    /// Only the chain matters here, so the row is the barest one that
+    /// still names the member.
+    fn member(number: u64, head: &str, base: &str) -> StackMember {
+        let pull = PullRequest {
             number,
             id: format!("PR_{number}"),
             url: format!("https://github.com/o/r/pull/{number}"),
@@ -738,28 +794,40 @@ mod tests {
             target_commit: "b".repeat(40),
             cross_repository: false,
             head_owner: "o".into(),
-        }
+        };
+        let summary = PrSummary {
+            number,
+            title: format!("#{number}"),
+            author: "ada".into(),
+            updated: 0,
+            state: pull.state,
+            draft: false,
+            checks: None,
+            head: head.into(),
+            base: base.into(),
+        };
+        StackMember { pull, summary }
     }
 
     #[test]
     fn a_chain_of_members_reports_no_broken_link() {
-        let pulls = vec![
+        let members = vec![
             member(3, "feat/c", "feat/b"),
             member(2, "feat/b", "feat/a"),
             member(1, "feat/a", "main"),
         ];
-        assert_eq!(off_chain(&pulls), Vec::<u64>::new());
+        assert_eq!(off_chain(&members), Vec::<u64>::new());
     }
 
     #[test]
     fn a_member_based_past_the_one_below_is_off_the_chain() {
         // #3 is based on main, so the list is no chain and the groups
         // under it cannot be trusted to be ordered base-first.
-        let pulls = vec![
+        let members = vec![
             member(3, "feat/c", "main"),
             member(2, "feat/b", "feat/a"),
             member(1, "feat/a", "main"),
         ];
-        assert_eq!(off_chain(&pulls), vec![3]);
+        assert_eq!(off_chain(&members), vec![3]);
     }
 }

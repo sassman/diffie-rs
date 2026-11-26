@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use diffie_core::forge::Forge;
-use diffie_core::pr::PullStatus;
+use diffie_core::pr::Stack;
 use diffie_core::review::{
     ArchiveFile, NewComment, Placement, ReactionKind, ReviewFile, ReviewInput, ReviewSet,
     ReviewState, Side, as_prompt, map_line, orphan_patches, place,
@@ -64,6 +64,7 @@ use gpui_kit::{
 mod palette;
 mod pr_picker;
 mod pull;
+mod stack;
 mod symbols;
 pub use pull::Pull;
 
@@ -708,6 +709,8 @@ pub struct Subject {
     pub worktree: Option<SharedString>,
     pub comparison: Comparison,
     pub pull: Option<Pull>,
+    /// The stack the comparison spans (`--stack`), every member resolved.
+    pub stack: Option<Stack>,
 }
 
 /// Where a comment sits in the current view.
@@ -964,13 +967,33 @@ impl Default for FileView {
 struct PerReview {
     comparison: Comparison,
     pull: Option<Pull>,
+    /// The stack this review belongs to - the whole stack as one
+    /// comparison, or the member of it in view - as it was resolved when
+    /// the review opened. Its membership and the comparison's pinned ends
+    /// never move afterwards: re-resolving mid-review would change which
+    /// commits are under the reviewer's eye and void a Custom selection.
+    stack: Option<stack::Stacked>,
+    /// What a refresh last learned about the members: their states, and
+    /// whether the stack's membership has moved on. Display only, for
+    /// the same reason.
+    stack_status: Option<stack::StackStatus>,
+    /// Why the last stack refresh failed, in the forge's words.
+    stack_status_error: Option<SharedString>,
+    /// Replacing it drops the refresh in flight, so answers never land
+    /// out of order.
+    _stack_status: Task<()>,
+    /// The stack's standing came out of the read this review opened on,
+    /// so its first load has nothing to ask the forge for. That load
+    /// clears it: every reload after it wants the present.
+    stack_read_fresh: bool,
     /// How the last publish went, and whether that was a failure. Its own
     /// line beside `notice`, which the next review save clears - and every
     /// publish ends in one.
     publish_status: Option<(SharedString, bool)>,
-    /// Where the pull request stands, as last answered by the forge. Kept
+    /// Where the pull request stands: seeded from the stack read a
+    /// member hop came out of, then as last answered by the forge. Kept
     /// through a failed refresh: an older answer beats none.
-    pull_status: Option<PullStatus>,
+    pull_status: Option<pull::Standing>,
     /// Why the last refresh failed, in the forge's words.
     pull_status_error: Option<SharedString>,
     /// Replacing it drops the refresh in flight, so answers never land
@@ -1080,12 +1103,19 @@ struct PerReview {
 
 impl PerReview {
     /// The state every review starts from, before its first load.
-    fn fresh(comparison: Comparison, pull: Option<Pull>) -> Self {
+    fn fresh(comparison: Comparison, pull: Option<Pull>, stack: Option<stack::Stacked>) -> Self {
         Self {
+            // A member hop opens on what the stack read answered about
+            // that member, so its rows say something true at once.
+            pull_status: stack.as_ref().and_then(stack::Stacked::member_standing),
+            stack_read_fresh: stack.is_some(),
             comparison,
             pull,
+            stack,
+            stack_status: None,
+            stack_status_error: None,
+            _stack_status: Task::ready(()),
             publish_status: None,
-            pull_status: None,
             pull_status_error: None,
             _pull_status: Task::ready(()),
             scope: ScopeKind::NewForMe,
@@ -1265,6 +1295,7 @@ impl ReviewApp {
             worktree,
             comparison,
             pull,
+            stack,
         } = subject;
         window.set_window_title(&match &worktree {
             Some(name) => format!("{repository} ({name}) — review"),
@@ -1333,7 +1364,8 @@ impl ReviewApp {
             backend,
             repository,
             worktree,
-            review: PerReview::fresh(comparison, pull),
+            // The command line only ever opens the whole stack.
+            review: PerReview::fresh(comparison, pull, stack.map(stack::Stacked::whole)),
             forge,
             publishing: false,
             repo_state: RepoState::Idle,
@@ -1420,6 +1452,11 @@ impl ReviewApp {
         // Whoever reloads wants the present: the pull request may have been
         // merged, approved or turned red since the last look.
         self.refresh_pull_status(cx);
+        // Except the stack read this review opened on: that one is the
+        // present, and asking for it again is what made a member hop drag.
+        if !std::mem::take(&mut self.review.stack_read_fresh) {
+            self.refresh_stack_status(cx);
+        }
         let extend_picks = self.review.scope == ScopeKind::Custom
             && self
                 .review
@@ -4002,8 +4039,28 @@ impl ReviewApp {
                         // stay out, so the native double click still works
                         // there.
                         .on_click(|_, _, cx| cx.stop_propagation())
-                        .when_some(self.review.pull.as_ref(), |controls, pull| {
-                            controls.child(self.render_pull_menu(pull, cx))
+                        // The whole stack carries one button, so `#N` can
+                        // only mean the stack; one member of it carries
+                        // both, the member's own first (owner,
+                        // 2026-11-25).
+                        .map(|controls| {
+                            let buttons = stack::title_buttons(
+                                self.review.stack.as_ref(),
+                                self.review.pull.is_some(),
+                            );
+                            controls
+                                .when_some(
+                                    self.review.pull.as_ref().filter(|_| buttons.pull()),
+                                    |controls, pull| {
+                                        controls.child(self.render_pull_menu(pull, cx))
+                                    },
+                                )
+                                .when_some(
+                                    self.review.stack.as_ref().filter(|_| buttons.stack()),
+                                    |controls, stacked| {
+                                        controls.child(self.render_stack_menu(stacked, cx))
+                                    },
+                                )
                         })
                         // Review or Conflicts, while an operation is
                         // interrupted or a pull-request forecast is there

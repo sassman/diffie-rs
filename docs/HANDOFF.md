@@ -99,8 +99,17 @@ first code: a working core and a first UI scaffold wired to it.
   `Forge::stack`/`stack_numbered`/`stacks` against GitHub's native stack,
   `pr::open_stack` and the `--stack <stack-number>` argument. See
   "Stacked pull requests, the core half".
-  The only visible effect is an ordinary comparison spanning the stack -
-  the epic ships as four pull requests and the UI starts with the second.
+  The second pull request (branch `feat/stack-button`) puts the stack in
+  the window: `PerReview` carries the resolved `Stack`, and a stack
+  review's title bar shows the stack button in the pull-request button's
+  place - `#<stack> · <size>`, its menu listing the members latest first
+  in the pull-request picker's row look - and a member opened from that
+  menu keeps both buttons, the member's own and the stack's. Hopping to a
+  member reaches the forge for nothing: the stack read already answered
+  the member's pull request and its standing (`pr::open_member`). See
+  "The stack button".
+  Still to come: the commit picker's member groups, per-member
+  publishing and the palette's stack list.
 
 ## Verification status
 
@@ -168,6 +177,8 @@ Be exact about this when you report further work.
 | Symbol navigation in the window: Cmd-hover link styling and cursor, Cmd-click landing inside the diff with the focus mark, the origin card for a name from another crate, "Copy symbol" in the context menu, the tie dialog, a definition entry (excerpt rows, header note and x, panel row), Cmd+[ back from each, chained jumps inside an entry | Compiled, clippy-clean. The window was started once against this repository and loaded with the views built; **no gesture was exercised** - synthetic mouse events do not reach the handlers (see the orphan row above) |
 | Moved-code folds surviving the earlier-comments toggle (`sync_diff_files` puts them back after `set_files`; before, the toggle dropped them whenever orphan entries existed) | Compiled; not seen on screen |
 | Stack detection and `--stack`: the GraphQL selection, the entry order, paging, the null-stack answer, the stack-number lookup, the three refusals, `open_stack`'s endpoints and the batched fetch | Run read-only against real GitHub on 2026-11-24: `gh api repos/cli/cli/stacks/15082` returns all twelve members base-end first, unpaged, and 404s for an unknown number; `--stack 15082` resolved that stack through REST and then GraphQL in an empty repository whose only remote is `cli/cli`, and named its latest member's missing head commit; `--stack 15073`, a member's number, was refused there with "it belongs to stack 15082 - try `--stack 15082`"; `--stack 1` in this repository reported a pull request in no stack; `--stack 999999` reported neither. The rest is covered by `FakeGh` and throwaway-repository tests. The window was not run with `--stack`; a second entry page was only ever driven through the fake; `stacks()` has never met a repository that has a stack |
+| The stack button and its menu: the button in the pull-request button's place, the `#<stack> · <size>` label, the heading, the reopen row, the member rows in the picker's look, the two buttons of a member review, and the reload's member refresh | Compiled, clippy-clean; the three button states, the row-picking and the refresh's "repaint, never re-resolve" rule are unit-tested in `app/stack.rs`. The GraphQL selection was run against a real stack (this repository's stack 25) and returns both members with their positions, titles, draft flags and check state. **Seen on screen** on 2026-11-25: the window opened on `--stack 25` and the owner reported it looked right at first sight. Not separately confirmed, each needing a deliberate try: the member hop, the two buttons of a member review, the tick on the member in view, the reopen row, and the staleness word, which needs a member to move on the forge mid-session. The title bar's right-hand cluster was still never measured with two buttons in it at the 900 px minimum width; the cluster is not `flex_none`, so what gives way under pressure is unverified |
+| The member hop reaching no forge | The core half is tested against a throwaway stack: `hopping_to_a_member_opens_on_the_held_pull_request_alone` asserts the recording forge was not called at all, `a_member_picked_by_number_still_resolves_through_the_forge` that the palette's way in still is a lookup and answers the same comparison, and `a_member_whose_commits_are_missing_falls_back_to_the_fetching_open` that a missing head falls through to the resolve and its fetch. `app/stack.rs` and `app/pull.rs` unit-test the held pull request and the seeded standing. **The hop itself was not seen on screen**: clicking a menu item cannot be driven here. What a hop used to pay was measured on this repository on 2026-11-25 - `gh pr view` 0.6 to 2.0 s, the status read 0.7 s, the stack read 0.5 s REST plus its GraphQL half - against 10 to 20 ms for the local git calls it replaced |
 
 ## Build, run, test
 
@@ -206,8 +217,8 @@ member's base, resolved by the same rules. The number is the stack's own
 and nothing else - a pull request's number or URL goes to `--pr` - and a
 number that is a pull request is refused with the number of the stack it
 belongs to, so the refusal names what would have worked. The window is
-connected to the latest member, and carries nothing else of the stack
-yet.
+connected to the latest member, and the window shows the stack button in
+the pull-request button's place (see "The stack button").
 `diffie --prompt [<review>]` opens no window: it prints the open review
 comments the way "Copy all as prompt" does (no name works only for a sole
 review, several are listed and refused; `--all` includes resolved ones,
@@ -448,6 +459,16 @@ is that shared rule, and `fetch_missing` takes every pull request whose
 head must be here, so a stack's fetch is one `git fetch` carrying every
 member's `refs/pull/<n>/head` plus the first member's base branch.
 
+`pr::open_member` is the way in for a caller that already holds the pull
+request - the stack menu, whose members came out of the stack read. It
+reaches no forge: `held`, the private half `open` was split into, pins
+both ends by the one `endpoints` rule, so a held open and a resolved one
+cannot drift apart. The forge is still behind it for the case the held
+answer cannot cover, a member whose commits are not here, and then it is
+`open` with its fetch; the pull request's own URL goes into the
+`PrArgument`, so the fallback pins host and repository as the stack read
+did.
+
 `not_a_stack` keeps a refusal from being a dead end: it runs only when
 the lookup failed, reads the pull request of that number, and words one
 of three answers - a pull request in a stack names both and offers
@@ -463,9 +484,78 @@ as `--pr` does. It hands the window the latest member as its `Pull`, so
 the pull-request button, its status and its menu keep working; `app.rs`
 is untouched and `PerReview` carries no stack yet.
 
-Still missing for the feature: everything in the UI - the stack button,
-the picker's member groups, the palette's stack list and per-member
-publishing.
+`Stack` holds `StackMember`s, each carrying the `PullRequest` the review
+resolves on and the `PrSummary` a row is drawn from. One shape, because
+the two must not drift apart: the stack menu shows titles, authors, ages
+and check verdicts that no `PullRequest` carries, and a second read per
+member would cost a call each. `STACK` selects both halves at once, so a
+stack still resolves in one query.
+
+Still missing for the feature: the picker's member groups, the palette's
+stack list and per-member publishing.
+
+### The stack button
+
+`app/stack.rs` holds the title-bar button of a `--stack` review, its menu
+and the member refresh; `PerReview` carries `stack: Option<Stack>`, the
+stack as it was resolved when the review opened.
+
+While the whole stack is in view the button stands **in the pull-request
+button's place and replaces it** (owner, 2026-11-25; design document
+section 21): one button there, so `#N` cannot be ambiguous between a
+member and the stack. The label is `#<stack> · <size>`, the member count
+alone without a stack number, and a stack of one shows it reading 1 -
+hiding it would make `--stack` look like it did nothing. The title bar is
+untouched and reads the branch pair as for any review.
+
+A member opened from the stack carries **both** buttons: its own
+pull-request button, publishing and approving as in any `--pr` review,
+then the stack button as the way back. `Stacked { stack, member }` is
+what the window keeps, so which part of the stack is in view is recorded
+rather than inferred - the stack review's `pull` is the latest member, so
+opening that very member would otherwise read as the stack itself.
+`stack::title_buttons` turns that into the three states (stack alone,
+both, pull request alone) and is unit-tested. A pull request picked from
+the palette carries no stack, also from inside a stack review:
+`open_pull` takes the stack to carry as an argument, and only the menu's
+member rows pass one.
+
+The menu heads with the stack and the branch it lands on, then the row
+that resolves the whole stack by its number again - also the way a
+changed membership is taken on - then the members, latest first, with the
+one in view ticked. The rows come from `pr_picker::pull_row`, extracted
+so the picker and the menu draw the same row; `pull_item` itself could
+not be reused, because it builds the `Command`'s `CommandItem` while a
+menu takes a `PopupMenuItem`.
+
+**A member hop costs no forge call.** The menu's member rows hand
+`open_pull` an `Opening` that already carries the member's
+`PullRequest` out of the stack read, and `pr::open_member` builds the
+comparison from it: no `gh pr view`, no second stack read, and no fetch,
+since the stack's one fetch already carried every member's refspec. Only
+the local git the new comparison needs is left. The member's state and
+checks are seeded from the same read (`Stacked::member_standing`,
+`pull::Standing::Seeded`) so the status rows are right immediately,
+while the review row stays unread - the stack read carries no decision,
+and `Standing` is two cases rather than one value exactly so a seed
+cannot pass for an answer. `reload` skips the stack read once, on the
+load the review opens with (`PerReview::stack_read_fresh`); Cmd/Ctrl+R
+and a scope change read it as before. A member whose commits are not in
+the repository falls back to `pr::open` and its fetch - a stack resolved
+by the command line never fetched. An `Opening` from the palette holds
+nothing and resolves through the forge as it always did.
+
+`refresh_stack_status` runs with every reload beside
+`refresh_pull_status`, in the same single-slot task, and asks
+`Forge::stack_numbered` once. **Its answer only repaints**: each member's
+state, draft flag and checks. The resolved membership and the
+comparison's pinned ends never move, because re-resolving mid-review
+would change which commits are under the reviewer's eye and silently
+void a Custom selection (owner, 2026-11-25). A membership that has moved
+on puts the word "changed" on the button in the waiting tone and a line
+in the menu; taking the new shape needs the explicit reopen. A failed
+refresh keeps the older answer and adds a "Not refreshed" line, as the
+pull request's status does.
 
 ### Pull requests and the forge
 

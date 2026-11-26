@@ -9,9 +9,37 @@
 use std::cell::Cell;
 
 use super::pull::{Tone, state_icon};
+use super::stack::Stacked;
 use super::*;
-use diffie_core::pr::{self, CheckState, FetchMode, PrArgument, PrList, PrState, PrSummary};
+use diffie_core::pr::{
+    self, CheckState, FetchMode, PrArgument, PrList, PrState, PrSummary, PullRequest,
+};
 use gpui_kit::component::command::{Command, CommandItem};
+
+/// What an open starts from: the pull request's number, the stack it is
+/// being opened as a member of, and the pull request itself when the
+/// caller already holds it. Held, the open costs no forge call; without
+/// it the forge is asked, which is all the palette's picker can do.
+pub(super) struct Opening {
+    pub(super) number: u64,
+    /// The stack the pull request is a member of, and only then: a pull
+    /// request picked from the palette belongs to no stack, whichever
+    /// review it was picked from.
+    pub(super) stack: Option<Stacked>,
+    /// The pull request as a stack read answered it.
+    pub(super) held: Option<PullRequest>,
+}
+
+impl Opening {
+    /// A number and nothing else, as the palette's picker hands one over.
+    pub(super) fn numbered(number: u64) -> Self {
+        Self {
+            number,
+            stack: None,
+            held: None,
+        }
+    }
+}
 
 /// What the picker shows. Both lists refetch on every open: the point of
 /// the picker is the repository's present, not a cache of its past.
@@ -64,45 +92,55 @@ fn pull_item(summary: &PrSummary, now: i64) -> (CommandItem, PickerRow) {
         summary.author.clone(),
     ]);
     let summary = summary.clone();
-    let item = item.child(move |_, cx| {
-        let muted = cx.theme().muted_foreground;
-        let state_tone = match (summary.state, summary.draft) {
-            (PrState::Open, false) => Tone::Good,
-            (PrState::Open, true) => Tone::Quiet,
-            (PrState::Merged, _) => Tone::Settled,
-            (PrState::Closed, _) => Tone::Bad,
-        };
-        let mut title = h_flex()
-            .gap_2()
-            .min_w_0()
-            .items_center()
-            .child(
-                div()
-                    .text_color(state_tone.color(cx))
-                    .child(Icon::new(state_icon(summary.state)).xsmall()),
-            )
-            .child(div().truncate().child(summary.title.clone()));
-        if summary.draft {
-            title = title.child(div().text_size(px(10.)).text_color(muted).child("Draft"));
-        }
-        let mut meta = h_flex()
-            .gap_1()
-            .text_size(px(11.))
-            .text_color(muted)
-            .child(format!("#{}", summary.number))
-            .child(Icon::new(Lucide::CircleUserRound).xsmall())
-            .child(div().truncate().child(summary.author.clone()))
-            .child(format!("· {}", ago(summary.updated, now)));
-        if let Some(checks) = summary.checks {
-            let (words, tone) = checks_words(checks);
-            meta = meta.child(div().text_color(tone.color(cx)).child(format!("· {words}")));
-        }
-        v_flex().min_w_0().flex_1().child(title).child(meta)
-    });
+    let item = item.child(move |_, cx| pull_row(&summary, now, cx));
     (item, row)
 }
 
-fn checks_words(checks: CheckState) -> (&'static str, Tone) {
+/// One pull request as two lines. Shared, because the stack menu lists
+/// its members in exactly this look, and a member must read the same
+/// wherever it is listed.
+pub(super) fn pull_row(summary: &PrSummary, now: i64, cx: &App) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let state_tone = match (summary.state, summary.draft) {
+        (PrState::Open, false) => Tone::Good,
+        (PrState::Open, true) => Tone::Quiet,
+        (PrState::Merged, _) => Tone::Settled,
+        (PrState::Closed, _) => Tone::Bad,
+    };
+    let mut title = h_flex()
+        .gap_2()
+        .min_w_0()
+        .items_center()
+        .child(
+            div()
+                .text_color(state_tone.color(cx))
+                .child(Icon::new(state_icon(summary.state)).xsmall()),
+        )
+        .child(div().truncate().child(summary.title.clone()));
+    if summary.draft {
+        title = title.child(div().text_size(px(10.)).text_color(muted).child("Draft"));
+    }
+    let mut meta = h_flex()
+        .gap_1()
+        .text_size(px(11.))
+        .text_color(muted)
+        .child(format!("#{}", summary.number))
+        .child(Icon::new(Lucide::CircleUserRound).xsmall())
+        .child(div().truncate().child(summary.author.clone()))
+        .child(format!("· {}", ago(summary.updated, now)));
+    if let Some(checks) = summary.checks {
+        let (words, tone) = checks_words(checks);
+        meta = meta.child(div().text_color(tone.color(cx)).child(format!("· {words}")));
+    }
+    v_flex()
+        .min_w_0()
+        .flex_1()
+        .child(title)
+        .child(meta)
+        .into_any_element()
+}
+
+pub(super) fn checks_words(checks: CheckState) -> (&'static str, Tone) {
     match checks {
         CheckState::Passing => ("checks passing", Tone::Good),
         CheckState::Running => ("checks running", Tone::Waiting),
@@ -159,7 +197,7 @@ fn entries(rows: &PrRows, now: i64) -> (Vec<CommandItem>, Vec<PickerRow>) {
     (items, actions)
 }
 
-fn now_unix() -> i64 {
+pub(super) fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs() as i64)
@@ -216,7 +254,11 @@ impl ReviewApp {
                                         let number = *number;
                                         window.close_dialog(cx);
                                         let _ = owner.update(cx, |this, cx| {
-                                            this.open_pull(number, window, cx);
+                                            // The palette's pick is a
+                                            // pull request and nothing
+                                            // more, also in a stack
+                                            // review.
+                                            this.open_pull(Opening::numbered(number), window, cx);
                                         });
                                     }
                                     // The dialog stays up; the rows grow in
@@ -263,9 +305,21 @@ impl ReviewApp {
     }
 
     /// Opens the picked pull request in this window, as `--pr` would have:
-    /// resolve, fetch what is missing, then swap the review over. On
-    /// failure the current review stays and the status line says why.
-    pub(super) fn open_pull(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+    /// resolve, fetch what is missing, then swap the review over. A
+    /// member of the stack in view skips the resolve, which would only
+    /// answer what [`Opening::held`] already carries. On failure the
+    /// current review stays and the status line says why.
+    pub(super) fn open_pull(
+        &mut self,
+        opening: Opening,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Opening {
+            number,
+            stack,
+            held,
+        } = opening;
         if self.publishing {
             // The palette entry is greyed while publishing, but the picker
             // may already be up when a publish starts; the pick must not
@@ -291,8 +345,13 @@ impl ReviewApp {
         self._open_pull = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let argument = PrArgument { number, url: None };
-                    pr::open(&*backend, &*forge, &argument, mode, FetchMode::OnDemand)
+                    match held {
+                        Some(pull) => pr::open_member(&*backend, &*forge, &pull, mode),
+                        None => {
+                            let argument = PrArgument { number, url: None };
+                            pr::open(&*backend, &*forge, &argument, mode, FetchMode::OnDemand)
+                        }
+                    }
                 })
                 .await;
             let _ = this.update(cx, |this, cx| match result {
@@ -301,7 +360,10 @@ impl ReviewApp {
                         forge: this.forge.clone(),
                         request,
                     };
-                    this.adopt(comparison, Some(pull), cx);
+                    // The member's own review, with the stack it came
+                    // from when it came from one: its menu is the way
+                    // back out.
+                    this.adopt(comparison, Some(pull), stack, cx);
                 }
                 Err(message) => {
                     this.loading = false;
@@ -318,7 +380,13 @@ impl ReviewApp {
     /// settings, the theme and the palette stay; the picker and search
     /// inputs are cleared by `open_pull`, which has the window this async
     /// completion lacks.
-    fn adopt(&mut self, comparison: Comparison, pull: Option<Pull>, cx: &mut Context<Self>) {
+    pub(super) fn adopt(
+        &mut self,
+        comparison: Comparison,
+        pull: Option<Pull>,
+        stack: Option<Stacked>,
+        cx: &mut Context<Self>,
+    ) {
         // A pending save still writes the old review file before the
         // review is replaced: directly when no save runs (the task
         // captures file and path at call time), else parked for the save
@@ -337,7 +405,7 @@ impl ReviewApp {
         }
         // The whole per-review value at once: the compiler keeps the swap
         // complete, a field-by-field reset could silently miss one.
-        self.review = PerReview::fresh(comparison, pull);
+        self.review = PerReview::fresh(comparison, pull, stack);
         self.reload(cx);
     }
 }
